@@ -2123,16 +2123,14 @@ def _latest_recorded_date() -> datetime.date:
 
 
 # ─── API helpers ──────────────────────────────────────────────────────────────
-API_ENDPOINT = "https://api.api-tennis.com/tennis/"
-API_KEY = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
-
 def fetch_api_matches(day: datetime.date) -> list[dict]:
-    """Return a list of match dictionaries for *day* via external API."""
-    url = f"{API_ENDPOINT}?date={day.isoformat()}"
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    return resp.json() or []
-
+    """Finished fixtures for given day."""
+    return api_call(
+        "get_fixtures",
+        date_start=day.isoformat(),
+        date_stop=day.isoformat(),
+        timezone="UTC",
+    )
 
 def build_charting_url(api_row: dict) -> str:
     """
@@ -2821,38 +2819,6 @@ def normalize_name_canonical(name):
     name = name.replace('.', '').replace("'", '').replace('-', ' ')
     return ' '.join(name.lower().split())
 
-def extract_jeff_features(player_canonical, gender, jeff_data):
-    """Extract actual features from Jeff Sackmann data"""
-    gender_key = 'men' if gender == 'M' else 'women'
-
-    if gender_key not in jeff_data or player_canonical not in jeff_data[gender_key]:
-        return {
-            'serve_pts': 60,
-            'first_won': 0,
-            'second_won': 0,
-            'return_pts_won': 20
-        }
-
-    player_data = jeff_data[gender_key][player_canonical]
-
-    first_in = player_data.get('1stIn', 0)
-    first_won = player_data.get('1stWon', 0)
-    second_won = player_data.get('2ndWon', 0)
-    double_faults = player_data.get('df', 0)
-
-    total_serve_pts = first_in + double_faults + (first_won - first_in) if first_won >= first_in else first_in + second_won + double_faults
-
-    break_points_saved = player_data.get('bpSaved', 0)
-    break_points_faced = player_data.get('bpFaced', 0)
-    return_pts_won = break_points_faced - break_points_saved
-
-    return {
-        'serve_pts': max(1, total_serve_pts),
-        'first_won': first_won,
-        'second_won': second_won,
-        'return_pts_won': max(0, return_pts_won)
-    }
-
 class BayesianTennisModel:
     def __init__(self):
         self.simulation_count = 10000
@@ -3266,89 +3232,14 @@ def check_recent_retirements(self, player_canonical, reference_date):
     # Implementation depends on your data structure for retirement flags
     return 0
 #%%
-## LAYER 3 ##
-def simulate_match(self, player1_priors, player2_priors, best_of=3, tiebreak_sets=[1,2,3]):
-    """Layer 3: Monte Carlo match simulation with Bayesian priors"""
-
-    wins = 0
-    simulations = self.simulation_count
-
-    for _ in range(simulations):
-        sets_won = [0, 0]  # [player1, player2]
-
-        while max(sets_won) < (best_of + 1) // 2:
-            set_winner = self.simulate_set(
-                player1_priors,
-                player2_priors,
-                tiebreak=len([s for s in sets_won if s > 0]) + 1 in tiebreak_sets
-            )
-            sets_won[set_winner] += 1
-
-        if sets_won[0] > sets_won[1]:
-            wins += 1
-
-    return wins / simulations
-
-def simulate_set(self, p1_priors, p2_priors, tiebreak=True):
-    """Simulate single set with service alternation"""
-    games = [0, 0]
-    server = 0  # 0 = player1 serves first
-
-    while True:
-        # Determine game winner based on server
-        if server == 0:
-            hold_prob = p1_priors['hold_prob']
-            game_winner = 0 if np.random.random() < hold_prob else 1
-        else:
-            hold_prob = p2_priors['hold_prob']
-            game_winner = 1 if np.random.random() < hold_prob else 0
-
-        games[game_winner] += 1
-        server = 1 - server  # Alternate serve
-
-        # Check set completion
-        if games[0] >= 6 and games[0] - games[1] >= 2:
-            return 0
-        elif games[1] >= 6 and games[1] - games[0] >= 2:
-            return 1
-        elif games[0] == 6 and games[1] == 6 and tiebreak:
-            return self.simulate_tiebreak(p1_priors, p2_priors)
-
-def simulate_tiebreak(self, p1_priors, p2_priors):
-    """Simulate tiebreak with point-by-point serve alternation"""
-    points = [0, 0]
-    server = 0
-    serve_count = 0
-
-    while True:
-        # Determine point winner
-        if server == 0:
-            hold_prob = p1_priors['hold_prob']
-            point_winner = 0 if np.random.random() < hold_prob else 1
-        else:
-            hold_prob = p2_priors['hold_prob']
-            point_winner = 1 if np.random.random() < hold_prob else 0
-
-        points[point_winner] += 1
-        serve_count += 1
-
-        # Alternate server every 2 points (except first point)
-        if serve_count == 1 or serve_count % 2 == 0:
-            server = 1 - server
-
-        # Check tiebreak completion
-        if points[0] >= 7 and points[0] - points[1] >= 2:
-            return 0
-        elif points[1] >= 7 and points[1] - points[0] >= 2:
-            return 1
-#%%
 # Tomorrow's slate
 from datetime import date, timedelta
 import numpy as np
 #%%
+
+#%%
 import hashlib
 from bs4 import BeautifulSoup
-#%%
 # ============================================================================
 # TENNIS DATA PIPELINE
 # ============================================================================
@@ -3364,18 +3255,12 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 import re
 from unidecode import unidecode
-import time
 
 # ============================================================================
 # API CONFIGURATION AND CORE FUNCTIONS
 # ============================================================================
 
 # API-Tennis configuration
-API_KEY = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
-BASE = "https://api.api-tennis.com/tennis/"
-CACHE_API = Path.home() / ".api_tennis_cache"
-CACHE_API.mkdir(exist_ok=True)
-
 def api_call(method: str, **params):
     """Unified API call function with proper error handling"""
     try:
@@ -5469,10 +5354,7 @@ def _latest_recorded_date() -> datetime.date:
     )
 
 
-# ─── API helpers ──────────────────────────────────────────────────────────────
-API_ENDPOINT = "https://api.api-tennis.com/tennis/"
-API_KEY = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
-
+# ─── API helpers ─────────────────────────────────────────────────────────────
 def fetch_api_matches(day: datetime.date) -> list[dict]:
     """Return a list of match dictionaries for *day* via external API."""
     url = f"{API_ENDPOINT}?date={day.isoformat()}"
@@ -6483,211 +6365,211 @@ class BayesianTennisModel:
 
         return correct / total if total > 0 else 0
 
-def convert_to_canonical(name):
-    return normalize_name_canonical(name)
+    def convert_to_canonical(name):
+        return normalize_name_canonical(name)
 
-model = BayesianTennisModel()
-#%%
-## LAYER 2 ##
-def apply_contextual_adjustments(self, priors, player_canonical, opponent_canonical, match_context):
-    """Layer 2: Contextual Bayesian adjustments for fatigue, injury, motivation"""
+    model = BayesianTennisModel()
+    #%%
+    ## LAYER 2 ##
+    def apply_contextual_adjustments(self, priors, player_canonical, opponent_canonical, match_context):
+        """Layer 2: Contextual Bayesian adjustments for fatigue, injury, motivation"""
 
-    adjusted_priors = priors.copy()
+        adjusted_priors = priors.copy()
 
-    # Fatigue Index
-    fatigue_penalty = self.calculate_fatigue_index(player_canonical, match_context['reference_date'])
-    adjusted_priors['hold_prob'] *= (1 - fatigue_penalty * 0.15)  # Max 15% hold penalty
-    adjusted_priors['elo_std'] *= (1 + fatigue_penalty * 0.3)    # Increase uncertainty
+        # Fatigue Index
+        fatigue_penalty = self.calculate_fatigue_index(player_canonical, match_context['reference_date'])
+        adjusted_priors['hold_prob'] *= (1 - fatigue_penalty * 0.15)  # Max 15% hold penalty
+        adjusted_priors['elo_std'] *= (1 + fatigue_penalty * 0.3)    # Increase uncertainty
 
-    # Injury Flag Adjustment
-    injury_factor = self.get_injury_factor(player_canonical, match_context['reference_date'])
-    adjusted_priors['hold_prob'] *= injury_factor
-    adjusted_priors['break_prob'] *= (2 - injury_factor)  # Inverse relationship
+        # Injury Flag Adjustment
+        injury_factor = self.get_injury_factor(player_canonical, match_context['reference_date'])
+        adjusted_priors['hold_prob'] *= injury_factor
+        adjusted_priors['break_prob'] *= (2 - injury_factor)  # Inverse relationship
 
-    # Form Spike Sustainability
-    form_sustainability = self.calculate_form_sustainability(player_canonical, match_context)
-    if adjusted_priors['form_factor'] > 1.2:  # Hot streak detection
-        sustainability_discount = 1 - ((adjusted_priors['form_factor'] - 1) * (1 - form_sustainability))
-        adjusted_priors['hold_prob'] *= sustainability_discount
-        adjusted_priors['elo_mean'] *= sustainability_discount
+        # Form Spike Sustainability
+        form_sustainability = self.calculate_form_sustainability(player_canonical, match_context)
+        if adjusted_priors['form_factor'] > 1.2:  # Hot streak detection
+            sustainability_discount = 1 - ((adjusted_priors['form_factor'] - 1) * (1 - form_sustainability))
+            adjusted_priors['hold_prob'] *= sustainability_discount
+            adjusted_priors['elo_mean'] *= sustainability_discount
 
-    # Opponent Quality Weighting
-    opponent_elo = self.estimate_opponent_elo(opponent_canonical, match_context)
-    elo_diff = adjusted_priors['elo_mean'] - opponent_elo
-    quality_adjustment = 1 / (1 + np.exp(-elo_diff / 200))  # Sigmoid scaling
-    adjusted_priors['break_prob'] *= quality_adjustment
+        # Opponent Quality Weighting
+        opponent_elo = self.estimate_opponent_elo(opponent_canonical, match_context)
+        elo_diff = adjusted_priors['elo_mean'] - opponent_elo
+        quality_adjustment = 1 / (1 + np.exp(-elo_diff / 200))  # Sigmoid scaling
+        adjusted_priors['break_prob'] *= quality_adjustment
 
-    return adjusted_priors
+        return adjusted_priors
 
-def calculate_fatigue_index(self, player_canonical, reference_date):
-    """Fatigue based on recent match load and recovery time"""
-    recent_matches = self.get_recent_matches(player_canonical, reference_date, days=14)
+    def calculate_fatigue_index(self, player_canonical, reference_date):
+        """Fatigue based on recent match load and recovery time"""
+        recent_matches = self.get_recent_matches(player_canonical, reference_date, days=14)
 
-    if len(recent_matches) == 0:
-        return 0.0
+        if len(recent_matches) == 0:
+            return 0.0
 
-    # Calculate cumulative fatigue
-    fatigue_score = 0
-    for _, match in recent_matches.iterrows():
-        days_ago = (pd.to_datetime(reference_date) - pd.to_datetime(match['Date'])).days
-        match_duration = match.get('minutes', 120)  # Default 2 hours
+        # Calculate cumulative fatigue
+        fatigue_score = 0
+        for _, match in recent_matches.iterrows():
+            days_ago = (pd.to_datetime(reference_date) - pd.to_datetime(match['Date'])).days
+            match_duration = match.get('minutes', 120)  # Default 2 hours
 
-        # Exponential decay with match duration weighting
-        fatigue_contribution = (match_duration / 60) * np.exp(-0.1 * days_ago)
-        fatigue_score += fatigue_contribution
+            # Exponential decay with match duration weighting
+            fatigue_contribution = (match_duration / 60) * np.exp(-0.1 * days_ago)
+            fatigue_score += fatigue_contribution
 
-    return min(1.0, fatigue_score / 10)  # Normalize to 0-1
+        return min(1.0, fatigue_score / 10)  # Normalize to 0-1
 
-def get_injury_factor(self, player_canonical, reference_date):
-    """Player-specific injury fragility scoring"""
-    # Injury memory bank - replace with actual injury tracking
-    injury_prone_players = {
-        'nadal_r': 0.85,
-        'murray_a': 0.80,
-        'thiem_d': 0.75,
-        'badosa_p': 0.70
-    }
+    def get_injury_factor(self, player_canonical, reference_date):
+        """Player-specific injury fragility scoring"""
+        # Injury memory bank - replace with actual injury tracking
+        injury_prone_players = {
+            'nadal_r': 0.85,
+            'murray_a': 0.80,
+            'thiem_d': 0.75,
+            'badosa_p': 0.70
+        }
 
-    base_factor = injury_prone_players.get(player_canonical, 0.95)
+        base_factor = injury_prone_players.get(player_canonical, 0.95)
 
-    # Check for recent retirement/walkover flags
-    recent_retirements = self.check_recent_retirements(player_canonical, reference_date)
-    if recent_retirements > 0:
-        base_factor *= (0.8 ** recent_retirements)
+        # Check for recent retirement/walkover flags
+        recent_retirements = self.check_recent_retirements(player_canonical, reference_date)
+        if recent_retirements > 0:
+            base_factor *= (0.8 ** recent_retirements)
 
-    return max(0.5, base_factor)
+        return max(0.5, base_factor)
 
-def calculate_form_sustainability(self, player_canonical, match_context):
-    """Form spike sustainability based on opponent quality and win quality"""
-    recent_matches = self.get_recent_matches(player_canonical, match_context['reference_date'], days=21)
+    def calculate_form_sustainability(self, player_canonical, match_context):
+        """Form spike sustainability based on opponent quality and win quality"""
+        recent_matches = self.get_recent_matches(player_canonical, match_context['reference_date'], days=21)
 
-    if len(recent_matches) < 3:
-        return 0.5
+        if len(recent_matches) < 3:
+            return 0.5
 
-    # Quality-weighted recent performance
-    quality_scores = []
-    for _, match in recent_matches.iterrows():
-        opponent_rank = match['LRank'] if match['winner_canonical'] == player_canonical else match['WRank']
-        win_quality = 1 / (1 + opponent_rank / 100) if pd.notna(opponent_rank) else 0.5
-        quality_scores.append(win_quality)
+        # Quality-weighted recent performance
+        quality_scores = []
+        for _, match in recent_matches.iterrows():
+            opponent_rank = match['LRank'] if match['winner_canonical'] == player_canonical else match['WRank']
+            win_quality = 1 / (1 + opponent_rank / 100) if pd.notna(opponent_rank) else 0.5
+            quality_scores.append(win_quality)
 
-    avg_opponent_quality = np.mean(quality_scores)
-    consistency = 1 - np.std(quality_scores)
+        avg_opponent_quality = np.mean(quality_scores)
+        consistency = 1 - np.std(quality_scores)
 
-    return min(1.0, avg_opponent_quality * consistency)
+        return min(1.0, avg_opponent_quality * consistency)
 
-def estimate_opponent_elo(self, opponent_canonical, match_context):
-    """Quick opponent Elo estimation for quality weighting"""
-    opponent_priors = self.extract_refined_priors(
-        opponent_canonical,
-        match_context['gender'],
-        match_context['surface'],
-        match_context['reference_date']
-    )
-    return opponent_priors['elo_mean']
+    def estimate_opponent_elo(self, opponent_canonical, match_context):
+        """Quick opponent Elo estimation for quality weighting"""
+        opponent_priors = self.extract_refined_priors(
+            opponent_canonical,
+            match_context['gender'],
+            match_context['surface'],
+            match_context['reference_date']
+        )
+        return opponent_priors['elo_mean']
 
-def get_recent_matches(self, player_canonical, reference_date, days=14):
-    try:
-        cutoff_date = pd.to_datetime(reference_date) - pd.Timedelta(days=days)
+    def get_recent_matches(self, player_canonical, reference_date, days=14):
+        try:
+            cutoff_date = pd.to_datetime(reference_date) - pd.Timedelta(days=days)
 
-        player_matches = self.historical_data[
-            ((self.historical_data['winner_canonical'] == player_canonical) |
-             (self.historical_data['loser_canonical'] == player_canonical))
-        ].copy()
+            player_matches = self.historical_data[
+                ((self.historical_data['winner_canonical'] == player_canonical) |
+                 (self.historical_data['loser_canonical'] == player_canonical))
+            ].copy()
 
-        if len(player_matches) == 0:
-            return player_matches
+            if len(player_matches) == 0:
+                return player_matches
 
-        # Force string conversion then datetime to avoid mixed types
-        player_matches['Date'] = pd.to_datetime(player_matches['Date'].astype(str), errors='coerce')
-        player_matches = player_matches.dropna(subset=['Date'])
-        player_matches = player_matches[player_matches['Date'] >= cutoff_date]
+            # Force string conversion then datetime to avoid mixed types
+            player_matches['Date'] = pd.to_datetime(player_matches['Date'].astype(str), errors='coerce')
+            player_matches = player_matches.dropna(subset=['Date'])
+            player_matches = player_matches[player_matches['Date'] >= cutoff_date]
 
-        return player_matches.sort_values('Date')
-    except:
-        # Return empty DataFrame on any error
-        return pd.DataFrame()
+            return player_matches.sort_values('Date')
+        except:
+            # Return empty DataFrame on any error
+            return pd.DataFrame()
 
-def check_recent_retirements(self, player_canonical, reference_date):
-    """Count recent retirements/walkovers - placeholder for actual retirement tracking"""
-    # Implementation depends on your data structure for retirement flags
-    return 0
-#%%
-## LAYER 3 ##
-def simulate_match(self, player1_priors, player2_priors, best_of=3, tiebreak_sets=[1,2,3]):
-    """Layer 3: Monte Carlo match simulation with Bayesian priors"""
+    def check_recent_retirements(self, player_canonical, reference_date):
+        """Count recent retirements/walkovers - placeholder for actual retirement tracking"""
+        # Implementation depends on your data structure for retirement flags
+        return 0
+    #%%
+    ## LAYER 3 ##
+    def simulate_match(self, player1_priors, player2_priors, best_of=3, tiebreak_sets=[1,2,3]):
+        """Layer 3: Monte Carlo match simulation with Bayesian priors"""
 
-    wins = 0
-    simulations = self.simulation_count
+        wins = 0
+        simulations = self.simulation_count
 
-    for _ in range(simulations):
-        sets_won = [0, 0]  # [player1, player2]
+        for _ in range(simulations):
+            sets_won = [0, 0]  # [player1, player2]
 
-        while max(sets_won) < (best_of + 1) // 2:
-            set_winner = self.simulate_set(
-                player1_priors,
-                player2_priors,
-                tiebreak=len([s for s in sets_won if s > 0]) + 1 in tiebreak_sets
-            )
-            sets_won[set_winner] += 1
+            while max(sets_won) < (best_of + 1) // 2:
+                set_winner = self.simulate_set(
+                    player1_priors,
+                    player2_priors,
+                    tiebreak=len([s for s in sets_won if s > 0]) + 1 in tiebreak_sets
+                )
+                sets_won[set_winner] += 1
 
-        if sets_won[0] > sets_won[1]:
-            wins += 1
+            if sets_won[0] > sets_won[1]:
+                wins += 1
 
-    return wins / simulations
+        return wins / simulations
 
-def simulate_set(self, p1_priors, p2_priors, tiebreak=True):
-    """Simulate single set with service alternation"""
-    games = [0, 0]
-    server = 0  # 0 = player1 serves first
+    def simulate_set(self, p1_priors, p2_priors, tiebreak=True):
+        """Simulate single set with service alternation"""
+        games = [0, 0]
+        server = 0  # 0 = player1 serves first
 
-    while True:
-        # Determine game winner based on server
-        if server == 0:
-            hold_prob = p1_priors['hold_prob']
-            game_winner = 0 if np.random.random() < hold_prob else 1
-        else:
-            hold_prob = p2_priors['hold_prob']
-            game_winner = 1 if np.random.random() < hold_prob else 0
+        while True:
+            # Determine game winner based on server
+            if server == 0:
+                hold_prob = p1_priors['hold_prob']
+                game_winner = 0 if np.random.random() < hold_prob else 1
+            else:
+                hold_prob = p2_priors['hold_prob']
+                game_winner = 1 if np.random.random() < hold_prob else 0
 
-        games[game_winner] += 1
-        server = 1 - server  # Alternate serve
+            games[game_winner] += 1
+            server = 1 - server  # Alternate serve
 
-        # Check set completion
-        if games[0] >= 6 and games[0] - games[1] >= 2:
-            return 0
-        elif games[1] >= 6 and games[1] - games[0] >= 2:
-            return 1
-        elif games[0] == 6 and games[1] == 6 and tiebreak:
-            return self.simulate_tiebreak(p1_priors, p2_priors)
+            # Check set completion
+            if games[0] >= 6 and games[0] - games[1] >= 2:
+                return 0
+            elif games[1] >= 6 and games[1] - games[0] >= 2:
+                return 1
+            elif games[0] == 6 and games[1] == 6 and tiebreak:
+                return self.simulate_tiebreak(p1_priors, p2_priors)
 
-def simulate_tiebreak(self, p1_priors, p2_priors):
-    """Simulate tiebreak with point-by-point serve alternation"""
-    points = [0, 0]
-    server = 0
-    serve_count = 0
+    def simulate_tiebreak(self, p1_priors, p2_priors):
+        """Simulate tiebreak with point-by-point serve alternation"""
+        points = [0, 0]
+        server = 0
+        serve_count = 0
 
-    while True:
-        # Determine point winner
-        if server == 0:
-            hold_prob = p1_priors['hold_prob']
-            point_winner = 0 if np.random.random() < hold_prob else 1
-        else:
-            hold_prob = p2_priors['hold_prob']
-            point_winner = 1 if np.random.random() < hold_prob else 0
+        while True:
+            # Determine point winner
+            if server == 0:
+                hold_prob = p1_priors['hold_prob']
+                point_winner = 0 if np.random.random() < hold_prob else 1
+            else:
+                hold_prob = p2_priors['hold_prob']
+                point_winner = 1 if np.random.random() < hold_prob else 0
 
-        points[point_winner] += 1
-        serve_count += 1
+            points[point_winner] += 1
+            serve_count += 1
 
-        # Alternate server every 2 points (except first point)
-        if serve_count == 1 or serve_count % 2 == 0:
-            server = 1 - server
+            # Alternate server every 2 points (except first point)
+            if serve_count == 1 or serve_count % 2 == 0:
+                server = 1 - server
 
-        # Check tiebreak completion
-        if points[0] >= 7 and points[0] - points[1] >= 2:
-            return 0
-        elif points[1] >= 7 and points[1] - points[0] >= 2:
-            return 1
+            # Check tiebreak completion
+            if points[0] >= 7 and points[0] - points[1] >= 2:
+                return 0
+            elif points[1] >= 7 and points[1] - points[0] >= 2:
+                return 1
 #%%
 # Tomorrow's slate
 from datetime import date, timedelta
@@ -6906,225 +6788,6 @@ if __name__ == "__main__" and "--test" in sys.argv:
 
         _quick_check_direction(shot_dir)
         _quick_check_types(shot_type)
-
-    # %%
     print("SCRAPER OK")
 
-
-def get_matches_for_date(target_date):
-    params = {
-        "method": "get_fixtures",
-        "APIkey": API_KEY,
-        "date_start": target_date,
-        "date_stop": target_date
-    }
-    response = requests.get(BASE, params=params)
-    if response.status_code != 200:
-        raise RuntimeError(f"HTTP {response.status_code}")
-
-    # Surface mapping
-    TOURNAMENT_SURFACES = {
-        'ATP Wimbledon': 'Grass',
-        'WTA Wimbledon': 'Grass',
-        'ATP French Open': 'Clay',
-        'WTA French Open': 'Clay',
-        'ATP US Open': 'Hard',
-        'WTA US Open': 'Hard',
-        'ATP Australian Open': 'Hard',
-        'WTA Australian Open': 'Hard'
-    }
-
-    data = response.json()
-    matches = []
-
-    for event in data.get("result", []):
-        matches.append({
-            'event_key': event.get('event_key'),
-            'player1_name': event['event_first_player'],
-            'player2_name': event['event_second_player'],
-            'tournament_name': event.get('tournament_name', 'Unknown'),
-            'tournament_round': event.get('tournament_round', ''),
-            'event_status': event.get('event_status', ''),
-            'event_type_type': event.get('event_type_type', ''),
-            'surface': TOURNAMENT_SURFACES.get(event.get('tournament_name', ''), 'Unknown'),
-            'time': event.get('event_time', ''),
-            'date': event.get('event_date', '')
-        })
-
-    return matches
-
-def get_high_confidence_matches(target_date, min_confidence=0.2):
-    matches = get_matches_for_date(target_date)
-
-    results = []
-    for match in matches:
-        p1_canonical = convert_to_canonical(match['player1_name'])
-        p2_canonical = convert_to_canonical(match['player2_name'])
-
-        p1_priors = model.extract_refined_priors(p1_canonical, 'men', match['surface'], target_date)
-        p2_priors = model.extract_refined_priors(p2_canonical, 'men', match['surface'], target_date)
-
-        p1_win_prob = model.simulate_match(p1_priors, p2_priors)
-        confidence = abs(p1_win_prob - 0.5)
-
-        if confidence >= min_confidence:
-            favorite = match['player1_name'] if p1_win_prob > 0.5 else match['player2_name']
-            win_prob = max(p1_win_prob, 1 - p1_win_prob)
-
-            results.append({
-                'match': f"{match['player1_name']} vs {match['player2_name']}",
-                'favorite': favorite,
-                'probability': win_prob,
-                'confidence': confidence
-            })
-
-    return sorted(results, key=lambda x: x['confidence'], reverse=True)
-
-# Usage
-today = date.today().isoformat()
-tomorrow = (date.today() + timedelta(days=1)).isoformat()
-
-todays_matches = get_matches_for_date(today)
-tomorrows_matches = get_matches_for_date(tomorrow)
-#%%
-# Todays_matches or tomorrows_matches
-todays_matches
-#%%
-# Get top 5 picks
-def get_top_confidence_matches(target_date, top_n=5, min_confidence=0.05):
-    matches = get_matches_for_date(target_date)
-
-    results = []
-    for match in matches:
-        p1_canonical = convert_to_canonical(match['player1_name'])
-        p2_canonical = convert_to_canonical(match['player2_name'])
-
-        p1_priors = model.extract_refined_priors(p1_canonical, 'men', match['surface'], target_date)
-        p2_priors = model.extract_refined_priors(p2_canonical, 'men', match['surface'], target_date)
-
-        p1_win_prob = model.simulate_match(p1_priors, p2_priors)
-        confidence = abs(p1_win_prob - 0.5)
-
-        if confidence >= min_confidence:
-            favorite = match['player1_name'] if p1_win_prob > 0.5 else match['player2_name']
-            win_prob = max(p1_win_prob, 1 - p1_win_prob)
-
-            results.append({
-                'match': f"{match['player1_name']} vs {match['player2_name']}",
-                'favorite': favorite,
-                'probability': win_prob,
-                'confidence': confidence
-            })
-
-    return sorted(results, key=lambda x: x['confidence'], reverse=True)[:top_n]
-
-if __name__ == "__main__":
-    target_date = date.today().isoformat()  # today's matches
-    picks = get_top_confidence_matches(target_date, top_n=5, min_confidence=0.15)
-
-    for i, pick in enumerate(picks, 1):
-        print(f"{i}. {pick['match']}")
-        print(f"   Favorite: {pick['favorite']}")
-        print(f"   Win Prob: {pick['probability']:.2%}")
-        print(f"   Confidence: {pick['confidence']:.5%}\n")
-#%%
-# See picks
-from datetime import date
-
-# get today’s top-5 at 5% confidence
-picks = get_top_confidence_matches(date.today().isoformat(), top_n=5, min_confidence=0.05)
-
-# print them
-for i, pick in enumerate(picks, 1):
-    print(f"{i}. {pick['match']}")
-    print(f"   Favorite: {pick['favorite']}")
-    print(f"   Win Prob: {pick['probability']:.2%}")
-    print(f"   Confidence: {pick['confidence']:.1%}\n")
-#%%
-import pandas as pd
-
-pd.DataFrame(picks)
-#%%
-# Split data chronologically
-split_date = '2023-01-01'
-train_data = historical_data[pd.to_datetime(historical_data['Date']) < split_date]
-test_data = historical_data[pd.to_datetime(historical_data['Date']) >= split_date]
-
-# Initialize model with training data
-model.historical_data = train_data
-
-# Run evaluation
-accuracy = model.evaluate_predictions(test_data.head(100))
-print(f"Enhanced model accuracy: {accuracy:.3f}")
-
-# Compare with baseline
-model_baseline = BayesianTennisModel()
-model_baseline.historical_data = train_data
-baseline_accuracy = model_baseline.evaluate_predictions(test_data.head(100))
-print(f"Baseline accuracy: {baseline_accuracy:.3f}")
-print(f"Improvement: {accuracy - baseline_accuracy:.3f}")
-
-# %%
-# ─── optional scraper smoke-test ─────────────────────────────────────────
-if __name__ == "__main__" and "--test" in sys.argv:
-
-    # TEST - Tennis-Abstract scraper (shot-direction + shot-types)
-
-    from pathlib import Path
-    import json, sys
-
-    scraper = TennisAbstractScraper()
-
-    TEST_URLS = [
-        # Wimbledon 2025 – Sherif v. Andreeva (already validated)
-        "https://www.tennisabstract.com/charting/20250701-W-Wimbledon-R128-Mayar_Sherif-Mirra_Andreeva.html",
-        # add more charting URLs dated > 2025-06-10 as they become available …
-    ]
-
-    def _quick_check_direction(records: list[dict]) -> None:
-        """
-        Sanity‑check for shot‑direction output.
-
-        • summary table: exactly 4 rows per player
-        • outcome table: TA pages now show 8–13 rows per player
-          (12 historical baseline + optional Slice rows or missing rows
-           on incomplete feeds).  Accept any count in that range.
-        """
-        groups: dict[tuple[str, str], list[dict]] = {}
-        for r in records:
-            key = (r["Player_canonical"], r["category_group"])
-            groups.setdefault(key, []).append(r)
-
-        for (player, cat_grp), rows in groups.items():
-            if cat_grp == "direction_summary":
-                if len(rows) != 4:
-                    raise AssertionError(
-                        f"{player} {cat_grp}: {len(rows)} rows (expected 4)"
-                    )
-            elif cat_grp == "direction_outcome":
-                if not (8 <= len(rows) <= 13):
-                    raise AssertionError(
-                        f"{player} {cat_grp}: {len(rows)} rows (expected 8–13)"
-                    )
-
-    def _quick_check_types(records: list[dict]) -> None:
-        """basic presence check – just ensure at least one ‘Total’ row per player"""
-        seen = set()
-        for r in records:
-            if r["category"] == "Total":
-                seen.add(r["Player_canonical"])
-        if not seen:
-            raise AssertionError("no ‘Total’ row found in shot-types output")
-
-    for url in TEST_URLS:
-        print(f"→ {url}", file=sys.stderr)
-
-        shot_dir  = scraper.scrape_shot_direction(url)
-        shot_type = scraper.scrape_shot_types(url)
-
-        _quick_check_direction(shot_dir)
-        _quick_check_types(shot_type)
-
-    # %%
-    print("SCRAPER OK")
 
