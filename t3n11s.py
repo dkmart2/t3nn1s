@@ -1,7 +1,7 @@
 # ============================================================================
 # TENNIS DATA PIPELINE - COMPREHENSIVE TENNIS PREDICTION SYSTEM
 # ============================================================================
-
+#%%
 # ============================================================================
 # 1. IMPORTS AND CONSTANTS
 # ============================================================================
@@ -25,7 +25,7 @@ from pathlib import Path
 from unidecode import unidecode
 from bs4 import BeautifulSoup, FeatureNotFound
 from urllib.parse import urlparse
-
+#%%
 # API Configuration
 API_KEY = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
 BASE = "https://api.api-tennis.com/tennis/"
@@ -40,15 +40,14 @@ DEF_PATH = os.path.join(CACHE_DIR, "weighted_defaults.pkl")
 
 # Data Configuration
 DATA_DIR = "data"
-BASE_CUTOFF_DATE = datetime.date(2025, 6, 10)
+BASE_CUTOFF_DATE = date(2025, 6, 10)
 JEFF_DB_PATH = os.path.join(DATA_DIR, "jeff_tennis_data_until_20250610.parquet")
 INCR_DB_PATH = os.path.join(DATA_DIR, "results_incremental.parquet")
 CHARTING_INDEX_CSV = (
     "https://raw.githubusercontent.com/JeffSackmann/"
     "tennis_charting/master/charting_match_index.csv"
 )
-
-
+#%%
 # ============================================================================
 # 2. DATA INTEGRATION
 # ============================================================================
@@ -960,7 +959,7 @@ def load_from_cache():
     else:
         return None, None, None
 
-
+#%
 # ============================================================================
 # 3. SIMULATION ENGINE
 # ============================================================================
@@ -1490,7 +1489,7 @@ def get_top_confidence_matches(target_date, top_n=5, min_confidence=0.05):
 
     return sorted(results, key=lambda x: x['confidence'], reverse=True)[:top_n]
 
-
+#%%
 # ============================================================================
 # 4. MAIN EXECUTION
 # ============================================================================
