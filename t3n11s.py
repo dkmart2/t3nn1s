@@ -18,8 +18,6 @@ from unidecode import unidecode
         try:
             fixtures = get_fixtures_for_date(day)
             day_urls = charting_urls_for_day(day)
-            # DEBUG ─ how many TA charting pages exist for the day
-            print(f"  {day}: {len(day_urls)} charting URLs")
         except Exception as exc:
             print(f"    charting-index fetch failed {day}: {exc}")
             fixtures = []
@@ -66,51 +64,24 @@ from unidecode import unidecode
                     # ─── Tennis‑Abstract scraping (11 sections) ───────────────
                     ta_url = None
                     ta_stats = {}
-                    # ─── robust Tennis‑Abstract URL match ──────────────────
+                    # robust Tennis‑Abstract URL match
                     def _canon_tag(name: str) -> str:
-                        """Approximate canonical tag used in TA filenames."""
-                        return unidecode(
-                            name.lower()
-                                .replace('-', '_')
-                                .replace(' ', '_')
-                                .replace("'", "")
-                        )
+                        return unidecode(name.lower()
+                                                .replace('-', '_')
+                                                .replace(' ', '_')
+                                                .replace("'", ""))
+                    win_tag = _canon_tag(winner)
+                    los_tag = _canon_tag(loser)
 
-                    win_tag   = _canon_tag(winner)
-                    los_tag   = _canon_tag(loser)
-                    win_lname = win_tag.split('_')[0]
-                    los_lname = los_tag.split('_')[0]
-
-                    # Attempt strict tag‑pair match first, then fall back to last‑name pair
-                    ta_url = None
                     for url in day_urls:
                         fname = os.path.basename(url).lower()
-
-                        # strict: full canonical tags both present (any order)
-                        cond_strict = (
-                            (win_tag in fname and los_tag in fname) or
-                            (los_tag in fname and win_tag in fname)
-                        )
-
-                        # loose: both last names present (avoid same‑name clash)
-                        cond_loose = (
-                            (win_lname != los_lname) and
-                            (
-                                (win_lname in fname and los_lname in fname) or
-                                (los_lname in fname and win_lname in fname)
-                            )
-                        )
-
-                        if cond_strict or cond_loose:
+                        if win_tag in fname and los_tag in fname:
                             ta_url = url
                             break
-
-                    # DEBUG ─ report matching result
-                    if ta_url:
-                        print(f"      TA url matched: {os.path.basename(ta_url)}")
-                    else:
-                        print(f"      No TA url for {winner} vs {loser}")
-
+                        # allow reversed order
+                        if los_tag in fname and win_tag in fname:
+                            ta_url = url
+                            break
                     if ta_url:
                         try:
                             ta_stats = {
@@ -1018,4 +989,9 @@ if "ta_stats_json" in after_cutoff.columns:
         )
 else:
     print("Column 'ta_stats_json' absent – no TA scrape data stored.")
-#%%
+    #%%
+fixtures = get_fixtures_for_date(day)
+day_urls = charting_urls_for_day(day)
+
+# DEBUG
+print(f"{day}: {len(day_urls)} TA URLs")
