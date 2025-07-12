@@ -1,14 +1,512 @@
 import os
+import re
+import io
+import glob
+import json
+import html
+import time
+import pickle
+import shutil
+import functools
+from datetime import datetime, date, timedelta
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup, FeatureNotFound
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from unidecode import unidecode
-<truncated__content/>data) > 0:
-        cutoff_data = historical_data[historical_data["date"] >= start_date]
-        if len(cutoff_data) > 0:
-            for key in cutoff_data["event_key"].dropna():
-                converted_key = safe_int_convert(key)
-                if converted_key is not None:
-                    existing_keys.add(converted_key)
 
-    # initialise Tennis‑Abstract scraper once per run
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+SESSION.mount(
+    "https://",
+    HTTPAdapter(max_retries=Retry(total=5, backoff_factor=0.3, status_forcelist=[502, 503, 504]))
+)
+
+# ─── API‑Tennis configuration ─────────────────────────────────────────────
+API_KEY   = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
+BASE      = "https://api.api-tennis.com/tennis/"
+CACHE_API = Path.home() / ".api_tennis_cache"
+CACHE_API.mkdir(exist_ok=True)
+
+def safe_int_convert(value, default=None):
+    """Safely convert string/float to int, handling decimals and None values"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(str(value)))
+    except (ValueError, TypeError):
+        return default
+
+def api_call(method: str, **params):
+    """Unified API call with retries and basic error handling"""
+    try:
+        resp = SESSION.get(
+            BASE,
+            params={"method": method, "APIkey": API_KEY, **params},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if str(data.get("error", "0")) != "0":
+            return []
+        return data.get("result", [])
+    except Exception as exc:
+        print(f"API call failed for {method}: {exc}")
+        return []
+
+
+# ─── Normalisation helpers ────────────────────────────────────────────
+def normalize_name(name: str) -> str:
+    """Canonical lower‑snake token used across all data sources."""
+    if pd.isna(name) or not str(name).strip():
+        return ""
+    name = unidecode(str(name)).replace(".", "").replace("'", "").lower()
+    parts = name.split()
+    if len(parts) == 1:
+        return parts[0]
+    last, first = parts[-1], parts[0]
+    return f"{last}_{first[0]}"
+
+def normalize_jeff_name(name: str) -> str:
+    """Jeff charting CSVs already drop accents; keep one normaliser for parity."""
+    if pd.isna(name) or not str(name).strip():
+        return ""
+    parts = str(name).lower().split()
+    return f"{parts[-1]}_{parts[0][0]}"
+
+def normalize_tournament_name(name: str) -> str:
+    if pd.isna(name):
+        return ""
+    n = str(name).lower()
+    n = (n.replace("masters cup", "masters")
+           .replace("atp finals", "masters")
+           .replace("wta finals", "masters"))
+    return n.strip().replace(" ", "_")
+
+# ─── Composite‑key helper ─────────────────────────────────────────────
+def build_composite_id(match_date, tourney_slug: str, p1_slug: str, p2_slug: str) -> str:
+    """YYYYMMDD‑tournament‑p1‑p2 (all lower‑snake)"""
+    if pd.isna(match_date):
+        raise ValueError("match_date is NaT")
+    ymd = pd.to_datetime(match_date).strftime("%Y%m%d")
+    return f"{ymd}-{tourney_slug}-{p1_slug}-{p2_slug}"
+
+# ─── Jeff data ingest helpers ─────────────────────────────────────────
+def load_jeff_comprehensive_data() -> dict:
+    """
+    Walk '~/Desktop/data/Jeff 6.14.25/{men,women}' and load every
+    'charting-*' CSV into a nested dict  {sex: {basename: DataFrame}}.
+    Keeps a 'Player_canonical' column for joins.
+    """
+    base = Path.home() / "Desktop" / "data" / "Jeff 6.14.25"
+    sexes = {"men": "m", "women": "w"}
+    out: dict[str, dict[str, pd.DataFrame]] = {"men": {}, "women": {}}
+
+    files = {
+        "matches":           "charting-{s}-matches.csv",
+        "overview":          "charting-{s}-stats-Overview.csv",
+        "serve_basics":      "charting-{s}-stats-ServeBasics.csv",
+        "serve_direction":   "charting-{s}-stats-ServeDirection.csv",
+        "serve_influence":   "charting-{s}-stats-ServeInfluence.csv",
+        "return_outcomes":   "charting-{s}-stats-ReturnOutcomes.csv",
+        "rally":             "charting-{s}-stats-Rally.csv",
+        "net_points":        "charting-{s}-stats-NetPoints.csv",
+        "shot_types":        "charting-{s}-stats-ShotTypes.csv",
+        "shot_direction":    "charting-{s}-stats-ShotDirection.csv",
+        "key_points_serve":  "charting-{s}-stats-KeyPointsServe.csv",
+        "key_points_return": "charting-{s}-stats-KeyPointsReturn.csv",
+    }
+
+    for sex, tag in sexes.items():
+        root = base / sex
+        if not root.exists():
+            continue
+        for key, tmpl in files.items():
+            path = root / tmpl.format(s=tag)
+            if not path.exists():
+                continue
+            df = pd.read_csv(path, low_memory=False)
+            if "player" in df.columns:
+                df["Player_canonical"] = df["player"].apply(normalize_jeff_name)
+            out[sex][key] = df
+    return out
+
+def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
+    """Column‑wise mean across all numeric Jeff stats as fall‑back priors."""
+    out = {"men": {}, "women": {}}
+    for sex in ("men", "women"):
+        sums, cnts = {}, {}
+        for df in jeff_data.get(sex, {}).values():
+            num = df.select_dtypes("number")
+            for col in num.columns:
+                vals = pd.to_numeric(num[col], errors="coerce").dropna()
+                if vals.empty:
+                    continue
+                sums[col] = sums.get(col, 0.0) + vals.sum()
+                cnts[col] = cnts.get(col, 0)   + len(vals)
+        out[sex] = {c: sums[c] / cnts[c] for c in sums}
+    return out
+
+def extract_comprehensive_jeff_features(player_canonical: str, gender: str,
+                                        jeff_data: dict, defaults: dict) -> dict:
+    """Pull last aggregated Overview row if available else fallback to defaults."""
+    sex = "men" if gender == "M" else "women"
+    feats = defaults.get(sex, {}).copy()
+    ov = jeff_data.get(sex, {}).get("overview")
+    if ov is None or "Player_canonical" not in ov.columns:
+        return feats
+    row = ov[(ov["Player_canonical"] == player_canonical) & (ov["set"] == "Total")]
+    if row.empty:
+        return feats
+    r = row.iloc[-1]
+    feats.update({
+        "serve_pts":      float(r.get("serve_pts", feats.get("serve_pts", 80))),
+        "aces":           float(r.get("aces", 0)),
+        "double_faults":  float(r.get("dfs", 0)),
+        "first_serve_pct":float(r.get("first_in", 0)) / max(1, float(r.get("serve_pts", 1))),
+        "first_serve_won":float(r.get("first_won", 0)),
+        "second_serve_won":float(r.get("second_won", 0)),
+        "return_pts_won": float(r.get("return_pts_won", 0)),
+    })
+    return feats
+
+# ─── Tennis‑data loader ───────────────────────────────────────────────
+def load_all_tennis_data() -> pd.DataFrame:
+    base = Path.home() / "Desktop" / "data"
+    rows = []
+    for gender_dir, gcode in (("tennisdata_men", "M"), ("tennisdata_women", "W")):
+        root = base / gender_dir
+        if not root.exists():
+            continue
+        for year in range(2015, 2026):
+            fp = root / f"{year}_{gcode.lower()}.xlsx"
+            if not fp.exists():
+                continue
+            df = pd.read_excel(fp)
+            if "Date" not in df.columns:
+                continue
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df["gender"] = gcode
+            rows.append(df)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+# ─── API helpers reused elsewhere ─────────────────────────────────────
+def get_fixtures_for_date(target_date: date) -> list:
+    return api_call("get_fixtures",
+                    date_start=target_date.isoformat(),
+                    date_stop=target_date.isoformat(),
+                    timezone="UTC")
+
+def extract_embedded_statistics(fixture: dict) -> dict:
+    stats = {}
+    scores = fixture.get("scores", [])
+    if not scores:
+        return stats
+    w_sets = sum(safe_int_convert(s.get("score_first", 0), 0) >
+                 safe_int_convert(s.get("score_second", 0), 0) for s in scores)
+    l_sets = len(scores) - w_sets
+    stats["sets_won_p1"] = w_sets
+    stats["sets_won_p2"] = l_sets
+    stats["total_sets"]  = len(scores)
+    return stats
+
+def get_match_odds(match_key: int, day: date):
+    if day < date(2025, 6, 23):
+        return (None, None)
+    odds = api_call("get_odds", match_key=match_key)
+    if not odds or str(match_key) not in odds:
+        return (None, None)
+    ha = odds[str(match_key)].get("Home/Away", {})
+    home = next(iter(ha.get("Home", {}).values()), None)
+    away = next(iter(ha.get("Away", {}).values()), None)
+    return (float(home) if home else None,
+            float(away) if away else None)
+
+def get_player_rankings(day: date, league="ATP") -> dict:
+    tag = f"{league}_{day.isocalendar()[0]}_{day.isocalendar()[1]:02d}.pkl"
+    cache = CACHE_API / tag
+    if cache.exists():
+        try:
+            return pickle.loads(cache.read_bytes())
+        except Exception:
+            pass
+    raw = api_call("get_standings", event_type=league.upper())
+    ranks = {safe_int_convert(r.get("player_key")): safe_int_convert(r.get("place"))
+             for r in raw if safe_int_convert(r.get("player_key")) is not None}
+    try:
+        cache.write_bytes(pickle.dumps(ranks, 4))
+    except Exception:
+        pass
+    return ranks
+
+def get_h2h_data(p1_key: int, p2_key: int) -> dict:
+    fname = CACHE_API / f"h2h_{p1_key}_{p2_key}.pkl"
+    if fname.exists():
+        return pickle.loads(fname.read_bytes())
+    raw = api_call("get_H2H", first_player_key=p1_key, second_player_key=p2_key)
+    h2h = raw[0].get("H2H", []) if raw else []
+    p1_w = sum(1 for m in h2h if m.get("event_winner") == "First Player")
+    data = {"h2h_matches": len(h2h),
+            "p1_wins": p1_w,
+            "p2_wins": len(h2h) - p1_w,
+            "p1_win_pct": p1_w / len(h2h) if h2h else 0.5}
+    try:
+        fname.write_bytes(pickle.dumps(data, 4))
+    except Exception:
+        pass
+    return data
+
+# static metadata helpers ---------------------------------------------------
+def _load_charting_index():
+    url = ("https://raw.githubusercontent.com/JeffSackmann/"
+           "tennis_charting/master/charting_match_index.csv")
+    csv = SESSION.get(url, timeout=30).content
+    df = pd.read_csv(io.BytesIO(csv))
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    df["full_url"] = "https://www.tennisabstract.com/charting/" + df["url"].str.strip("/")
+    return df[["date", "full_url"]]
+
+_chart_idx = None
+def charting_urls_for_day(day: date) -> list[str]:
+    global _chart_idx
+    if _chart_idx is None:
+        _chart_idx = _load_charting_index()
+    return _chart_idx.loc[_chart_idx["date"] == day, "full_url"].tolist()
+
+
+# TennisAbstractScraper class definition inserted from tennis_updated.py
+class TennisAbstractScraper:
+    def __init__(self):
+        self.session = SESSION
+        self.base_url = "https://www.tennisabstract.com/charting/"
+        self.soup_cache = {}
+
+    def get_soup(self, url):
+        if url in self.soup_cache:
+            return self.soup_cache[url]
+        try:
+            resp = self.session.get(url, timeout=10)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
+            self.soup_cache[url] = soup
+            return soup
+        except Exception as exc:
+            raise RuntimeError(f"Failed to fetch {url}: {exc}")
+
+    def scrape_stats_overview(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            table = soup.find("table", class_="stats-overview")
+            if not table:
+                return stats
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_serve_influence(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="serve_influence")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_serve_breakdown(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="serve_breakdown")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_return_breakdown(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="return_breakdown")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_key_point_outcomes(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="key_points")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_rally_outcomes(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="rally_outcomes")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_net_points(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="net_points")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_shot_types(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="shot_types")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_shot_direction(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="shot_direction")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_serve_statistics_overview(self, url):
+        soup = self.get_soup(url)
+        stats = {}
+        try:
+            div = soup.find("div", id="serve_stats")
+            if not div:
+                return stats
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) == 3:
+                    stat = cells[0].get_text(strip=True)
+                    p1 = cells[1].get_text(strip=True)
+                    p2 = cells[2].get_text(strip=True)
+                    stats[stat] = {"p1": p1, "p2": p2}
+        except Exception:
+            pass
+        return stats
+
+    def scrape_pointlog(self, url):
+        soup = self.get_soup(url)
+        points = []
+        try:
+            div = soup.find("div", id="pointlog")
+            if not div:
+                return points
+            table = div.find("table")
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) >= 3:
+                    point = {
+                        "game": cells[0].get_text(strip=True),
+                        "server": cells[1].get_text(strip=True),
+                        "description": cells[2].get_text(strip=True),
+                    }
+                    points.append(point)
+        except Exception:
+            pass
+        return points
+
+
     scraper = TennisAbstractScraper()
     api_matches = []
     date_range = list(pd.date_range(start_date, date.today()))
@@ -989,7 +1487,7 @@ if "ta_stats_json" in after_cutoff.columns:
         )
 else:
     print("Column 'ta_stats_json' absent – no TA scrape data stored.")
-    #%%
+#%%
 fixtures = get_fixtures_for_date(day)
 day_urls = charting_urls_for_day(day)
 
