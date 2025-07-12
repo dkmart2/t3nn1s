@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 # TENNIS DATA PIPELINE
 # 1. IMPORTS AND CONSTANTS
 # ============================================================================
+
 import numpy as np
 import pandas as pd
 import os
@@ -32,6 +33,49 @@ from unidecode import unidecode
 import time
 from bs4 import BeautifulSoup, FeatureNotFound
 from urllib.parse import urlparse
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API‑Tennis configuration  (moved from tennis_updated.py)
+# ─────────────────────────────────────────────────────────────────────────────
+API_KEY = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
+BASE = "https://api.api-tennis.com/tennis/"
+
+from pathlib import Path
+CACHE_API = Path.home() / ".api_tennis_cache"
+CACHE_API.mkdir(exist_ok=True)
+
+
+def api_call(method: str, **params):
+    """
+    Unified API call helper.
+    Returns an empty list on error or when the API indicates a problem.
+    """
+    import requests
+
+    try:
+        resp = requests.get(
+            BASE,
+            params={"method": method, "APIkey": API_KEY, **params},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if str(data.get("error", "0")) != "0":
+            return []
+        return data.get("result", [])
+    except Exception as exc:
+        print(f"API call failed for {method}: {exc}")
+        return []
+
+
+def safe_int_convert(value, default=None):
+    """Robust int conversion used throughout the pipeline."""
+    if value in (None, ""):
+        return default
+    try:
+        return int(float(str(value)))
+    except (ValueError, TypeError):
+        return default
 
 # ============================================================================
 # API CONFIGURATION AND CORE FUNCTIONS
