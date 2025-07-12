@@ -1,617 +1,6 @@
-# ============================================================================
-# TENNIS DATA PIPELINE - COMPREHENSIVE TENNIS PREDICTION SYSTEM
-# ============================================================================
-#%%
-# ============================================================================
-# 1. IMPORTS AND CONSTANTS
-# ============================================================================
-import numpy as np
-import pandas as pd
 import os
-import requests
-import json
-import pickle
-import shutil
-import time
-import hashlib
-import html
-import re
-import sys
-import functools
-import io
-import collections
-from datetime import datetime, date, timedelta
-from pathlib import Path
 from unidecode import unidecode
-from bs4 import BeautifulSoup, FeatureNotFound
-from urllib.parse import urlparse
-#%%
-# API Configuration
-API_KEY = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
-BASE = "https://api.api-tennis.com/tennis/"
-CACHE_API = Path.home() / ".api_tennis_cache"
-CACHE_API.mkdir(exist_ok=True)
-
-# Cache Configuration
-CACHE_DIR = os.path.expanduser("~/Desktop/data/cache")
-HD_PATH = os.path.join(CACHE_DIR, "historical_data.parquet")
-JEFF_PATH = os.path.join(CACHE_DIR, "jeff_data.pkl")
-DEF_PATH = os.path.join(CACHE_DIR, "weighted_defaults.pkl")
-
-# Data Configuration
-DATA_DIR = "data"
-BASE_CUTOFF_DATE = date(2025, 6, 10)
-JEFF_DB_PATH = os.path.join(DATA_DIR, "jeff_tennis_data_until_20250610.parquet")
-INCR_DB_PATH = os.path.join(DATA_DIR, "results_incremental.parquet")
-CHARTING_INDEX_CSV = (
-    "https://raw.githubusercontent.com/JeffSackmann/"
-    "tennis_charting/master/charting_match_index.csv"
-)
-#%%
-# ============================================================================
-# 2. DATA INTEGRATION
-# ============================================================================
-
-# 2.1 Core API Functions
-def api_call(method: str, **params):
-    """Unified API call function with proper error handling"""
-    try:
-        response = requests.get(BASE, params={"method": method, "APIkey": API_KEY, **params}, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        error_code = str(data.get("error", "0"))
-        if error_code != "0":
-            return []
-
-        return data.get("result", [])
-    except Exception as e:
-        print(f"API call failed for {method}: {e}")
-        return []
-
-
-def safe_int_convert(value, default=None):
-    """Safely convert string/float to int, handling decimals and None values"""
-    if value is None or value == "":
-        return default
-    try:
-        return int(float(str(value)))
-    except (ValueError, TypeError):
-        return default
-
-
-# 2.2 Name Normalization Functions
-def normalize_name(name):
-    """Normalize tennis player names for matching"""
-    if pd.isna(name):
-        return ""
-    name = str(name).replace('.', '').lower()
-    parts = name.split()
-    if len(parts) < 2:
-        return name.replace(' ', '_')
-    if len(parts[-1]) == 1:  # Last part is single letter (first initial)
-        last_name = parts[-2]
-        first_initial = parts[-1]
-    else:  # Handle "First Lastname" format
-        last_name = parts[-1]
-        first_initial = parts[0][0] if parts[0] else ''
-    return f"{last_name}_{first_initial}"
-
-
-def normalize_jeff_name(name):
-    """Normalize Jeff's player names for matching"""
-    if pd.isna(name):
-        return ""
-    name = str(name).lower()
-    parts = name.split()
-    if len(parts) < 2:
-        return name.replace(' ', '_')
-    last_name = parts[-1]
-    first_initial = parts[0][0] if parts[0] else ''
-    return f"{last_name}_{first_initial}"
-
-
-def normalize_name_canonical(name):
-    """Canonical name normalization for simulation"""
-    if pd.isna(name):
-        return ""
-    name = str(name).strip()
-    name = name.replace('.', '').replace("'", '').replace('-', ' ')
-    return ' '.join(name.lower().split())
-
-
-def normalize_tournament_name(name):
-    """Normalize tournament names"""
-    if pd.isna(name):
-        return ""
-    name = str(name).lower()
-    name = name.replace('masters cup', 'masters')
-    name = name.replace('atp finals', 'masters')
-    name = name.replace('wta finals', 'masters')
-    return name.strip()
-
-
-def build_composite_id(match_date, tourney_slug, p1_slug, p2_slug):
-    """YYYYMMDD-tournament-player1-player2 (all lower-snake)"""
-    if pd.isna(match_date):
-        raise ValueError("match_date is NaT")
-    ymd = pd.to_datetime(match_date).strftime("%Y%m%d")
-    return f"{ymd}-{tourney_slug}-{p1_slug}-{p2_slug}"
-
-
-# 2.3 Data Loading Functions
-def load_excel_data(file_path):
-    """Load data from Excel file"""
-    try:
-        df = pd.read_excel(file_path)
-        if 'Date' not in df.columns:
-            print(f"Warning: No Date column in {file_path}")
-            return pd.DataFrame()
-        print(f"Loaded {len(df)} matches from {file_path}")
-        return df
-    except Exception as e:
-        print(f"Error loading {file_path}: {e}")
-        return pd.DataFrame()
-
-
-def load_jeff_comprehensive_data():
-    """Load all of Jeff's comprehensive tennis data"""
-    base_path = os.path.expanduser("~/Desktop/data/Jeff 6.14.25")
-    data = {'men': {}, 'women': {}}
-    files = {
-        'matches': 'charting-{}-matches.csv',
-        'points_2020s': 'charting-{}-points-2020s.csv',
-        'overview': 'charting-{}-stats-Overview.csv',
-        'serve_basics': 'charting-{}-stats-ServeBasics.csv',
-        'return_outcomes': 'charting-{}-stats-ReturnOutcomes.csv',
-        'return_depth': 'charting-{}-stats-ReturnDepth.csv',
-        'key_points_serve': 'charting-{}-stats-KeyPointsServe.csv',
-        'key_points_return': 'charting-{}-stats-KeyPointsReturn.csv',
-        'net_points': 'charting-{}-stats-NetPoints.csv',
-        'rally': 'charting-{}-stats-Rally.csv',
-        'serve_direction': 'charting-{}-stats-ServeDirection.csv',
-        'serve_influence': 'charting-{}-stats-ServeInfluence.csv',
-        'shot_direction': 'charting-{}-stats-ShotDirection.csv',
-        'shot_dir_outcomes': 'charting-{}-stats-ShotDirOutcomes.csv',
-        'shot_types': 'charting-{}-stats-ShotTypes.csv',
-        'snv': 'charting-{}-stats-SnV.csv',
-        'sv_break_split': 'charting-{}-stats-SvBreakSplit.csv',
-        'sv_break_total': 'charting-{}-stats-SvBreakTotal.csv'
-    }
-
-    for gender in ['men', 'women']:
-        gender_path = os.path.join(base_path, gender)
-        if os.path.exists(gender_path):
-            for key, filename_template in files.items():
-                filename = filename_template.format('m' if gender == 'men' else 'w')
-                file_path = os.path.join(gender_path, filename)
-                if os.path.exists(file_path):
-                    df = pd.read_csv(file_path, low_memory=False)
-                    if 'player' in df.columns:
-                        df['Player_canonical'] = df['player'].apply(normalize_jeff_name)
-                    data[gender][key] = df
-                    print(f"Loaded {gender}/{filename}: {len(df)} records")
-    return data
-
-
-def load_all_tennis_data():
-    """Load tennis data from all years"""
-    base_path = os.path.expanduser("~/Desktop/data")
-    all_data = []
-
-    for gender_name, gender_code in [("tennisdata_men", "M"), ("tennisdata_women", "W")]:
-        gender_path = os.path.join(base_path, gender_name)
-        if os.path.exists(gender_path):
-            for year in range(2020, 2026):
-                file_path = os.path.join(gender_path, f"{year}_{gender_code.lower()}.xlsx")
-                if os.path.exists(file_path):
-                    df = load_excel_data(file_path)
-                    if not df.empty and 'Date' in df.columns:
-                        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                        df['gender'] = gender_code
-                        df['year'] = df['Date'].dt.year
-                        all_data.append(df)
-
-    if all_data:
-        return pd.concat(all_data, ignore_index=True)
-    else:
-        return pd.DataFrame()
-
-
-# 2.4 Feature Extraction Functions
-def get_fallback_defaults(gender_key):
-    """Fallback defaults when no Jeff data available"""
-    base_defaults = {
-        'serve_pts': 80, 'aces': 6, 'double_faults': 3, 'first_serve_pct': 0.62,
-        'first_serve_won': 35, 'second_serve_won': 16, 'break_points_saved': 4,
-        'return_pts_won': 30, 'winners_total': 28, 'winners_fh': 16, 'winners_bh': 12,
-        'unforced_errors': 28, 'unforced_fh': 16, 'unforced_bh': 12,
-        'serve_wide_pct': 0.3, 'serve_t_pct': 0.4, 'serve_body_pct': 0.3,
-        'return_deep_pct': 0.4, 'return_shallow_pct': 0.3, 'return_very_deep_pct': 0.2,
-        'key_points_serve_won_pct': 0.6, 'key_points_aces_pct': 0.05, 'key_points_first_in_pct': 0.55,
-        'key_points_return_won_pct': 0.35, 'key_points_return_winners': 0.02,
-        'net_points_won_pct': 0.65, 'net_winners_pct': 0.3, 'passed_at_net_pct': 0.3,
-        'rally_server_winners_pct': 0.15, 'rally_server_unforced_pct': 0.2,
-        'rally_returner_winners_pct': 0.1, 'rally_returner_unforced_pct': 0.25,
-        'shot_crosscourt_pct': 0.5, 'shot_down_line_pct': 0.25, 'shot_inside_out_pct': 0.15,
-        'serve_volley_frequency': 0.02, 'serve_volley_success_pct': 0.6,
-        'return_error_net_pct': 0.1, 'return_error_wide_pct': 0.05,
-        'aggression_index': 0.5, 'consistency_index': 0.5, 'pressure_performance': 0.5, 'net_game_strength': 0.5
-    }
-
-    if gender_key == 'women':
-        base_defaults.update({
-            'serve_pts': 75, 'aces': 4, 'first_serve_pct': 0.60,
-            'first_serve_won': 32, 'second_serve_won': 15,
-            'serve_volley_frequency': 0.01, 'net_points_won_pct': 0.60
-        })
-
-    return base_defaults
-
-
-def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
-    defaults = {"men": {}, "women": {}}
-    skip = {"matches", "points_2020s"}
-
-    for sex in ("men", "women"):
-        sums, counts = collections.defaultdict(float), collections.defaultdict(int)
-
-        for name, df in jeff_data.get(sex, {}).items():
-            if name in skip or df is None or df.empty:
-                continue
-            num = df.select_dtypes(include=["number"])
-            for col in num.columns:
-                vals = pd.to_numeric(num[col], errors="coerce").dropna()
-                if vals.empty:
-                    continue
-                sums[col] += vals.sum()
-                counts[col] += len(vals)
-
-        defaults[sex] = {c: sums[c] / counts[c] for c in sums}
-
-    return defaults
-
-
-def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, weighted_defaults=None):
-    """Extract features from all Jeff datasets with Player_canonical checks"""
-    gender_key = 'men' if gender == 'M' else 'women'
-
-    if gender_key not in jeff_data:
-        return get_fallback_defaults(gender_key)
-
-    if weighted_defaults and gender_key in weighted_defaults:
-        features = weighted_defaults[gender_key].copy()
-    else:
-        features = get_fallback_defaults(gender_key)
-
-    # Overview stats
-    if 'overview' in jeff_data[gender_key]:
-        overview_df = jeff_data[gender_key]['overview']
-        if 'Player_canonical' in overview_df.columns:
-            player_overview = overview_df[
-                (overview_df['Player_canonical'] == player_canonical) &
-                (overview_df['set'] == 'Total')
-                ]
-
-            if len(player_overview) > 0:
-                latest = player_overview.iloc[-1]
-                serve_pts = latest.get('serve_pts', 80)
-                if serve_pts > 0:
-                    features.update({
-                        'serve_pts': float(serve_pts),
-                        'aces': float(latest.get('aces', 0)),
-                        'double_faults': float(latest.get('dfs', 0)),
-                        'first_serve_pct': float(latest.get('first_in', 0)) / float(
-                            serve_pts) if serve_pts > 0 else 0.62,
-                        'first_serve_won': float(latest.get('first_won', 0)),
-                        'second_serve_won': float(latest.get('second_won', 0)),
-                        'break_points_saved': float(latest.get('bp_saved', 0)),
-                        'return_pts_won': float(latest.get('return_pts_won', 0)),
-                        'winners_total': float(latest.get('winners', 0)),
-                        'winners_fh': float(latest.get('winners_fh', 0)),
-                        'winners_bh': float(latest.get('winners_bh', 0)),
-                        'unforced_errors': float(latest.get('unforced', 0)),
-                        'unforced_fh': float(latest.get('unforced_fh', 0)),
-                        'unforced_bh': float(latest.get('unforced_bh', 0))
-                    })
-
-    return features
-
-
-def extract_jeff_features(player_canonical, gender, jeff_data):
-    """Extract actual features from Jeff Sackmann data - simplified version for simulation"""
-    gender_key = 'men' if gender == 'M' else 'women'
-
-    if gender_key not in jeff_data or player_canonical not in jeff_data[gender_key]:
-        return {
-            'serve_pts': 60,
-            'first_won': 0,
-            'second_won': 0,
-            'return_pts_won': 20
-        }
-
-    player_data = jeff_data[gender_key][player_canonical]
-
-    first_in = player_data.get('1stIn', 0)
-    first_won = player_data.get('1stWon', 0)
-    second_won = player_data.get('2ndWon', 0)
-    double_faults = player_data.get('df', 0)
-
-    total_serve_pts = first_in + double_faults + (
-                first_won - first_in) if first_won >= first_in else first_in + second_won + double_faults
-
-    break_points_saved = player_data.get('bpSaved', 0)
-    break_points_faced = player_data.get('bpFaced', 0)
-    return_pts_won = break_points_faced - break_points_saved
-
-    return {
-        'serve_pts': max(1, total_serve_pts),
-        'first_won': first_won,
-        'second_won': second_won,
-        'return_pts_won': max(0, return_pts_won)
-    }
-
-
-# 2.5 Tennis Abstract Scraper
-class TennisAbstractScraper:
-    def __init__(self):
-        self.headers = {"User-Agent": "Mozilla/5.0"}
-
-    def _normalize_player_name(self, name: str) -> str:
-        import re, unicodedata
-        name = unicodedata.normalize("NFKD", name).strip()
-        name = re.sub(r"[\s\-]+", "_", name)
-        return name.lower()
-
-    def _to_int(self, text):
-        """Extract leading integer from a value"""
-        if text is None or pd.isna(text):
-            return 0
-        if isinstance(text, (int, float)):
-            return int(text)
-        m = re.search(r"\d+", str(text))
-        return int(m.group(0)) if m else 0
-
-    def _pct(self, text: str) -> float:
-        """Convert percentage inputs to decimal"""
-        import pandas as pd, math, re
-
-        if text is None or (isinstance(text, float) and math.isnan(text)) or (
-                isinstance(text, (int, float)) and pd.isna(text)
-        ):
-            return 0.0
-
-        if isinstance(text, (int, float)):
-            val = float(text)
-            return val if 0 <= val <= 1 else val / 100.0
-
-        s = str(text).strip()
-        if s.endswith("%"):
-            s = s[:-1].strip()
-
-        m = re.search(r"[\d.]+", s)
-        if not m:
-            return 0.0
-
-        val = float(m.group(0))
-        return val if 0 <= val <= 1 else val / 100.0
-
-    def scrape_shot_types(self, url, debug: bool = False):
-        """Parse shot-type distribution tables"""
-        import re, html, requests
-        import numpy as np
-
-        def _parse_count_pct(txt: str) -> tuple[int, float | None]:
-            m = re.match(r"\s*(\d+)(?:\s*\(([\d.]+)%\))?", txt or "")
-            cnt = int(m.group(1)) if m else 0
-            pct = float(m.group(2)) / 100 if m and m.group(2) else None
-            return cnt, pct
-
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-        js_blob = "\n".join(tag.string for tag in soup.find_all("script") if tag.string)
-
-        matches = re.findall(r"var\s+(shots\d+)\s*=\s*'([\s\S]*?)';", js_blob, re.S)
-        if not matches:
-            return []
-
-        meta = self._parse_match_url(url)
-        player_map = {"shots1": meta.get("player1"), "shots2": meta.get("player2")}
-        out = []
-
-        for var_name, raw_html in matches:
-            player = player_map.get(var_name)
-            if not player:
-                continue
-            canon = self._normalize_player_name(player)
-
-            html_blob = html.unescape(raw_html)
-            table = BeautifulSoup(html_blob, "html.parser").find("table")
-            if table is None:
-                continue
-
-            headers = [th.get_text(" ", strip=True) for th in table.find_all("th")]
-            hdr_norm = [re.sub(r"[%\s]+", "_", h.lower()).strip("_") for h in headers]
-
-            for tr in table.find_all("tr")[1:]:
-                cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-                if not cells or not cells[0]:
-                    continue
-
-                rec = {
-                    "player": player,
-                    "Player_canonical": canon,
-                    "category": cells[0],
-                }
-
-                for h, v in zip(hdr_norm[1:], cells[1:]):
-                    cnt, pct = _parse_count_pct(v)
-                    rec[h] = cnt
-                    rec[f"{h}_pct"] = pct if pct is not None else np.nan
-
-                if cells[0].strip().lower() == "total":
-                    rec["total_pct"] = 1.0
-
-                out.append(rec)
-
-        unique = {}
-        for rec in out:
-            key = (rec["player"], rec["category"])
-            unique[key] = rec
-
-        return list(unique.values())
-
-    def _parse_match_url(self, url: str) -> dict:
-        """Parse Tennis Abstract charting URL for metadata"""
-        fname = os.path.basename(urlparse(url).path)
-        if not fname.endswith(".html"):
-            return {}
-
-        parts = fname[:-5].split("-")
-        if len(parts) < 6 or not parts[0].isdigit():
-            return {}
-
-        date_str = parts[0]
-        gender = parts[1]
-        round_tok = parts[-3]
-        player1 = parts[-2].replace("_", " ")
-        player2 = parts[-1].replace("_", " ")
-        tournament = "-".join(parts[2:-3]).replace("_", " ")
-
-        return {
-            "Date": date_str,
-            "gender": gender,
-            "tournament": tournament,
-            "round": round_tok,
-            "player1": player1,
-            "player2": player2,
-        }
-
-
-# 2.6 API Integration Functions
-def get_fixtures_for_date(target_date):
-    """Get all fixtures for a specific date"""
-    try:
-        fixtures = api_call("get_fixtures",
-                            date_start=target_date.isoformat(),
-                            date_stop=target_date.isoformat(),
-                            timezone="UTC")
-
-        finished_fixtures = [ev for ev in fixtures if ev.get("event_status") == "Finished"]
-        return finished_fixtures
-    except Exception as e:
-        print(f"Error getting fixtures for {target_date}: {e}")
-        return []
-
-
-def extract_embedded_statistics(fixture):
-    """Extract statistics from fixture data"""
-    stats = {}
-
-    scores = fixture.get("scores", [])
-    if scores:
-        try:
-            p1_sets = 0
-            p2_sets = 0
-            for s in scores:
-                score_first = safe_int_convert(s.get("score_first", 0), 0)
-                score_second = safe_int_convert(s.get("score_second", 0), 0)
-                if score_first > score_second:
-                    p1_sets += 1
-                elif score_second > score_first:
-                    p2_sets += 1
-
-            stats["sets_won_p1"] = p1_sets
-            stats["sets_won_p2"] = p2_sets
-            stats["total_sets"] = len(scores)
-        except Exception as e:
-            pass
-
-    return stats
-
-
-def get_match_odds(match_key, date_check=None):
-    """Get odds with proper error handling"""
-    if date_check and date_check < date(2025, 6, 23):
-        return (None, None)
-
-    try:
-        match_key_int = safe_int_convert(match_key)
-        if match_key_int is None:
-            return (None, None)
-
-        odds_data = api_call("get_odds", match_key=match_key_int)
-        if not odds_data or str(match_key_int) not in odds_data:
-            return (None, None)
-
-        match_odds = odds_data[str(match_key_int)]
-        home_away = match_odds.get("Home/Away", {})
-
-        home_odds = home_away.get("Home", {})
-        away_odds = home_away.get("Away", {})
-
-        if home_odds and away_odds:
-            home_val = next(iter(home_odds.values())) if home_odds else None
-            away_val = next(iter(away_odds.values())) if away_odds else None
-
-            return (float(home_val) if home_val else None,
-                    float(away_val) if away_val else None)
-
-        return (None, None)
-    except Exception as e:
-        print(f"Error getting odds for match {match_key}: {e}")
-        return (None, None)
-
-
-def get_player_rankings(day, league="ATP"):
-    """Get standings with proper caching and error handling"""
-    tag = f"{league}_{day.isocalendar()[0]}_{day.isocalendar()[1]:02d}.pkl"
-    cache_file = CACHE_API / tag
-
-    if cache_file.exists():
-        try:
-            standings = pickle.loads(cache_file.read_bytes())
-            if standings:
-                rankings = {}
-                for r in standings:
-                    player_key = safe_int_convert(r.get("player_key"))
-                    place = safe_int_convert(r.get("place"))
-                    if player_key is not None and place is not None:
-                        rankings[player_key] = place
-                return rankings
-        except Exception as e:
-            print(f"Cache read error for {tag}: {e}")
-
-    standings = api_call("get_standings", event_type=league.upper())
-
-    try:
-        cache_file.write_bytes(pickle.dumps(standings, 4))
-    except Exception as e:
-        print(f"Cache write error for {tag}: {e}")
-
-    rankings = {}
-    for r in standings:
-        player_key = safe_int_convert(r.get("player_key"))
-        place = safe_int_convert(r.get("place"))
-        if player_key is not None and place is not None:
-            rankings[player_key] = place
-
-    return rankings
-
-
-def integrate_api_tennis_data(historical_data, days_back: int = 3):
-    """Integrate API-Tennis data for recent matches"""
-    start_date = date.today() - timedelta(days=days_back)
-    print("Integrating comprehensive API-Tennis data...")
-
-    if "event_key" not in historical_data.columns:
-        historical_data["event_key"] = pd.NA
-
-    if "composite_id" not in historical_data.columns:
-        historical_data["composite_id"] = pd.NA
-
-    existing_keys = set()
-    if len(historical_data) > 0:
+<truncated__content/>data) > 0:
         cutoff_data = historical_data[historical_data["date"] >= start_date]
         if len(cutoff_data) > 0:
             for key in cutoff_data["event_key"].dropna():
@@ -628,8 +17,15 @@ def integrate_api_tennis_data(historical_data, days_back: int = 3):
         day = d.date()
         try:
             fixtures = get_fixtures_for_date(day)
-            if fixtures:
-                print(f"  {day}: {len(fixtures)} finished matches")
+            day_urls = charting_urls_for_day(day)
+            # DEBUG ─ how many TA charting pages exist for the day
+            print(f"  {day}: {len(day_urls)} charting URLs")
+        except Exception as exc:
+            print(f"    charting-index fetch failed {day}: {exc}")
+            fixtures = []
+            day_urls = []
+        if fixtures:
+            print(f"  {day}: {len(fixtures)} finished matches")
 
             for fixture in fixtures:
                 try:
@@ -660,6 +56,7 @@ def integrate_api_tennis_data(historical_data, days_back: int = 3):
                         "winner_canonical": win_c,
                         "loser_canonical": los_c,
                         "tournament_canonical": tour_c,
+                        "ta_stats_json": pd.NA,  # placeholder, updated later when TA scrape succeeds
                     }
 
                     match_record["composite_id"] = build_composite_id(
@@ -668,11 +65,52 @@ def integrate_api_tennis_data(historical_data, days_back: int = 3):
 
                     # ─── Tennis‑Abstract scraping (11 sections) ───────────────
                     ta_url = None
-                    for url in charting_urls_for_day(day):
-                        url_lc = url.lower()
-                        if win_c in url_lc and los_c in url_lc:
+                    ta_stats = {}
+                    # ─── robust Tennis‑Abstract URL match ──────────────────
+                    def _canon_tag(name: str) -> str:
+                        """Approximate canonical tag used in TA filenames."""
+                        return unidecode(
+                            name.lower()
+                                .replace('-', '_')
+                                .replace(' ', '_')
+                                .replace("'", "")
+                        )
+
+                    win_tag   = _canon_tag(winner)
+                    los_tag   = _canon_tag(loser)
+                    win_lname = win_tag.split('_')[0]
+                    los_lname = los_tag.split('_')[0]
+
+                    # Attempt strict tag‑pair match first, then fall back to last‑name pair
+                    ta_url = None
+                    for url in day_urls:
+                        fname = os.path.basename(url).lower()
+
+                        # strict: full canonical tags both present (any order)
+                        cond_strict = (
+                            (win_tag in fname and los_tag in fname) or
+                            (los_tag in fname and win_tag in fname)
+                        )
+
+                        # loose: both last names present (avoid same‑name clash)
+                        cond_loose = (
+                            (win_lname != los_lname) and
+                            (
+                                (win_lname in fname and los_lname in fname) or
+                                (los_lname in fname and win_lname in fname)
+                            )
+                        )
+
+                        if cond_strict or cond_loose:
                             ta_url = url
                             break
+
+                    # DEBUG ─ report matching result
+                    if ta_url:
+                        print(f"      TA url matched: {os.path.basename(ta_url)}")
+                    else:
+                        print(f"      No TA url for {winner} vs {loser}")
+
                     if ta_url:
                         try:
                             ta_stats = {
@@ -688,11 +126,12 @@ def integrate_api_tennis_data(historical_data, days_back: int = 3):
                                 "serve_stats":              scraper.scrape_serve_statistics_overview(ta_url),
                                 "pointlog":                 scraper.scrape_pointlog(ta_url),
                             }
-                            # persist raw TA data (JSON) for downstream parsing
-                            match_record["ta_url"]        = ta_url
-                            match_record["ta_stats_json"] = json.dumps(ta_stats)
                         except Exception as exc:
                             print(f"      TA scrape failed {ta_url}: {exc}")
+                        # persist raw TA data (JSON) for downstream parsing, but only if ta_stats is not empty
+                        if ta_stats:
+                            match_record["ta_url"]        = ta_url
+                            match_record["ta_stats_json"] = json.dumps(ta_stats)
 
                     embedded_stats = extract_embedded_statistics(fixture)
                     match_record.update(embedded_stats)
@@ -1425,7 +864,7 @@ def get_matches_for_date(target_date):
         "date_start": target_date,
         "date_stop": target_date
     }
-    response = requests.get(BASE, params=params)
+    response = SESSION.get(BASE, params=params)
     if response.status_code != 200:
         raise RuntimeError(f"HTTP {response.status_code}")
 
@@ -1498,7 +937,7 @@ def main():
     """Main execution function"""
     global historical_data, jeff_data, weighted_defaults, model
 
-    REFRESH_CACHE = True
+    REFRESH_CACHE = False
 
     if REFRESH_CACHE:
         print("Refreshing cache...")
@@ -1543,3 +982,40 @@ if __name__ == "__main__":
         print(f"   Favorite: {pick['favorite']}")
         print(f"   Win Prob: {pick['probability']:.2%}")
         print(f"   Confidence: {pick['confidence']:.1%}\n")
+
+#%%
+
+# ─── quick integrity checks ──────────────────────────────────────────────
+from datetime import date as _d
+
+print("Dataframe shape:", historical_data.shape)
+
+print(
+    "Date range:",
+    historical_data["date"].min(),
+    "→",
+    historical_data["date"].max(),
+)
+
+print("\nRows by source_rank:")
+print(historical_data["source_rank"].value_counts(dropna=False))
+
+after_cutoff = historical_data[
+    historical_data["date"] > _d(2025, 6, 10)
+]
+print("\nRows after 2025‑06‑10:", len(after_cutoff))
+
+if "ta_stats_json" in after_cutoff.columns:
+    ta_rows = after_cutoff["ta_stats_json"].notna().mean()
+    print("TA scrape coverage after cutoff: {:.1%}".format(ta_rows))
+
+    # preview first few rows with TA data
+    if after_cutoff["ta_stats_json"].notna().any():
+        cols = [c for c in ("ta_url", "ta_stats_json") if c in after_cutoff.columns]
+        print(
+            "\nSample TA stats rows:\n",
+            after_cutoff.loc[after_cutoff["ta_stats_json"].notna(), cols].head(3),
+        )
+else:
+    print("Column 'ta_stats_json' absent – no TA scrape data stored.")
+#%%
