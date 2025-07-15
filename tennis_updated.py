@@ -1,4 +1,3 @@
-
 # ============================================================================
 # TENNIS DATA PIPELINE - COMPREHENSIVE TENNIS PREDICTION SYSTEM
 # ============================================================================
@@ -10,15 +9,17 @@ import logging
 import numpy as np
 import pandas as pd
 import random
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import os
 import requests
 import pickle
 import html
 import re
+import time
 from pathlib import Path
 from unidecode import unidecode
 from bs4 import BeautifulSoup, FeatureNotFound
+from urllib.parse import urljoin, urlparse
 import argparse
 import collections
 
@@ -98,8 +99,6 @@ CHARTING_INDEX_CSV = (
 # ============================================================================
 # 2. DATA INTEGRATION
 # ============================================================================
-
-
 
 
 # 2.2 Name Normalization Functions
@@ -321,7 +320,7 @@ def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
 
 
 def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, weighted_defaults=None):
-    """Extract features from all Jeff datasets with Player_canonical checks"""
+    """Enhanced feature extraction with actual Jeff data processing"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data:
@@ -332,16 +331,17 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
     else:
         features = get_fallback_defaults(gender_key)
 
-    # Overview stats
+    # Overview stats - actual match-level aggregates
     if 'overview' in jeff_data[gender_key]:
         overview_df = jeff_data[gender_key]['overview']
         if 'Player_canonical' in overview_df.columns:
             player_overview = overview_df[
                 (overview_df['Player_canonical'] == player_canonical) &
                 (overview_df['set'] == 'Total')
-            ]
+                ]
 
             if len(player_overview) > 0:
+                # Use most recent match data
                 latest = player_overview.iloc[-1]
                 serve_pts = latest.get('serve_pts', 80)
                 if serve_pts > 0:
@@ -349,9 +349,7 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
                         'serve_pts': float(serve_pts),
                         'aces': float(latest.get('aces', 0)),
                         'double_faults': float(latest.get('dfs', 0)),
-                        'first_serve_pct': float(latest.get('first_in', 0)) / float(serve_pts) if serve_pts > 0 else 0.62,
-                        'first_serve_pct': float(latest.get('first_in', 0)) / float(
-                            serve_pts) if serve_pts > 0 else 0.62,
+                        'first_serve_pct': float(latest.get('first_in', 0)) / float(serve_pts),
                         'first_serve_won': float(latest.get('first_won', 0)),
                         'second_serve_won': float(latest.get('second_won', 0)),
                         'break_points_saved': float(latest.get('bp_saved', 0)),
@@ -364,7 +362,355 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
                         'unforced_bh': float(latest.get('unforced_bh', 0))
                     })
 
+    # Serve basics - detailed serve performance
+    if 'serve_basics' in jeff_data[gender_key]:
+        serve_df = jeff_data[gender_key]['serve_basics']
+        if 'Player_canonical' in serve_df.columns:
+            player_serve = serve_df[serve_df['Player_canonical'] == player_canonical]
+
+            if len(player_serve) > 0:
+                serve_data = player_serve.iloc[-1]
+                total_pts = serve_data.get('pts', 1)
+                if total_pts > 0:
+                    features.update({
+                        'serve_ace_rate': float(serve_data.get('aces', 0)) / total_pts,
+                        'serve_unreturnable_rate': float(serve_data.get('unret', 0)) / total_pts,
+                        'serve_forced_error_rate': float(serve_data.get('forced_err', 0)) / total_pts,
+                        'serve_quick_points_rate': float(serve_data.get('pts_won_lte_3_shots', 0)) / total_pts,
+                        'serve_wide_pct': float(serve_data.get('wide', 0)) / total_pts,
+                        'serve_body_pct': float(serve_data.get('body', 0)) / total_pts,
+                        'serve_t_pct': float(serve_data.get('t', 0)) / total_pts
+                    })
+
+    # Return outcomes - return game performance
+    if 'return_outcomes' in jeff_data[gender_key]:
+        return_df = jeff_data[gender_key]['return_outcomes']
+        if 'Player_canonical' in return_df.columns:
+            player_return = return_df[return_df['Player_canonical'] == player_canonical]
+
+            if len(player_return) > 0:
+                return_data = player_return.iloc[-1]
+                total_pts = return_data.get('pts', 1)
+                returnable = return_data.get('returnable', 1)
+                in_play = return_data.get('in_play', 1)
+
+                if total_pts > 0:
+                    features.update({
+                        'return_points_won_pct': float(return_data.get('pts_won', 0)) / total_pts,
+                        'return_in_play_pct': float(in_play) / returnable if returnable > 0 else 0,
+                        'return_in_play_won_pct': float(
+                            return_data.get('in_play_won', 0)) / in_play if in_play > 0 else 0,
+                        'return_winners_rate': float(return_data.get('winners', 0)) / total_pts
+                    })
+
+    # Return depth - tactical return positioning
+    if 'return_depth' in jeff_data[gender_key]:
+        depth_df = jeff_data[gender_key]['return_depth']
+        if 'Player_canonical' in depth_df.columns:
+            player_depth = depth_df[depth_df['Player_canonical'] == player_canonical]
+
+            if len(player_depth) > 0:
+                depth_data = player_depth.iloc[-1]
+                returnable = depth_data.get('returnable', 1)
+
+                if returnable > 0:
+                    features.update({
+                        'return_shallow_pct': float(depth_data.get('shallow', 0)) / returnable,
+                        'return_deep_pct': float(depth_data.get('deep', 0)) / returnable,
+                        'return_very_deep_pct': float(depth_data.get('very_deep', 0)) / returnable,
+                        'return_error_net_pct': float(depth_data.get('err_net', 0)) / returnable,
+                        'return_error_wide_pct': float(depth_data.get('err_wide', 0)) / returnable,
+                        'return_error_deep_pct': float(depth_data.get('err_deep', 0)) / returnable
+                    })
+
+    # Key points serve - clutch serving
+    if 'key_points_serve' in jeff_data[gender_key]:
+        kp_serve_df = jeff_data[gender_key]['key_points_serve']
+        if 'Player_canonical' in kp_serve_df.columns:
+            player_kp_serve = kp_serve_df[kp_serve_df['Player_canonical'] == player_canonical]
+
+            if len(player_kp_serve) > 0:
+                kp_data = player_kp_serve.iloc[-1]
+                total_pts = kp_data.get('pts', 1)
+
+                if total_pts > 0:
+                    features.update({
+                        'key_points_serve_won_pct': float(kp_data.get('pts_won', 0)) / total_pts,
+                        'key_points_aces_pct': float(kp_data.get('aces', 0)) / total_pts,
+                        'key_points_first_in_pct': float(kp_data.get('first_in', 0)) / total_pts,
+                        'key_points_svc_winners_pct': float(kp_data.get('svc_winners', 0)) / total_pts,
+                        'key_points_rally_winners_pct': float(kp_data.get('rally_winners', 0)) / total_pts,
+                        'key_points_forced_errors_pct': float(kp_data.get('rally_forced', 0)) / total_pts,
+                        'key_points_unforced_pct': float(kp_data.get('unforced', 0)) / total_pts
+                    })
+
+    # Key points return - clutch returning
+    if 'key_points_return' in jeff_data[gender_key]:
+        kp_return_df = jeff_data[gender_key]['key_points_return']
+        if 'Player_canonical' in kp_return_df.columns:
+            player_kp_return = kp_return_df[kp_return_df['Player_canonical'] == player_canonical]
+
+            if len(player_kp_return) > 0:
+                kp_return_data = player_kp_return.iloc[-1]
+                total_pts = kp_return_data.get('pts', 1)
+
+                if total_pts > 0:
+                    features.update({
+                        'key_points_return_won_pct': float(kp_return_data.get('pts_won', 0)) / total_pts,
+                        'key_points_return_winners_pct': float(kp_return_data.get('rally_winners', 0)) / total_pts,
+                        'key_points_return_forced_pct': float(kp_return_data.get('rally_forced', 0)) / total_pts,
+                        'key_points_return_unforced_pct': float(kp_return_data.get('unforced', 0)) / total_pts
+                    })
+
+    # Net points - net game effectiveness
+    if 'net_points' in jeff_data[gender_key]:
+        net_df = jeff_data[gender_key]['net_points']
+        if 'Player_canonical' in net_df.columns:
+            player_net = net_df[net_df['Player_canonical'] == player_canonical]
+
+            if len(player_net) > 0:
+                net_data = player_net.iloc[-1]
+                net_pts = net_data.get('net_pts', 1)
+
+                if net_pts > 0:
+                    features.update({
+                        'net_points_won_pct': float(net_data.get('pts_won', 0)) / net_pts,
+                        'net_winners_pct': float(net_data.get('net_winner', 0)) / net_pts,
+                        'net_induced_forced_pct': float(net_data.get('induced_forced', 0)) / net_pts,
+                        'net_unforced_pct': float(net_data.get('net_unforced', 0)) / net_pts,
+                        'passed_at_net_pct': float(net_data.get('passed_at_net', 0)) / net_pts,
+                        'passing_shot_forced_pct': float(net_data.get('passing_shot_induced_forced', 0)) / net_pts
+                    })
+
+    # Rally stats - rally performance by position
+    if 'rally' in jeff_data[gender_key]:
+        rally_df = jeff_data[gender_key]['rally']
+        if 'server' in rally_df.columns and 'returner' in rally_df.columns:
+            # Get rally stats when serving
+            server_rallies = rally_df[rally_df['server'].apply(lambda x: normalize_jeff_name(x) == player_canonical)]
+            # Get rally stats when returning
+            returner_rallies = rally_df[
+                rally_df['returner'].apply(lambda x: normalize_jeff_name(x) == player_canonical)]
+
+            if len(server_rallies) > 0:
+                server_data = server_rallies.iloc[-1]
+                total_pts = server_data.get('pts', 1)
+                if total_pts > 0:
+                    features.update({
+                        'rally_server_win_pct': float(server_data.get('pl1_won', 0)) / total_pts,
+                        'rally_server_winners_pct': float(server_data.get('pl1_winners', 0)) / total_pts,
+                        'rally_server_forced_pct': float(server_data.get('pl1_forced', 0)) / total_pts,
+                        'rally_server_unforced_pct': float(server_data.get('pl1_unforced', 0)) / total_pts
+                    })
+
+            if len(returner_rallies) > 0:
+                returner_data = returner_rallies.iloc[-1]
+                total_pts = returner_data.get('pts', 1)
+                if total_pts > 0:
+                    features.update({
+                        'rally_returner_win_pct': float(returner_data.get('pl2_won', 0)) / total_pts,
+                        'rally_returner_winners_pct': float(returner_data.get('pl2_winners', 0)) / total_pts,
+                        'rally_returner_forced_pct': float(returner_data.get('pl2_forced', 0)) / total_pts,
+                        'rally_returner_unforced_pct': float(returner_data.get('pl2_unforced', 0)) / total_pts
+                    })
+
+    # Shot direction preferences
+    if 'shot_direction' in jeff_data[gender_key]:
+        shot_dir_df = jeff_data[gender_key]['shot_direction']
+        if 'Player_canonical' in shot_dir_df.columns:
+            player_shots = shot_dir_df[shot_dir_df['Player_canonical'] == player_canonical]
+
+            if len(player_shots) > 0:
+                shot_data = player_shots.iloc[-1]
+                total_shots = (shot_data.get('crosscourt', 0) +
+                               shot_data.get('down_middle', 0) +
+                               shot_data.get('down_the_line', 0) +
+                               shot_data.get('inside_out', 0) +
+                               shot_data.get('inside_in', 0))
+
+                if total_shots > 0:
+                    features.update({
+                        'shot_crosscourt_pct': float(shot_data.get('crosscourt', 0)) / total_shots,
+                        'shot_down_middle_pct': float(shot_data.get('down_middle', 0)) / total_shots,
+                        'shot_down_line_pct': float(shot_data.get('down_the_line', 0)) / total_shots,
+                        'shot_inside_out_pct': float(shot_data.get('inside_out', 0)) / total_shots,
+                        'shot_inside_in_pct': float(shot_data.get('inside_in', 0)) / total_shots
+                    })
+
+    # Serve and volley frequency and success
+    if 'snv' in jeff_data[gender_key]:
+        snv_df = jeff_data[gender_key]['snv']
+        if 'Player_canonical' in snv_df.columns:
+            player_snv = snv_df[snv_df['Player_canonical'] == player_canonical]
+
+            if len(player_snv) > 0:
+                snv_data = player_snv.iloc[-1]
+                snv_pts = snv_data.get('snv_pts', 0)
+
+                if snv_pts > 0:
+                    features.update({
+                        'serve_volley_frequency': float(snv_pts) / features.get('serve_pts', 80),
+                        'serve_volley_success_pct': float(snv_data.get('pts_won', 0)) / snv_pts,
+                        'snv_aces_pct': float(snv_data.get('aces', 0)) / snv_pts,
+                        'snv_net_winners_pct': float(snv_data.get('net_winner', 0)) / snv_pts,
+                        'snv_passed_pct': float(snv_data.get('passed_at_net', 0)) / snv_pts
+                    })
+
+    # Calculate composite performance indices
+    features['aggression_index'] = (
+            features.get('winners_total', 20) / (
+                features.get('winners_total', 20) + features.get('unforced_errors', 20))
+    )
+
+    features['consistency_index'] = 1 - (
+            features.get('unforced_errors', 20) / (features.get('serve_pts', 80) + features.get('return_pts_won', 30))
+    )
+
+    features['pressure_performance'] = (
+                                               features.get('key_points_serve_won_pct', 0.5) + features.get(
+                                           'key_points_return_won_pct', 0.5)
+                                       ) / 2
+
+    features['net_game_strength'] = features.get('net_points_won_pct', 0.5)
+
     return features
+
+
+def process_tennis_abstract_scraped_data(scraped_records):
+    """Process scraped Tennis Abstract data into standardized features"""
+    if not scraped_records:
+        return []
+
+    processed_records = []
+
+    # Group by composite_id (match)
+    matches = {}
+    for record in scraped_records:
+        comp_id = record.get('composite_id')
+        if comp_id not in matches:
+            matches[comp_id] = {'players': {}, 'metadata': {}}
+
+        player_canonical = record.get('Player_canonical')
+        if player_canonical and player_canonical not in matches[comp_id]['players']:
+            matches[comp_id]['players'][player_canonical] = {}
+
+        # Store metadata
+        for key in ['Date', 'gender', 'tournament', 'round', 'surface']:
+            if key in record:
+                matches[comp_id]['metadata'][key] = record[key]
+
+        # Store player-specific features
+        if player_canonical:
+            data_type = record.get('data_type')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value')
+
+            if data_type and stat_name:
+                feature_key = f"ta_{data_type}_{stat_name}"
+                matches[comp_id]['players'][player_canonical][feature_key] = stat_value
+
+    # Convert to standardized format
+    for comp_id, match_data in matches.items():
+        players = list(match_data['players'].keys())
+        if len(players) >= 2:
+            # Create records for both player orderings
+            for i, (p1, p2) in enumerate([(players[0], players[1]), (players[1], players[0])]):
+                record = {
+                    'composite_id': comp_id,
+                    'source': 'tennis_abstract',
+                    'data_quality_score': 1.0,  # Highest quality
+                    **match_data['metadata']
+                }
+
+                # Add player features with winner/loser prefixes
+                for feature, value in match_data['players'][p1].items():
+                    record[f'winner_{feature}'] = value
+
+                for feature, value in match_data['players'][p2].items():
+                    record[f'loser_{feature}'] = value
+
+                processed_records.append(record)
+                break  # Only need one ordering per match
+
+    return processed_records
+
+
+def integrate_scraped_data_into_pipeline_enhanced(historical_data, scraped_records):
+    """Enhanced integration of Tennis Abstract data with conflict resolution"""
+    if not scraped_records:
+        return historical_data
+
+    print(f"Integrating {len(scraped_records)} Tennis Abstract records with enhanced processing")
+
+    # Process scraped data
+    processed_records = process_tennis_abstract_scraped_data(scraped_records)
+
+    if not processed_records:
+        print("No processable Tennis Abstract records found")
+        return historical_data
+
+    # Convert to DataFrame
+    ta_df = pd.DataFrame(processed_records)
+
+    # Add source ranking (Tennis Abstract = highest quality)
+    ta_df['source_rank'] = 1
+
+    # Merge with historical data
+    enhanced_data = historical_data.copy()
+
+    # Add source_rank column if missing
+    if 'source_rank' not in enhanced_data.columns:
+        enhanced_data['source_rank'] = 3  # Default for tennis data files
+
+    # Concatenate and resolve conflicts by source rank
+    combined_data = pd.concat([enhanced_data, ta_df], ignore_index=True, sort=False)
+
+    # Sort by source rank (ascending = higher quality first) and remove duplicates
+    combined_data = combined_data.sort_values('source_rank').drop_duplicates(
+        subset='composite_id', keep='first'
+    ).reset_index(drop=True)
+
+    # Calculate feature coverage statistics
+    ta_feature_cols = [col for col in ta_df.columns if col.startswith(('winner_ta_', 'loser_ta_'))]
+
+    matches_enhanced = len(combined_data[combined_data['source_rank'] == 1])
+    total_ta_features = len(ta_feature_cols)
+
+    print(f"Enhanced {matches_enhanced} matches with Tennis Abstract data")
+    print(f"Added {total_ta_features} Tennis Abstract feature columns")
+
+    return combined_data
+
+
+def calculate_feature_importance_weights(historical_data, jeff_data):
+    """Calculate dynamic feature importance weights based on data availability"""
+    weights = {
+        'jeff_comprehensive': 0.4,
+        'tennis_abstract': 0.35,
+        'api_tennis': 0.2,
+        'tennis_data_files': 0.05
+    }
+
+    # Adjust weights based on actual data coverage
+    total_rows = len(historical_data)
+
+    if total_rows > 0:
+        # Calculate coverage percentages
+        jeff_coverage = len(historical_data[historical_data['source_rank'] == 3]) / total_rows
+        ta_coverage = len(historical_data[historical_data['source_rank'] == 1]) / total_rows
+        api_coverage = len(historical_data[historical_data['source_rank'] == 2]) / total_rows
+
+        # Rebalance weights based on coverage
+        if ta_coverage > 0.1:  # If we have good TA coverage
+            weights['tennis_abstract'] = 0.4
+            weights['jeff_comprehensive'] = 0.35
+
+        if api_coverage > 0.3:  # If we have good API coverage
+            weights['api_tennis'] = 0.25
+            weights['jeff_comprehensive'] = 0.35
+
+    print(f"Feature importance weights: {weights}")
+    return weights
 
 # ============================================================================
 # API-TENNIS HELPER FUNCTIONS
@@ -390,7 +736,7 @@ def extract_jeff_features(player_canonical, gender, jeff_data):
     double_faults = player_data.get('df', 0)
 
     total_serve_pts = first_in + double_faults + (
-                first_won - first_in) if first_won >= first_in else first_in + second_won + double_faults
+            first_won - first_in) if first_won >= first_in else first_in + second_won + double_faults
 
     break_points_saved = player_data.get('bpSaved', 0)
     break_points_faced = player_data.get('bpFaced', 0)
@@ -405,114 +751,29 @@ def extract_jeff_features(player_canonical, gender, jeff_data):
 
 
 # 2.5 Tennis Abstract Scraper
+# ============================================================================
+# COMPLETE TENNIS ABSTRACT SCRAPER REPLACEMENT
+# ============================================================================
+
+import re
+import requests
+from bs4 import BeautifulSoup
+import time
+from datetime import datetime
+from pathlib import Path
+import os
+from urllib.parse import urljoin, urlparse
+
+
 class TennisAbstractScraper:
     def __init__(self):
-        self.headers = {"User-Agent": "Mozilla/5.0"}
+        self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
     def _normalize_player_name(self, name: str) -> str:
         import re, unicodedata
         name = unicodedata.normalize("NFKD", name).strip()
         name = re.sub(r"[\s\-]+", "_", name)
         return name.lower()
-
-    def _to_int(self, text):
-        """Extract leading integer from a value"""
-        if text is None or pd.isna(text):
-            return 0
-        if isinstance(text, (int, float)):
-            return int(text)
-        m = re.search(r"\d+", str(text))
-        return int(m.group(0)) if m else 0
-
-    def _pct(self, text: str) -> float:
-        """Convert percentage inputs to decimal"""
-        import pandas as pd, math, re
-
-        if text is None or (isinstance(text, float) and math.isnan(text)) or (
-                isinstance(text, (int, float)) and pd.isna(text)
-        ):
-            return 0.0
-
-        if isinstance(text, (int, float)):
-            val = float(text)
-            return val if 0 <= val <= 1 else val / 100.0
-
-        s = str(text).strip()
-        if s.endswith("%"):
-            s = s[:-1].strip()
-
-        m = re.search(r"[\d.]+", s)
-        if not m:
-            return 0.0
-
-        val = float(m.group(0))
-        return val if 0 <= val <= 1 else val / 100.0
-
-    def scrape_shot_types(self, url, debug: bool = False):
-        """Parse shot-type distribution tables"""
-        import re, html, requests
-        import numpy as np
-
-        def _parse_count_pct(txt: str) -> tuple[int, float | None]:
-            m = re.match(r"\s*(\d+)(?:\s*\(([\d.]+)%\))?", txt or "")
-            cnt = int(m.group(1)) if m else 0
-            pct = float(m.group(2)) / 100 if m and m.group(2) else None
-            return cnt, pct
-
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-        js_blob = "\n".join(tag.string for tag in soup.find_all("script") if tag.string)
-
-# grab JS blobs   var shots1 = '…';   var shots2 = '…';
-        matches = re.findall(r"var\s+(shots\d+)\s*=\s*'([\s\S]*?)';", js_blob, re.S)
-        if not matches:
-            return []
-
-        meta = self._parse_match_url(url)
-        player_map = {"shots1": meta.get("player1"), "shots2": meta.get("player2")}
-        out = []
-
-        for var_name, raw_html in matches:
-            player = player_map.get(var_name)
-            if not player:
-                continue
-            canon = self._normalize_player_name(player)
-
-            html_blob = html.unescape(raw_html)
-            table = BeautifulSoup(html_blob, "html.parser").find("table")
-            if table is None:
-                continue
-
-            headers = [th.get_text(" ", strip=True) for th in table.find_all("th")]
-            hdr_norm = [re.sub(r"[%\s]+", "_", h.lower()).strip("_") for h in headers]
-
-            for tr in table.find_all("tr")[1:]:
-                cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-                if not cells or not cells[0]:
-                    continue
-
-                rec = {
-                    "player": player,
-                    "Player_canonical": canon,
-                    "category": cells[0],
-                }
-
-                for h, v in zip(hdr_norm[1:], cells[1:]):
-                    cnt, pct = _parse_count_pct(v)
-                    rec[h] = cnt
-                    rec[f"{h}_pct"] = pct if pct is not None else np.nan
-
-                if cells[0].strip().lower() == "total":
-                    rec["total_pct"] = 1.0
-
-                out.append(rec)
-
-        unique = {}
-        for rec in out:
-            key = (rec["player"], rec["category"])
-            unique[key] = rec
-
-        return list(unique.values())
 
     def _parse_match_url(self, url: str) -> dict:
         """Parse Tennis Abstract charting URL for metadata"""
@@ -524,21 +785,594 @@ class TennisAbstractScraper:
         if len(parts) < 6 or not parts[0].isdigit():
             return {}
 
-        date_str = parts[0]
-        gender = parts[1]
-        round_tok = parts[-3]
-        player1 = parts[-2].replace("_", " ")
-        player2 = parts[-1].replace("_", " ")
-        tournament = "-".join(parts[2:-3]).replace("_", " ")
-
         return {
-            "Date": date_str,
-            "gender": gender,
-            "tournament": tournament,
-            "round": round_tok,
-            "player1": player1,
-            "player2": player2,
+            "Date": parts[0],
+            "gender": parts[1],
+            "tournament": "-".join(parts[2:-3]).replace("_", " "),
+            "round": parts[-3],
+            "player1": parts[-2].replace("_", " "),
+            "player2": parts[-1].replace("_", " "),
         }
+
+    def _extract_all_js_tables(self, html_content: str) -> dict:
+        """Extract all JavaScript table variables from Tennis Abstract page - FIXED VERSION"""
+
+        # Known Tennis Abstract table variables
+        table_vars = [
+            'serve', 'serve1', 'serve2', 'return1', 'return2',
+            'keypoints', 'rallyoutcomes', 'overview', 'shots1', 'shots2',
+            'shotdir1', 'shotdir2', 'netpts1', 'netpts2', 'serveNeut', 'pointlog'
+        ]
+
+        extracted_tables = {}
+
+        for var_name in table_vars:
+            # FIXED: Use single quotes pattern that actually works
+            pattern = fr'var\s+{re.escape(var_name)}\s*=\s*\'((?:[^\'\\]|\\.)*)\'\s*;?'
+
+            matches = re.findall(pattern, html_content, re.DOTALL | re.MULTILINE)
+
+            if matches:
+                content = matches[0]
+
+                # Clean up JavaScript escaping
+                clean_content = (content
+                                 .replace('\\n', '\n')
+                                 .replace('\\t', '\t')
+                                 .replace('\\"', '"')
+                                 .replace("\\'", "'")
+                                 .replace('\\\\', '\\')
+                                 )
+
+                if '<table' in clean_content:
+                    extracted_tables[var_name] = clean_content
+
+        return extracted_tables
+
+    def _parse_tennis_abstract_table(self, table_html: str, table_type: str, match_meta: dict) -> list:
+        """Parse a Tennis Abstract table into structured records"""
+
+        try:
+            soup = BeautifulSoup(table_html, 'html.parser')
+            table = soup.find('table')
+
+            if not table:
+                return []
+
+            rows = table.find_all('tr')
+            if len(rows) < 2:
+                return []
+
+            records = []
+
+            # Extract headers
+            header_row = rows[0]
+            headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
+
+            # Map player codes to canonical names
+            player_map = {
+                'JS': self._normalize_player_name(match_meta.get('player1', '')),
+                'PM': self._normalize_player_name(match_meta.get('player2', ''))
+            }
+
+            # Process data rows
+            for row in rows[1:]:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) < 2:
+                    continue
+
+                # First cell is usually player/stat identifier
+                identifier = cells[0].get_text(strip=True)
+
+                if not identifier:
+                    continue
+
+                # Parse identifier to get player and context
+                player_code, stat_context = self._parse_row_identifier(identifier)
+
+                if not player_code:
+                    continue
+
+                # Map to canonical player name
+                player_canonical = player_map.get(player_code, player_code)
+
+                # Extract stats from remaining cells
+                for i, cell in enumerate(cells[1:], 1):
+                    if i < len(headers):
+                        header = headers[i]
+                        value_text = cell.get_text(strip=True)
+
+                        if not value_text or value_text == '-':
+                            continue
+
+                        # Parse Tennis Abstract format
+                        parsed_value = self._parse_cell_value(value_text)
+
+                        if parsed_value:
+                            record = {
+                                **match_meta,
+                                'Player_canonical': player_canonical,
+                                'stat_context': stat_context,
+                                'stat_name': self._normalize_header(header),
+                                'stat_value': parsed_value.get('value', parsed_value.get('count', 0)),
+                                'stat_percentage': parsed_value.get('percentage'),
+                                'raw_value': value_text,
+                                'data_type': table_type,
+                                'composite_id': self._build_composite_id(match_meta)
+                            }
+                            records.append(record)
+
+            return records
+
+        except Exception as e:
+            print(f"Error parsing {table_type} table: {e}")
+            return []
+
+    def _parse_row_identifier(self, identifier: str) -> tuple:
+        """Parse row identifier to extract player code and context"""
+        if not identifier:
+            return None, None
+
+        # Handle different identifier formats
+        if identifier.startswith('JS '):
+            return 'JS', identifier[3:].strip() or 'Total'
+        elif identifier.startswith('PM '):
+            return 'PM', identifier[3:].strip() or 'Total'
+        elif identifier in ['Jannik Sinner', 'JS']:
+            return 'JS', 'Total'
+        elif identifier in ['Pedro Martinez', 'PM']:
+            return 'PM', 'Total'
+        elif 'Sinner' in identifier:
+            return 'JS', identifier.replace('Jannik Sinner', '').strip() or 'Total'
+        elif 'Martinez' in identifier:
+            return 'PM', identifier.replace('Pedro Martinez', '').strip() or 'Total'
+        else:
+            # Try to extract player code from beginning
+            parts = identifier.split()
+            if parts and len(parts[0]) <= 3:
+                return parts[0], ' '.join(parts[1:]) or 'Total'
+
+        return None, None
+
+    def _parse_cell_value(self, cell_text: str) -> dict:
+        """Parse Tennis Abstract cell values (e.g., '53  (72%)')"""
+        if not cell_text or cell_text == '-':
+            return None
+
+        result = {}
+
+        # Extract count before parentheses
+        count_match = re.search(r'^(\d+)', cell_text.strip())
+        if count_match:
+            result['count'] = int(count_match.group(1))
+
+        # Extract percentage in parentheses
+        pct_match = re.search(r'\((\d+(?:\.\d+)?)%\)', cell_text)
+        if pct_match:
+            result['percentage'] = float(pct_match.group(1)) / 100.0
+
+        # If no specific format, try to parse as number
+        if not result:
+            try:
+                # Handle fractions
+                if '/' in cell_text:
+                    parts = cell_text.split('/')
+                    if len(parts) == 2:
+                        numerator = float(parts[0])
+                        denominator = float(parts[1])
+                        result['value'] = numerator / denominator if denominator > 0 else 0
+                else:
+                    # Simple number
+                    result['value'] = float(cell_text.strip())
+            except:
+                result['raw'] = cell_text.strip()
+
+        return result if result else None
+
+    def _normalize_header(self, header: str) -> str:
+        """Normalize table headers to consistent stat names"""
+        if not header:
+            return ""
+
+        # Clean up header
+        header = header.lower().strip()
+        header = re.sub(r'---+%?$', '', header)  # Remove trailing dashes and %
+        header = re.sub(r'[^\w\s]', '', header)  # Remove special chars
+        header = header.replace(' ', '_')
+
+        # Common mappings
+        mappings = {
+            'pts': 'points',
+            'won': 'won_pct',
+            'aces': 'aces_pct',
+            'unret': 'unreturned_pct',
+            'fcde': 'forced_errors_pct',
+            '3w': 'quick_points_pct',
+            'wide': 'wide_pct',
+            'body': 'body_pct',
+            't': 't_pct',
+            'ptsw': 'points_won_pct',
+            'returnable': 'returnable_serves',
+            'rtblew': 'returnable_won_pct',
+            'inplay': 'in_play_pct',
+            'inplayw': 'in_play_won_pct',
+            'wnr': 'winners_pct',
+            'avgrally': 'avg_rally_length'
+        }
+
+        return mappings.get(header, header)
+
+    def _build_composite_id(self, match_meta: dict) -> str:
+        """Build composite match ID"""
+        try:
+            from datetime import datetime
+            date_str = match_meta.get('Date', '')
+            if len(date_str) == 8:  # YYYYMMDD
+                match_date = datetime.strptime(date_str, '%Y%m%d').date()
+            else:
+                match_date = datetime.now().date()
+
+            tournament = match_meta.get('tournament', '').lower().replace(' ', '_')
+            player1 = self._normalize_player_name(match_meta.get('player1', ''))
+            player2 = self._normalize_player_name(match_meta.get('player2', ''))
+
+            return f"{match_date.strftime('%Y%m%d')}-{tournament}-{player1}-{player2}"
+        except:
+            return f"unknown-{match_meta.get('Date', '')}"
+
+    def scrape_comprehensive_match_data(self, url: str) -> list:
+        """Main method to scrape all Tennis Abstract data from a match URL"""
+
+        try:
+            print(f"Scraping comprehensive data from: {url}")
+
+            # Get page content
+            resp = requests.get(url, headers=self.headers, timeout=30)
+            resp.raise_for_status()
+
+            # Parse match metadata
+            match_meta = self._parse_match_url(url)
+            if not match_meta:
+                print(f"Could not parse match metadata from URL: {url}")
+                return []
+
+            # Extract all JavaScript tables
+            js_tables = self._extract_all_js_tables(resp.text)
+
+            print(f"Extracted {len(js_tables)} JavaScript tables: {list(js_tables.keys())}")
+
+            all_records = []
+
+            # Process each table
+            for table_name, table_html in js_tables.items():
+                records = self._parse_tennis_abstract_table(table_html, table_name, match_meta)
+                print(f"  {table_name}: {len(records)} records")
+                all_records.extend(records)
+
+            print(f"Total records extracted: {len(all_records)}")
+            return all_records
+
+        except Exception as e:
+            print(f"Error scraping {url}: {e}")
+            return []
+
+    # Legacy method names for compatibility - redirect to comprehensive method
+    def scrape_stats_overview(self, url: str) -> list:
+        """Legacy method - now extracts overview from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') == 'overview']
+
+    def scrape_serve_statistics_overview(self, url: str) -> list:
+        """Legacy method - now extracts serve stats from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') in ['serve', 'serve1', 'serve2']]
+
+    def scrape_return_breakdown(self, url: str) -> list:
+        """Legacy method - now extracts return stats from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') in ['return1', 'return2']]
+
+    def scrape_key_point_outcomes(self, url: str) -> list:
+        """Legacy method - now extracts key points from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') == 'keypoints']
+
+    def scrape_rally_outcomes(self, url: str) -> list:
+        """Legacy method - now extracts rally data from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') == 'rallyoutcomes']
+
+    def scrape_net_points(self, url: str) -> list:
+        """Legacy method - now extracts net points from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') in ['netpts1', 'netpts2']]
+
+    def scrape_shot_types(self, url: str) -> list:
+        """Legacy method - now extracts shot types from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') in ['shots1', 'shots2']]
+
+    def scrape_pointlog(self, url: str) -> list:
+        """Legacy method - now extracts point log from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') == 'pointlog']
+
+    def scrape_serve_influence(self, url: str) -> list:
+        """Legacy method - now extracts serve influence from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') == 'serveNeut']
+
+    def scrape_serve_breakdown(self, url: str) -> list:
+        """Legacy method - now extracts detailed serve breakdown from comprehensive data"""
+        all_records = self.scrape_comprehensive_match_data(url)
+        return [r for r in all_records if r.get('data_type') in ['serve1', 'serve2']]
+
+
+class AutomatedTennisAbstractScraper(TennisAbstractScraper):
+    def __init__(self, cache_dir=None):
+        super().__init__()
+        self.cache_dir = Path(cache_dir or "cache") / "tennis_abstract_cache"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.scraped_urls_file = self.cache_dir / "scraped_urls.txt"
+        self.scraped_data_file = self.cache_dir / "scraped_data.parquet"
+
+        # Load previously scraped URLs to avoid duplicates
+        self.scraped_urls = set()
+        if self.scraped_urls_file.exists():
+            with open(self.scraped_urls_file, 'r') as f:
+                self.scraped_urls = set(line.strip() for line in f)
+
+    def discover_match_urls(self, start_date=None, end_date=None, max_pages=50):
+        """Discover Tennis Abstract charting URLs from the actual charting page"""
+        from datetime import date, datetime, timedelta
+
+        if start_date is None:
+            start_date = date(2025, 6, 10)  # Default to our cutoff date
+        if end_date is None:
+            end_date = date.today()
+
+        print(f"Discovering Tennis Abstract URLs from {start_date} to {end_date}")
+
+        # Actual Tennis Abstract charting page
+        charting_url = "https://www.tennisabstract.com/charting/"
+
+        try:
+            resp = requests.get(charting_url, headers=self.headers, timeout=30)
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            match_urls = []
+
+            # Look for all links that match Tennis Abstract charting pattern
+            for link in soup.find_all('a', href=True):
+                href = link['href']
+
+                # Match the actual URL pattern: YYYYMMDD-G-Tournament-Round-Player1-Player2.html
+                if re.match(r'\d{8}-[MW]-.*\.html$', href):
+                    # Convert relative URL to absolute
+                    if href.startswith('http'):
+                        full_url = href
+                    else:
+                        full_url = urljoin(charting_url, href)
+
+                    # Extract date from filename
+                    filename = href.split('/')[-1]
+                    date_str = filename[:8]
+
+                    try:
+                        url_date = datetime.strptime(date_str, '%Y%m%d').date()
+                        if start_date <= url_date <= end_date:
+                            match_urls.append(full_url)
+                    except ValueError:
+                        continue
+
+            # Remove duplicates and already scraped URLs
+            match_urls = list(set(match_urls))
+            new_urls = [url for url in match_urls if url not in self.scraped_urls]
+
+            # Sort by date (newest first)
+            def extract_date_from_url(url):
+                filename = url.split('/')[-1]
+                if re.match(r'\d{8}', filename):
+                    return filename[:8]
+                return '00000000'
+
+            new_urls.sort(key=extract_date_from_url, reverse=True)
+
+            print(f"Found {len(match_urls)} total matches, {len(new_urls)} new to scrape")
+
+            return new_urls[:max_pages]
+
+        except Exception as e:
+            print(f"Error discovering URLs from {charting_url}: {e}")
+            return []
+
+    def scrape_match_comprehensive(self, url):
+        """Scrape all available data from a single Tennis Abstract match page using new method"""
+        print(f"Scraping: {url}")
+
+        try:
+            # Use the new comprehensive scraping method
+            scraped_records = self.scrape_comprehensive_match_data(url)
+
+            if scraped_records:
+                # Mark as successfully scraped
+                self.scraped_urls.add(url)
+                self._save_scraped_url(url)
+
+                return {
+                    'url': url,
+                    'scrape_timestamp': datetime.now(),
+                    'comprehensive_data': scraped_records,
+                    'record_count': len(scraped_records)
+                }
+            else:
+                print(f"No data extracted from {url}")
+                return None
+
+        except Exception as e:
+            print(f"Error scraping {url}: {e}")
+            return None
+
+    def _save_scraped_url(self, url):
+        """Save URL to scraped list to avoid re-scraping"""
+        with open(self.scraped_urls_file, 'a') as f:
+            f.write(f"{url}\n")
+
+    def process_scraped_data_to_features(self, scraped_data):
+        """Convert raw scraped data into standardized features"""
+        if not scraped_data or 'comprehensive_data' not in scraped_data:
+            return []
+
+        records = scraped_data['comprehensive_data']
+
+        # Add scraping metadata to each record
+        for record in records:
+            record.update({
+                'source': 'tennis_abstract',
+                'scrape_url': scraped_data['url'],
+                'scrape_timestamp': scraped_data['scrape_timestamp']
+            })
+
+        return records
+
+    def automated_scraping_session(self, days_back=None, max_matches=100):
+        """Run automated scraping session for matches after 6/10/2025"""
+        from datetime import date, timedelta
+
+        # Default to scraping from our data cutoff date
+        start_date = date(2025, 6, 10)  # Tennis Abstract data starts here
+        end_date = date.today()
+
+        if days_back is not None:
+            start_date = date.today() - timedelta(days=days_back)
+
+        print(f"Running Tennis Abstract scraping session from {start_date} to {end_date}")
+
+        # Discover new URLs to scrape
+        new_urls = self.discover_match_urls(start_date, end_date, max_matches)
+
+        if not new_urls:
+            print("No new Tennis Abstract matches to scrape")
+            return []
+
+        all_records = []
+        successful_scrapes = 0
+
+        for i, url in enumerate(new_urls):
+            print(f"Processing {i + 1}/{len(new_urls)}: {url}")
+
+            try:
+                # Scrape the match
+                scraped_data = self.scrape_match_comprehensive(url)
+
+                if scraped_data:
+                    # Convert to standardized features
+                    records = self.process_scraped_data_to_features(scraped_data)
+                    all_records.extend(records)
+                    successful_scrapes += 1
+                    print(f"  ✓ Successfully scraped {len(records)} feature records")
+                else:
+                    print(f"  ✗ Failed to scrape data")
+
+            except Exception as e:
+                print(f"  ✗ Error processing {url}: {e}")
+                continue
+
+            # Rate limiting - be respectful to Tennis Abstract
+            time.sleep(2)
+
+        print(f"Scraping complete: {successful_scrapes}/{len(new_urls)} matches successful")
+        print(f"Generated {len(all_records)} total feature records")
+        return all_records
+
+def integrate_scraped_data_into_pipeline(historical_data, scraped_records):
+    """Integrate Tennis Abstract scraped data into the main historical dataset"""
+    if not scraped_records:
+        return historical_data
+
+    print(f"Integrating {len(scraped_records)} Tennis Abstract records")
+
+    # Convert scraped records to DataFrame
+    scraped_df = pd.DataFrame(scraped_records)
+
+    # Group by composite_id and player to aggregate features
+    player_features = {}
+
+    for comp_id, group in scraped_df.groupby('composite_id'):
+        # Initialize feature dict for this match
+        if comp_id not in player_features:
+            player_features[comp_id] = {}
+
+        # Process each record type
+        for _, record in group.iterrows():
+            player_canonical = record.get('Player_canonical', '')
+            if not player_canonical:
+                continue
+
+            # Initialize player features
+            if player_canonical not in player_features[comp_id]:
+                player_features[comp_id][player_canonical] = {
+                    'ta_source_rank': 1,  # Tennis Abstract is highest quality
+                    'ta_data_types': set()
+                }
+
+            player_dict = player_features[comp_id][player_canonical]
+            player_dict['ta_data_types'].add(record.get('data_type'))
+
+    # Merge with historical data
+    enhanced_data = historical_data.copy()
+
+    for comp_id, match_players in player_features.items():
+        # Find matching row in historical data
+        match_rows = enhanced_data[enhanced_data['composite_id'] == comp_id]
+
+        if match_rows.empty:
+            continue
+
+        row_idx = match_rows.index[0]
+
+        # Determine which player is winner/loser in historical data
+        winner_canonical = enhanced_data.loc[row_idx, 'winner_canonical']
+        loser_canonical = enhanced_data.loc[row_idx, 'loser_canonical']
+
+        # Map Tennis Abstract players to winner/loser
+        for player_canonical, features in match_players.items():
+            if player_canonical == winner_canonical:
+                prefix = 'winner_'
+            elif player_canonical == loser_canonical:
+                prefix = 'loser_'
+            else:
+                continue  # Player not found in historical data
+
+            # Add features with appropriate prefix
+            for feature_name, feature_value in features.items():
+                if feature_name != 'ta_data_types':
+                    col_name = f"{prefix}{feature_name}"
+                    enhanced_data.loc[row_idx, col_name] = feature_value
+
+    print(f"Enhanced {len(player_features)} matches with Tennis Abstract data")
+    return enhanced_data
+
+
+def run_automated_tennis_abstract_integration(historical_data, days_back=None):
+    """Main function to run automated Tennis Abstract scraping and integration"""
+    print("=== AUTOMATED TENNIS ABSTRACT INTEGRATION ===")
+
+    # Initialize scraper
+    scraper = AutomatedTennisAbstractScraper()
+
+    # Run scraping session (defaults to 6/10/2025 if days_back not specified)
+    scraped_records = scraper.automated_scraping_session(days_back=days_back)
+
+    if not scraped_records:
+        print("No new Tennis Abstract data scraped")
+        return historical_data
+
+    # Integrate into historical data
+    enhanced_data = integrate_scraped_data_into_pipeline(historical_data, scraped_records)
+
+    print(f"Tennis Abstract integration complete. Enhanced dataset with detailed charting features.")
+    return enhanced_data
 
 
 # 2.6 API Integration Functions
@@ -593,14 +1427,6 @@ def extract_embedded_statistics(fixture):
             pass
 
     return stats
-
-
-
-# ----------------------------------------------------------------------------
-# API-TENNIS: Statistics parsing helper
-# ----------------------------------------------------------------------------
-
-# (REMOVED: old parse_match_statistics)
 
 
 # Inserted updated parse_match_statistics function after extract_embedded_statistics
@@ -1106,7 +1932,7 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500):
 
     # Step 7: Integrate API-Tennis and Tennis-Abstract data
     logging.info("Step 7: Integrating API and TA data...")
-    tennis_data = integrate_api_tennis_data(tennis_data, days_back=7)
+    tennis_data = integrate_api_tennis_data_incremental(tennis_data)
 
     logging.info(f"=== DATA GENERATION COMPLETE ===")
     logging.info(f"Final data shape: {tennis_data.shape}")
@@ -1266,94 +2092,9 @@ def integrate_api_tennis_data_incremental(historical_data):
     print(f"Added {len(dates_to_fetch)} days of API data to cache.")
     return df
 
-def verify_match_coverage(start_date, end_date, auto_fix=False):
-    """Check if all matches are captured for date range"""
-    hist, _, _ = load_from_cache()
-    events = api_call("get_events")
-    event_type_keys = [e.get("event_type_key") for e in events if e.get("event_type_key")]
-
-    missing_data = []
-
-    current = start_date
-    while current <= end_date:
-        print(f"Checking {current}...")
-
-        # Count cached matches for this date
-        cached_count = len(hist[(hist["date"] == current) & (hist["source_rank"] == 2)])
-
-        # Count API matches for this date
-        api_count = 0
-        for event_type_key in event_type_keys:
-            fixtures = api_call(
-                "get_fixtures",
-                date_start=current.isoformat(),
-                date_stop=current.isoformat(),
-                event_type_key=event_type_key,
-                timezone="UTC"
-            )
-            api_count += len(fixtures)
-
-        if cached_count != api_count:
-            missing_data.append({
-                'date': current,
-                'cached': cached_count,
-                'api': api_count,
-                'missing': api_count - cached_count
-            })
-            print(f"  MISMATCH: Cached={cached_count}, API={api_count}")
-        else:
-            print(f"  OK: {cached_count} matches")
-
-        current += timedelta(days=1)
-
-    return missing_data
-
-
-def repair_missing_matches(missing_data_list):
-    """Fix dates with missing match data"""
-    if not missing_data_list:
-        print("No missing data to repair")
-        return
-
-    hist, jeff_data, defaults = load_from_cache()
-    events = api_call("get_events")
-    event_type_keys = [e.get("event_type_key") for e in events if e.get("event_type_key")]
-
-    for issue in missing_data_list:
-        day = issue['date']
-        print(f"Repairing {day} (missing {issue['missing']} matches)...")
-
-        # Remove existing API data for this date
-        hist = hist[~((hist["date"] == day) & (hist["source_rank"] == 2))]
-
-        # Re-fetch all matches for this date
-        all_fixtures = []
-        for event_type_key in event_type_keys:
-            fixtures = api_call(
-                "get_fixtures",
-                date_start=day.isoformat(),
-                date_stop=day.isoformat(),
-                event_type_key=event_type_key,
-                timezone="UTC"
-            )
-            all_fixtures.extend(fixtures)
-
-        # Process fixtures (same logic as integrate_api_tennis_data_incremental)
-        for fixture in all_fixtures:
-    # [same processing logic as before]
-    # Add to hist with source_rank=2
-
-    # Save repaired cache
-    save_to_cache(hist, jeff_data, defaults)
-    print(f"Repaired {len(missing_data_list)} dates")
 # ============================================================================
 # CACHE FUNCTIONS
 # ============================================================================
-
-CACHE_DIR = os.path.expanduser("~/Desktop/data/cache")
-HD_PATH = os.path.join(CACHE_DIR, "historical_data.parquet")
-JEFF_PATH = os.path.join(CACHE_DIR, "jeff_data.pkl")
-DEF_PATH = os.path.join(CACHE_DIR, "weighted_defaults.pkl")
 
 def save_to_cache(historical_data, jeff_data, weighted_defaults):
     """Save data to cache"""
@@ -1388,8 +2129,8 @@ def save_to_cache(historical_data, jeff_data, weighted_defaults):
 def load_from_cache():
     """Load data from cache if available, with graceful fallback."""
     if (os.path.exists(HD_PATH) and
-        os.path.exists(JEFF_PATH) and
-        os.path.exists(DEF_PATH)):
+            os.path.exists(JEFF_PATH) and
+            os.path.exists(DEF_PATH)):
         try:
             logging.info("Loading from cache...")
             historical_data = pd.read_parquet(HD_PATH)
@@ -1401,6 +2142,33 @@ def load_from_cache():
         except Exception as e:
             logging.warning(f"Cache load failed, regenerating data: {e}")
     return None, None, None
+
+def load_from_cache_with_scraping():
+    """Load data from cache and optionally run incremental Tennis Abstract scraping"""
+    hist, jeff_data, defaults = load_from_cache()
+
+    if hist is not None:
+        # Check if we need to update with recent Tennis Abstract data
+        # Look for Tennis Abstract features to see if we've integrated before
+        ta_columns = [col for col in hist.columns if col.startswith(('winner_ta_', 'loser_ta_'))]
+
+        if not ta_columns:
+            print("No Tennis Abstract data found in cache. Running initial integration...")
+            hist = run_automated_tennis_abstract_integration(hist)
+            save_to_cache(hist, jeff_data, defaults)
+        else:
+            # Check for recent updates
+            latest_date = hist['date'].max() if 'date' in hist.columns else date(2025, 6, 10)
+            days_since_update = (date.today() - latest_date).days
+
+            if days_since_update > 2:  # Update every 2 days for Tennis Abstract
+                print(f"Updating Tennis Abstract data (last update: {latest_date})")
+                hist = run_automated_tennis_abstract_integration(hist, days_back=min(days_since_update + 1, 7))
+                save_to_cache(hist, jeff_data, defaults)
+            else:
+                print(f"Tennis Abstract data is current (last update: {latest_date})")
+
+    return hist, jeff_data, defaults
 
 def safe_int_convert(value):
     """
@@ -1435,192 +2203,298 @@ def parse_match_statistics(fixture: dict) -> dict[int, dict]:
     return stats
 
 # %%
-
 import random
 
+# ============================================================================
+# UPDATED PREDICTION MODEL WITH UNIFIED FEATURE EXTRACTION
+# ============================================================================
 
-class BayesianTennisModel:
+import pandas as pd
+import numpy as np
+import random
+from datetime import date
+
+
+class UnifiedBayesianTennisModel:
+    """Enhanced model that handles features from any data source"""
+
     def __init__(self, n_simulations: int = 1000):
         self.n_simulations = n_simulations
 
         # Surface adjustment factors
         self.surface_adjustments = {
-            "Clay": {"serve_advantage": 0.95, "rally_importance": 1.1},
-            "Grass": {"serve_advantage": 1.1, "rally_importance": 0.9},
-            "Hard": {"serve_advantage": 1.0, "rally_importance": 1.0},
-            "Unknown": {"serve_advantage": 1.0, "rally_importance": 1.0}
+            "Clay": {"serve_advantage": 0.92, "rally_importance": 1.15, "consistency_weight": 1.2},
+            "Grass": {"serve_advantage": 1.15, "rally_importance": 0.85, "consistency_weight": 0.9},
+            "Hard": {"serve_advantage": 1.0, "rally_importance": 1.0, "consistency_weight": 1.0},
+            "Indoor Hard": {"serve_advantage": 1.08, "rally_importance": 0.95, "consistency_weight": 0.95}
         }
 
-    def _calculate_ranking_factor(self, p1_rank, p2_rank):
-        """Calculate ranking-based probability adjustment"""
-        if pd.isna(p1_rank) or pd.isna(p2_rank):
-            return 0.5
+    def _calculate_serve_probability(self, server_features: dict, returner_features: dict, surface: str):
+        """Calculate serve game win probability using unified features"""
+        base_prob = 0.65
 
-        # Convert rankings to strength (lower rank = higher strength)
-        p1_strength = 1000 / (p1_rank + 50)  # +50 to avoid division issues
-        p2_strength = 1000 / (p2_rank + 50)
+        # Server effectiveness
+        serve_eff = server_features.get('serve_effectiveness', 0.65)
 
-        # Convert to probability
-        total_strength = p1_strength + p2_strength
-        return p1_strength / total_strength if total_strength > 0 else 0.5
+        # Return resistance
+        return_eff = returner_features.get('return_effectiveness', 0.35)
 
-    def _calculate_h2h_factor(self, h2h_matches, p1_h2h_win_pct):
-        """Calculate head-to-head probability adjustment with confidence weighting"""
-        if h2h_matches == 0:
-            return 0.5
+        # Pressure performance
+        pressure = server_features.get('pressure_performance', 0.5)
 
-        # Weight H2H by number of matches (more matches = more reliable)
-        confidence = min(h2h_matches / 10.0, 1.0)  # Max confidence at 10+ matches
-        base_prob = 0.5
+        # Surface adjustment
+        surface_adj = self.surface_adjustments.get(surface, self.surface_adjustments["Hard"])
 
-        return base_prob + confidence * (p1_h2h_win_pct - base_prob)
-
-    def _calculate_odds_factor(self, implied_prob_p1, implied_prob_p2):
-        """Calculate market-implied probability with vig removal"""
-        if pd.isna(implied_prob_p1) or pd.isna(implied_prob_p2):
-            return 0.5
-
-        # Remove bookmaker vig (overround)
-        total_implied = implied_prob_p1 + implied_prob_p2
-        if total_implied <= 0:
-            return 0.5
-
-        return implied_prob_p1 / total_implied
-
-    def _estimate_point_win_prob(self, p1_stats: dict, p2_stats: dict, match_context: dict = None):
-        """Enhanced point probability estimation with API features"""
-        # Base probability from serve/return stats
-        serve_pts = p1_stats.get("serve_pts", 1)
-        first_won = p1_stats.get("first_serve_won", 0)
-        return_pts = p1_stats.get("return_pts_won", 0)
-        opp_serve_pts = p2_stats.get("serve_pts", 1)
-
-        # Offensive component: player1's first serve win rate
-        off = first_won / serve_pts if serve_pts else 0.5
-        # Defensive component: player1's return success
-        defense = return_pts / opp_serve_pts if opp_serve_pts else 0.5
-        base_prob = min(max((off + defense) / 2, 0.01), 0.99)
-
-        if not match_context:
-            return base_prob
-
-        # Apply surface adjustments
-        surface = match_context.get("surface", "Unknown")
-        surface_adj = self.surface_adjustments.get(surface, self.surface_adjustments["Unknown"])
-
-        # Adjust for serve advantage on different surfaces
-        if off > defense:  # Player 1 is more serve-oriented
-            base_prob *= surface_adj["serve_advantage"]
-        else:  # Player 1 is more defensive/return-oriented
-            base_prob *= surface_adj["rally_importance"]
-
-        # Incorporate ranking factor
-        ranking_prob = self._calculate_ranking_factor(
-            match_context.get("p1_ranking"),
-            match_context.get("p2_ranking")
+        # Combined probability
+        serve_prob = (
+                base_prob * 0.3 +
+                serve_eff * surface_adj["serve_advantage"] * 0.4 +
+                (1 - return_eff) * 0.2 +
+                pressure * 0.1
         )
 
-        # Incorporate H2H factor
-        h2h_prob = self._calculate_h2h_factor(
-            match_context.get("h2h_matches", 0),
-            match_context.get("p1_h2h_win_pct", 0.5)
+        return min(max(serve_prob, 0.1), 0.9)
+
+    def _calculate_rally_probability(self, p1_features: dict, p2_features: dict, surface: str):
+        """Calculate rally win probability using unified features"""
+
+        # Winners vs unforced errors ratio
+        p1_aggression = p1_features.get('winners_rate', 0.2) / (p1_features.get('unforced_rate', 0.18) + 0.01)
+        p2_aggression = p2_features.get('winners_rate', 0.2) / (p2_features.get('unforced_rate', 0.18) + 0.01)
+
+        # Net game strength
+        p1_net = p1_features.get('net_effectiveness', 0.65)
+        p2_net = p2_features.get('net_effectiveness', 0.65)
+
+        # Surface adjustments
+        surface_adj = self.surface_adjustments.get(surface, self.surface_adjustments["Hard"])
+
+        # Combined rally strength
+        p1_rally_strength = (
+                p1_aggression * surface_adj.get("consistency_weight", 1.0) * 0.4 +
+                p1_net * 0.3 +
+                p1_features.get('pressure_performance', 0.5) * 0.3
         )
 
-        # Incorporate odds factor
-        odds_prob = self._calculate_odds_factor(
-            match_context.get("implied_prob_p1"),
-            match_context.get("implied_prob_p2")
+        p2_rally_strength = (
+                p2_aggression * surface_adj.get("consistency_weight", 1.0) * 0.4 +
+                p2_net * 0.3 +
+                p2_features.get('pressure_performance', 0.5) * 0.3
         )
 
-        # Weighted combination of factors
-        weights = {
-            "stats": 0.4,  # Match statistics
-            "ranking": 0.25,  # Current form/ranking
-            "h2h": 0.15,  # Historical matchup
-            "odds": 0.2  # Market expectation
-        }
+        total_strength = p1_rally_strength + p2_rally_strength
+        return p1_rally_strength / total_strength if total_strength > 0 else 0.5
 
-        # Only use available factors
-        available_factors = [("stats", base_prob)]
-        if not pd.isna(ranking_prob):
-            available_factors.append(("ranking", ranking_prob))
-        if h2h_prob != 0.5:  # Only if H2H data exists
-            available_factors.append(("h2h", h2h_prob))
-        if odds_prob != 0.5:  # Only if odds data exists
-            available_factors.append(("odds", odds_prob))
+    def _simulate_game(self, p1_features: dict, p2_features: dict, match_context: dict, server: int):
+        """Simulate a single game"""
+        surface = match_context.get('surface', 'Hard')
 
-        # Normalize weights for available factors
-        total_weight = sum(weights[name] for name, _ in available_factors)
+        if server == 1:
+            serve_prob = self._calculate_serve_probability(p1_features, p2_features, surface)
+        else:
+            serve_prob = self._calculate_serve_probability(p2_features, p1_features, surface)
+            serve_prob = 1 - serve_prob
 
-        combined_prob = sum(
-            weights[name] * prob for name, prob in available_factors
-        ) / total_weight
+        rally_prob = self._calculate_rally_probability(p1_features, p2_features, surface)
 
-        return min(max(combined_prob, 0.01), 0.99)
-
-    def simulate_set(self, p1_stats, p2_stats, match_context=None):
-        """Simulate one set with enhanced probability calculation"""
-        p1_games = p2_games = 0
-        p_point = self._estimate_point_win_prob(p1_stats, p2_stats, match_context)
+        # Simulate points
+        p1_points = p2_points = 0
 
         while True:
-            # Simulate a game to 4 points, win by 2
-            p1_points = p2_points = 0
-            while True:
-                if random.random() < p_point:
-                    p1_points += 1
-                else:
-                    p2_points += 1
-                if (p1_points >= 4 or p2_points >= 4) and abs(p1_points - p2_points) >= 2:
-                    break
+            # Use serve probability for most points, blend with rally for long games
+            if p1_points < 3 and p2_points < 3:
+                point_prob = serve_prob
+            else:
+                point_prob = serve_prob * 0.7 + rally_prob * 0.3
 
-            winner = 1 if p1_points > p2_points else 2
-            if winner == 1:
+            if random.random() < point_prob:
+                p1_points += 1
+            else:
+                p2_points += 1
+
+            # Check for game win
+            if (p1_points >= 4 or p2_points >= 4) and abs(p1_points - p2_points) >= 2:
+                return 1 if p1_points > p2_points else 2
+
+    def _simulate_set(self, p1_features: dict, p2_features: dict, match_context: dict):
+        """Simulate one set"""
+        p1_games = p2_games = 0
+        server = 1
+
+        while True:
+            game_winner = self._simulate_game(p1_features, p2_features, match_context, server)
+
+            if game_winner == 1:
                 p1_games += 1
             else:
                 p2_games += 1
 
-            # Check set win
+            server = 2 if server == 1 else 1
+
+            # Check for set win
             if (p1_games >= 6 or p2_games >= 6) and abs(p1_games - p2_games) >= 2:
                 return 1 if p1_games > p2_games else 2
-            if p1_games == 6 and p2_games == 6:
-                # Tiebreak at 6-6
-                tb_winner = self.simulate_tiebreak(p1_stats, p2_stats, match_context)
-                return tb_winner
+            elif p1_games == 6 and p2_games == 6:
+                # Simplified tiebreak
+                tb_prob = self._calculate_rally_probability(p1_features, p2_features,
+                                                            match_context.get('surface', 'Hard'))
+                return 1 if random.random() < tb_prob else 2
 
-    def simulate_tiebreak(self, p1_stats, p2_stats, match_context=None):
-        """Simulate a tiebreak with enhanced probability calculation"""
-        p1_score = p2_score = 0
-        p_point = self._estimate_point_win_prob(p1_stats, p2_stats, match_context)
-
-        while True:
-            if random.random() < p_point:
-                p1_score += 1
-            else:
-                p2_score += 1
-            if (p1_score >= 7 or p2_score >= 7) and abs(p1_score - p2_score) >= 2:
-                return 1 if p1_score > p2_score else 2
-
-    def simulate_match(self, p1_stats, p2_stats, match_context=None, best_of: int = 3):
-        """Simulate a match with full API feature integration"""
+    def simulate_match(self, p1_features: dict, p2_features: dict, match_context: dict, best_of: int = 3):
+        """Simulate complete match"""
         results = []
+
         for _ in range(self.n_simulations):
             p1_sets = p2_sets = 0
-            for _ in range(best_of):
-                winner = self.simulate_set(p1_stats, p2_stats, match_context)
-                if winner == 1:
+
+            while p1_sets <= best_of // 2 and p2_sets <= best_of // 2:
+                set_winner = self._simulate_set(p1_features, p2_features, match_context)
+
+                if set_winner == 1:
                     p1_sets += 1
                 else:
                     p2_sets += 1
+
                 if p1_sets > best_of // 2 or p2_sets > best_of // 2:
                     break
+
             results.append(1 if p1_sets > p2_sets else 0)
+
         return sum(results) / len(results)
 
 
-# Updated main prediction function
-def predict_match_with_full_api_integration(args, hist, jeff_data, defaults):
-    """Enhanced prediction function using all available API features"""
+def extract_unified_features(match_data, player_prefix):
+    """Extract features with fallbacks across all data sources"""
+    features = {}
+
+    # Serve effectiveness (Tennis Abstract > Jeff > API > defaults)
+    if f'{player_prefix}_ta_serve_won_pct' in match_data:
+        features['serve_effectiveness'] = match_data[f'{player_prefix}_ta_serve_won_pct']
+    elif f'{player_prefix}_serve_pts' in match_data and f'{player_prefix}_serve_pts' != 0:
+        serve_pts = match_data.get(f'{player_prefix}_serve_pts', 80)
+        first_won = match_data.get(f'{player_prefix}_first_won', 0)
+        second_won = match_data.get(f'{player_prefix}_second_won', 0)
+        features['serve_effectiveness'] = (first_won + second_won) / serve_pts if serve_pts > 0 else 0.65
+    else:
+        features['serve_effectiveness'] = 0.65
+
+    # Return effectiveness
+    if f'{player_prefix}_ta_return_won_pct' in match_data:
+        features['return_effectiveness'] = match_data[f'{player_prefix}_ta_return_won_pct']
+    elif f'{player_prefix}_return_pts_won' in match_data:
+        return_pts = match_data.get(f'{player_prefix}_return_pts', 80)
+        return_won = match_data.get(f'{player_prefix}_return_pts_won', 25)
+        features['return_effectiveness'] = return_won / return_pts if return_pts > 0 else 0.35
+    else:
+        features['return_effectiveness'] = 0.35
+
+    # Winners rate
+    if f'{player_prefix}_ta_overview_winners' in match_data:
+        serve_pts = match_data.get(f'{player_prefix}_ta_serve_points', 80)
+        return_pts = match_data.get(f'{player_prefix}_ta_return_points', 70)
+        total_pts = serve_pts + return_pts
+        features['winners_rate'] = match_data[
+                                       f'{player_prefix}_ta_overview_winners'] / total_pts if total_pts > 0 else 0.20
+    elif f'{player_prefix}_winners_total' in match_data:
+        serve_pts = match_data.get(f'{player_prefix}_serve_pts', 80)
+        features['winners_rate'] = match_data[f'{player_prefix}_winners_total'] / serve_pts if serve_pts > 0 else 0.20
+    else:
+        features['winners_rate'] = 0.20
+
+    # Unforced errors rate
+    if f'{player_prefix}_ta_overview_unforced' in match_data:
+        serve_pts = match_data.get(f'{player_prefix}_ta_serve_points', 80)
+        return_pts = match_data.get(f'{player_prefix}_ta_return_points', 70)
+        total_pts = serve_pts + return_pts
+        features['unforced_rate'] = match_data[
+                                        f'{player_prefix}_ta_overview_unforced'] / total_pts if total_pts > 0 else 0.18
+    elif f'{player_prefix}_unforced_errors' in match_data:
+        serve_pts = match_data.get(f'{player_prefix}_serve_pts', 80)
+        features['unforced_rate'] = match_data[
+                                        f'{player_prefix}_unforced_errors'] / serve_pts if serve_pts > 0 else 0.18
+    else:
+        features['unforced_rate'] = 0.18
+
+    # Pressure performance
+    if f'{player_prefix}_pressure_performance' in match_data:
+        features['pressure_performance'] = match_data[f'{player_prefix}_pressure_performance']
+    elif f'{player_prefix}_key_points_serve_won_pct' in match_data:
+        features['pressure_performance'] = match_data[f'{player_prefix}_key_points_serve_won_pct']
+    else:
+        features['pressure_performance'] = 0.50
+
+    # Net game effectiveness
+    if f'{player_prefix}_ta_net_won_pct' in match_data:
+        features['net_effectiveness'] = match_data[f'{player_prefix}_ta_net_won_pct']
+    elif f'{player_prefix}_net_points_won_pct' in match_data:
+        features['net_effectiveness'] = match_data[f'{player_prefix}_net_points_won_pct']
+    else:
+        features['net_effectiveness'] = 0.65
+
+    return features
+
+
+def extract_unified_match_context(match_data):
+    """Extract match context from any data source"""
+    context = {}
+
+    # Surface
+    context['surface'] = match_data.get('surface', match_data.get('Surface', 'Hard'))
+
+    # Rankings
+    context['p1_ranking'] = match_data.get('p1_ranking', match_data.get('WRank'))
+    context['p2_ranking'] = match_data.get('p2_ranking', match_data.get('LRank'))
+
+    # H2H data
+    context['h2h_matches'] = match_data.get('h2h_matches', 0)
+    context['p1_h2h_win_pct'] = match_data.get('p1_h2h_win_pct', 0.5)
+
+    # Odds
+    context['odds_p1'] = match_data.get('odds_p1', match_data.get('PSW'))
+    context['odds_p2'] = match_data.get('odds_p2', match_data.get('PSL'))
+
+    if context['odds_p1'] and context['odds_p2']:
+        context['implied_prob_p1'] = 1 / context['odds_p1']
+        context['implied_prob_p2'] = 1 / context['odds_p2']
+
+    # Data quality
+    context['source_rank'] = match_data.get('source_rank', 3)
+    context['data_quality_score'] = calculate_data_quality_unified(match_data)
+
+    return context
+
+
+def calculate_data_quality_unified(match_data):
+    """Calculate data quality score based on available features"""
+    score = 0.3  # Base score
+
+    # Source quality bonus
+    source_rank = match_data.get('source_rank', 3)
+    if source_rank == 1:  # Tennis Abstract
+        score += 0.4
+    elif source_rank == 2:  # API-Tennis
+        score += 0.25
+    elif source_rank == 3:  # Jeff/Tennis files
+        score += 0.1
+
+    # Feature availability bonus
+    ta_features = sum(1 for k in match_data.keys() if 'ta_' in k)
+    jeff_features = sum(
+        1 for k in match_data.keys() if any(x in k for x in ['serve_pts', 'winners_total', 'pressure_performance']))
+    api_features = sum(1 for k in match_data.keys() if any(x in k for x in ['ranking', 'odds', 'h2h']))
+
+    if ta_features > 10:
+        score += 0.25
+    elif jeff_features > 8:
+        score += 0.15
+    elif api_features > 5:
+        score += 0.1
+
+    return min(score, 1.0)
+
+
+def predict_match_unified(args, hist, jeff_data, defaults):
+    """UPDATED: Unified prediction function that works with any data source"""
 
     # Build composite_id for lookup
     match_date = pd.to_datetime(args.date).date()
@@ -1630,7 +2504,6 @@ def predict_match_with_full_api_integration(args, hist, jeff_data, defaults):
                                   normalize_name(args.player2), normalize_name(args.player1))
 
     print(f"Looking for match: {comp_id1}")
-    print(f"Alternative order: {comp_id2}")
 
     row = hist[hist["composite_id"] == comp_id1]
     player_order_swapped = False
@@ -1643,44 +2516,86 @@ def predict_match_with_full_api_integration(args, hist, jeff_data, defaults):
             player_order_swapped = True
 
     if row.empty:
-        print(f"No data for either order:")
-        print(f"  {comp_id1}")
-        print(f"  {comp_id2}")
+        print(f"No data found for match")
         return None
 
-    # Extract all available features
+    # Extract match data
     match_row = row.iloc[0]
+    match_dict = match_row.to_dict()
 
-    # Extract player stats (accounting for potential player order swap)
+    # Handle player order swapping
     if player_order_swapped:
-        p1_stats = {col[len("loser_"):]: match_row[col] for col in hist.columns if col.startswith("loser_")}
-        p2_stats = {col[len("winner_"):]: match_row[col] for col in hist.columns if col.startswith("winner_")}
-        # Swap API features too
-        match_context = {
-            "surface": match_row.get("surface"),
-            "p1_ranking": match_row.get("p2_ranking"),
-            "p2_ranking": match_row.get("p1_ranking"),
-            "h2h_matches": match_row.get("h2h_matches", 0),
-            "p1_h2h_win_pct": 1 - match_row.get("p1_h2h_win_pct", 0.5),  # Flip H2H
-            "implied_prob_p1": match_row.get("implied_prob_p2"),
-            "implied_prob_p2": match_row.get("implied_prob_p1"),
-        }
-    else:
-        p1_stats = {col[len("winner_"):]: match_row[col] for col in hist.columns if col.startswith("winner_")}
-        p2_stats = {col[len("loser_"):]: match_row[col] for col in hist.columns if col.startswith("loser_")}
-        match_context = {
-            "surface": match_row.get("surface"),
-            "p1_ranking": match_row.get("p1_ranking"),
-            "p2_ranking": match_row.get("p2_ranking"),
-            "h2h_matches": match_row.get("h2h_matches", 0),
-            "p1_h2h_win_pct": match_row.get("p1_h2h_win_pct", 0.5),
-            "implied_prob_p1": match_row.get("implied_prob_p1"),
-            "implied_prob_p2": match_row.get("implied_prob_p2"),
-        }
+        # Swap winner/loser prefixes in the data
+        swapped_dict = {}
+        for key, value in match_dict.items():
+            if key.startswith('winner_'):
+                swapped_dict[key.replace('winner_', 'loser_')] = value
+            elif key.startswith('loser_'):
+                swapped_dict[key.replace('loser_', 'winner_')] = value
+            else:
+                swapped_dict[key] = value
+        match_dict = swapped_dict
 
+    # Extract unified features for both players
+    p1_features = extract_unified_features(match_dict, 'winner')
+    p2_features = extract_unified_features(match_dict, 'loser')
+    match_context = extract_unified_match_context(match_dict)
+
+    # Determine data source and quality
+    source_rank = match_dict.get('source_rank', 3)
+    data_sources = {1: 'Tennis Abstract', 2: 'API-Tennis', 3: 'Tennis Data Files'}
+    print(f"Data source: {data_sources.get(source_rank, 'Unknown')} (rank: {source_rank})")
+    print(f"Data quality score: {match_context['data_quality_score']:.2f}")
+
+    # Run prediction with unified model
+    model = UnifiedBayesianTennisModel()
+    prob = model.simulate_match(p1_features, p2_features, match_context, best_of=args.best_of)
+
+    # Show feature breakdown
+    print(f"\n=== UNIFIED FEATURE ANALYSIS ===")
+    print(f"Surface: {match_context.get('surface', 'Unknown')}")
+    print(f"Rankings: P1={match_context.get('p1_ranking', 'N/A')}, P2={match_context.get('p2_ranking', 'N/A')}")
+    print(
+        f"H2H Record: {match_context.get('h2h_matches', 0)} matches, P1 win rate: {match_context.get('p1_h2h_win_pct', 0.5):.1%}")
+
+    if match_context.get('implied_prob_p1'):
+        print(
+            f"Market Odds: P1={match_context.get('implied_prob_p1'):.1%}, P2={match_context.get('implied_prob_p2'):.1%}")
+
+    print(f"\n=== PLAYER FEATURES ===")
+    for feature_name, p1_val in p1_features.items():
+        p2_val = p2_features.get(feature_name, 0)
+        print(f"{feature_name}: P1={p1_val:.3f}, P2={p2_val:.3f}")
+
+    return prob
+
+
+# Helper functions (should be imported from tennis_updated.py)
+def build_composite_id(match_date, tourney_slug, p1_slug, p2_slug):
+    """Build composite match ID"""
+    if pd.isna(match_date):
+        raise ValueError("match_date is NaT")
+    ymd = pd.to_datetime(match_date).strftime("%Y%m%d")
+    return f"{ymd}-{tourney_slug}-{p1_slug}-{p2_slug}"
+
+
+def normalize_tournament_name(name, gender=None):
+    """Normalize tournament names"""
+    if pd.isna(name):
+        return ""
+    return str(name).lower().strip().replace(' ', '_')
+
+
+def normalize_name(name):
+    """Normalize player names"""
+    if pd.isna(name):
+        return ""
+    return str(name).replace('.', '').lower().replace(' ', '_')
+
+#%%
     # Run enhanced prediction
     model = BayesianTennisModel()
-    prob = model.simulate_match(p1_stats, p2_stats, match_context, best_of=args.best_of)
+    prob = predict_match_unified(args, hist, jeff_data, defaults)
 
     # Print feature breakdown
     print(f"\n=== PREDICTION FEATURES ===")
@@ -1706,15 +2621,17 @@ if __name__ == "__main__":
     parser.add_argument("--best_of", type=int, default=3, help="Sets in match, default 3")
     args = parser.parse_args()
 
-    # Load or generate data
-    hist, jeff_data, defaults = load_from_cache()
+    # Load or generate data with Tennis Abstract integration
+    hist, jeff_data, defaults = load_from_cache_with_scraping()
     if hist is None:
         print("No cache found. Generating full historical dataset...")
         hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
+        # Add Tennis Abstract scraping
+        hist = run_automated_tennis_abstract_integration(hist)
         save_to_cache(hist, jeff_data, defaults)
-        print("Historical data cached for future use.")
+        print("Historical data with Tennis Abstract integration cached for future use.")
     else:
-        print("Loaded historical data from cache.")
+        print("Loaded historical data from cache with Tennis Abstract integration.")
 
     # Integrate recent API data with full feature set
     print("Integrating recent API data with full feature extraction...")
@@ -1722,7 +2639,7 @@ if __name__ == "__main__":
     save_to_cache(hist, jeff_data, defaults)
 
     # Run enhanced prediction
-    prob = predict_match_with_full_api_integration(args, hist, jeff_data, defaults)
+    prob = predict_match_with_enhanced_model(args, hist, jeff_data, defaults)
 
     if prob is not None:
         print(f"\n=== FINAL PREDICTION ===")
@@ -1730,1037 +2647,3 @@ if __name__ == "__main__":
         print(f"P({args.player2} wins) = {1 - prob:.3f}")
     else:
         print("Prediction failed - no match data found")
-
-#%%
-class TennisAbstractScraper:
-    # ------------------------------------------------------------------
-    # helper: the "serve" JS variable actually contains TWO tables
-    # (Serve Basics + Direction).  Split them cleanly.
-    # ------------------------------------------------------------------
-    def _split_serve_tables(self, raw_html: str) -> tuple[str, str]:
-        """Return `(basics_html, direction_html)` from the combined blob."""
-        tables = BeautifulSoup(raw_html, "html.parser").find_all("table")
-        if not tables:
-            return "", ""
-        basics_html = str(tables[0])
-        direction_html = str(tables[1]) if len(tables) > 1 else ""
-        return basics_html, direction_html
-    # Column headers → Jeff keys for the “Serve Influence” table
-    MAP_SERVE_INFL = {
-        "1+ shots": "srv_neut_len1_pct",
-        "2+": "srv_neut_len2_pct",
-        "3+": "srv_neut_len3_pct",
-        "4+": "srv_neut_len4_pct",
-        "5+": "srv_neut_len5_pct",
-        "6+": "srv_neut_len6_pct",
-        "7+": "srv_neut_len7_pct",
-        "8+": "srv_neut_len8_pct",
-        "9+": "srv_neut_len9_pct",
-        "10+": "srv_neut_len10_pct",
-    }
-    def __init__(self, jeff_headers: set[str] | None = None):
-        self.headers = {"User-Agent": "Mozilla/5.0"}
-        self.jeff_headers = jeff_headers if jeff_headers is not None else JEFF_HEADERS
-
-    # --- generic cell parser ------------------------------------------
-    def _to_int(self, text):
-        """
-        Extract leading integer from a value such as '51  (52%)', '0', or a numeric/NaN.
-        Returns 0 when the value is missing or no digit is found.
-        """
-        import pandas as pd
-        # Handle None / NaN (including numpy.nan) early
-        if text is None or pd.isna(text):
-            return 0
-
-        # Direct numeric input
-        if isinstance(text, (int, float)):
-            return int(text)
-
-        # Fallback for string input
-        m = re.search(r"\d+", str(text))
-        return int(m.group(0)) if m else 0
-
-    def _filter_jeff(self, rec: dict) -> dict:
-        """
-        Pass‑through filter: return the record unchanged.
-
-        The caller now receives *all* scraped fields, not just the subset
-        present in Jeff Sackmann’s original column set.  Down‑stream code
-        should handle any extra keys as needed.
-        """
-        return rec
-
-    # --- helper: canonicalise a player name ----------------------------
-    def _normalize_player_name(self, name: str) -> str:
-        import re, unicodedata
-        name = unicodedata.normalize("NFKD", name).strip()
-        name = re.sub(r"[\s\-]+", "_", name)
-        return name.lower()
-
-    # --- Jeff conversion placeholder ---------------------------------
-    def _convert_to_jeff_format(self, raw_records: list[dict], match_meta: dict) -> list[dict]:
-        """
-        Translate raw parsed records into Jeff‑style keys.
-
-        Current placeholder just merges match metadata onto every
-        raw record and returns the list unchanged.
-
-        Parameters
-        ----------
-        raw_records : list[dict]
-            Data extracted from a stats table.
-        match_meta : dict
-            Output of `_parse_match_url` with Date, tournament, etc.
-
-        Returns
-        -------
-        list[dict]
-            Records augmented with basic match metadata.
-        """
-        if not raw_records:
-            return []
-
-        shared = match_meta.copy()
-        out = []
-        for rec in raw_records:
-            merged = rec.copy()
-            for k, v in shared.items():
-                if k not in merged:
-                    merged[k] = v
-            out.append(merged)
-        return out
-
-    def _parse_match_url(self, url: str) -> dict:
-        """
-        Parse a Tennis‑Abstract charting URL for basic metadata.
-
-        URL pattern (examples)
-        ----------------------
-        https://…/20250701-W-Wimbledon-R128-Mayar_Sherif-Mirra_Andreeva.html
-        https://…/20240611-M-French_Open-SF-Nadal_R-Djokovic_N.html
-
-        Returns
-        -------
-        dict with keys
-          Date, gender, tournament, round, player1, player2
-        """
-        from urllib.parse import urlparse
-        import os
-
-        fname = os.path.basename(urlparse(url).path)
-        if not fname.endswith(".html"):
-            return {}
-
-        parts = fname[:-5].split("-")              # drop ".html"
-        if len(parts) < 6 or not parts[0].isdigit():
-            return {}
-
-        date_str = parts[0]
-        gender   = parts[1]                        # "M" or "W"
-        # The last three tokens are <round> <player1> <player2>
-        round_tok = parts[-3]
-        player1   = parts[-2].replace("_", " ")
-        player2   = parts[-1].replace("_", " ")
-        tournament = "-".join(parts[2:-3]).replace("_", " ")
-
-        return {
-            "Date"     : date_str,
-            "gender"   : gender,
-            "tournament": tournament,
-            "round"    : round_tok,
-            "player1"  : player1,
-            "player2"  : player2,
-        }
-
-    # ------------------------------------------------------------------
-    #  header scraper
-    # ------------------------------------------------------------------
-    def _extract_match_header(self, soup: BeautifulSoup) -> dict:
-        """
-        Extract header metadata displayed above the stats tables.
-
-        Expected HTML structure:
-
-          <h2>2025 Wimbledon R128: Mayar Sherif vs Mirra Andreeva</h2>
-          <b>Mirra Andreeva d. Mayar Sherif 6-3 6-3</b>
-        """
-        head_tag = soup.find("h2")
-        bold_tag = soup.find("b")
-        if not head_tag:
-            return {}
-
-        # ---------- line 1 -------------------------------------------------
-        head_text = head_tag.get_text(" ", strip=True)
-        if ":" not in head_text or " vs " not in head_text.lower():
-            return {}
-
-        left, right = head_text.split(":", 1)
-        year_tour_round = left.strip().split()
-        if len(year_tour_round) < 3 or not year_tour_round[0].isdigit():
-            return {}
-
-        year   = year_tour_round[0]
-        round_ = year_tour_round[-1]
-        tournament = " ".join(year_tour_round[1:-1])
-
-        p1, p2 = [p.strip() for p in re.split(r"\s+vs\s+", right, flags=re.I)]
-
-        # ---------- line 2 -------------------------------------------------
-        winner = loser = score = ""
-        if bold_tag:
-            bold_text = bold_tag.get_text(" ", strip=True)
-            m = re.match(r"(.+?)\s+d\.\s+(.+?)\s+([\d\s\-–]+)$", bold_text, flags=re.I)
-            if m:
-                winner, loser, score = m.groups()
-
-        return {
-            "year"     : year,
-            "tournament": tournament,
-            "round"    : round_,
-            "player1"  : p1,
-            "player2"  : p2,
-            "winner"   : winner.strip(),
-            "loser"    : loser.strip(),
-            "score"    : score.strip()
-        }
-
-    # ──────────────────────────────────────────────────────────────────────────
-    #  Stats Overview entry point – now merges header metadata
-    # ──────────────────────────────────────────────────────────────────────────
-    def scrape_stats_overview(self, url):
-        resp = requests.get(url, headers=self.headers)
-        try:
-            soup = BeautifulSoup(resp.text, "lxml")
-        except FeatureNotFound:
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-        # header block
-        header_meta = self._extract_match_header(soup)
-
-        # embedded JS blocks
-        scripts = [t.string for t in soup.find_all("script") if t.string]
-        blocks  = dict(re.findall(r"var\s+(\w+)\s*=\s*'([\s\S]*?)';",
-                                  "\n".join(scripts), re.S))
-        labels  = {sp.get_text(strip=True): sp["id"]
-                   for sp in soup.select("span.rounds")}
-        stats_html = html.unescape(blocks.get(labels.get("Stats Overview", ""), ""))
-
-        records = self._extract_stats_overview_table(stats_html)
-
-        # attach meta
-        for r in records:
-            r.update(header_meta)
-
-        return records
-
-
-    def scrape_serve_influence(self, url):
-        resp  = requests.get(url, headers=self.headers)
-        soup  = BeautifulSoup(resp.text, "lxml")
-
-        js    = "\n".join(t.string for t in soup.find_all("script") if t.string)
-        html_ = html.unescape(
-                    dict(re.findall(r"var\s+(\w+)\s*=\s*'([\s\S]*?)';", js, re.S))
-                    .get("serveNeut", "")
-                )
-        if not html_:
-            return []
-
-        tbl   = BeautifulSoup(html_, "html.parser").table
-        heads = [h.get_text(strip=True).rstrip('%').strip()
-                 for h in tbl.tr.find_all(['th', 'td'])]
-
-        out = []
-        for tr in tbl.find_all("tr")[1:]:
-            cells  = [c.get_text(strip=True) for c in tr.find_all("td")]
-            if not cells or not cells[0]:
-                continue
-            rec = {"Player_canonical": self._normalize_player_name(cells[0])}
-            for h, v in zip(heads[1:], cells[1:]):
-                key = self.MAP_SERVE_INFL.get(h)         # now matches
-                if key:
-                    # handle missing or non‑numeric percentages
-                    txt = v.strip()
-                    if txt in {"", "-", "—"}:
-                        rec[key] = np.nan
-                    else:
-                        try:
-                            rec[key] = float(txt.rstrip("%")) / 100
-                        except ValueError:
-                            rec[key] = np.nan
-            out.append(self._filter_jeff(rec))
-        return out
-
-    # ------------------------------------------------------------------
-    # SERVE BASICS  +  SERVE DIRECTION
-    # ------------------------------------------------------------------
-    def scrape_serve_statistics_overview(self, url, debug=False):
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        js = "\n".join(t.string for t in soup.find_all("script") if t.string)
-        blob = dict(re.findall(r"var\s+(\w+)\s*=\s*'([\s\S]*?)';", js, re.S))
-
-        raw_html = html.unescape(blob.get("serve", ""))
-        basics_html, direct_html = self._split_serve_tables(raw_html)
-        if not basics_html:
-            return []
-
-        match = self._parse_match_url(url)
-        init = {"".join(w[0] for w in p.split()).upper(): p
-                for p in (match["player1"], match["player2"])}
-
-        # ───── BASICS ─────────────────────────────────────────────────────
-        tbl = BeautifulSoup(basics_html, "html.parser").table
-        rows = [[c.get_text(strip=True) for c in tr.find_all(["th", "td"])]
-                for tr in tbl.find_all("tr")][1:]
-
-        if debug:
-            print("=== BASICS RAW ROWS ===")
-            for r in rows[:6]:
-                print(r)
-
-        out = []
-        for r in rows:
-            if len(r) < 10 or not r[0]:
-                continue
-            abbr, serve_type = r[0].split()  # 'MS', 'Total'
-            player = init.get(abbr.upper())
-            if player is None:
-                continue
-            pts, won, ace, unret, fcde, le3w, wide, body, t = r[1:10]
-            out.append({
-                "match_id": f"{match['Date']}-{self._normalize_player_name(player)}",
-                "Date": match["Date"],
-                "Tournament": match["tournament"],
-                "player": player,
-                "Player_canonical": self._normalize_player_name(player),
-                "set": "Total",
-                "serve_type": serve_type,
-                "serve_pts": int(pts),
-                "serve_won": self._to_int(won),
-                "aces": self._to_int(ace),
-                "unret": self._to_int(unret),
-                "fcdE": self._to_int(fcde),
-                "le3w": self._to_int(le3w),
-                "wide_pct": self._pct(wide),
-                "body_pct": self._pct(body),
-                "t_pct": self._pct(t),
-            })
-
-        # ───── DIRECTION ─────────────────────────────────────────────────
-        if direct_html:
-            tbl2 = BeautifulSoup(direct_html, "html.parser").table
-            rows2 = [[c.get_text(strip=True) for c in tr.find_all(["th", "td"])]
-                     for tr in tbl2.find_all("tr")][1:]
-
-            if debug:
-                print("=== DIRECTION RAW ROWS ===")
-                for r in rows2[:6]:
-                    print(r)
-
-            for r in rows2:
-                if len(r) < 13 or not r[0]:
-                    continue
-                abbr, serve_type = r[0].split()
-                player = init.get(abbr.upper())
-                if player is None:
-                    continue
-                dcw, dcb, dct, adw, adb, adt, net, werr, derr, wd, foot, unk = r[1:13]
-                rec = next(i for i in out
-                           if i["player"] == player and i["serve_type"] == serve_type)
-                rec.update({
-                    "dc_wide_pct": self._pct(dcw),
-                    "dc_body_pct": self._pct(dcb),
-                    "dc_t_pct": self._pct(dct),
-                    "ad_wide_pct": self._pct(adw),
-                    "ad_body_pct": self._pct(adb),
-                    "ad_t_pct": self._pct(adt),
-                    "net_pct": self._pct(net),
-                    "wide_err_pct": self._pct(werr),
-                    "deep_err_pct": self._pct(derr),
-                    "w_d_pct": self._pct(wd),
-                    "footfault_pct": self._pct(foot),
-                    "unk_pct": self._pct(unk),
-                })
-
-        return out
-
-    def scrape_serve_breakdown(self, url, debug: bool = False):
-        """
-        Extract per‑player serve and return breakdown tables embedded in the
-        inline‑JS variables “serve1”, “serve2”, “return1”, “return2”.
-
-        Parameters
-        ----------
-        url : str
-            Tennis‑Abstract charting URL.
-        debug : bool, optional
-            When True, print the first few parsed rows.
-
-        Returns
-        -------
-        list[dict]
-            One record per player × category row.
-        """
-        import re, html, pandas as pd
-
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # gather all inline‑JS blocks
-        scripts = [t.string for t in soup.find_all("script") if t.string]
-        js_blob = "\n".join(scripts)
-
-        # match serve1/serve2/return1/return2 blobs
-        pattern = re.compile(r"var\s+((?:serve|return)[12])\s*=\s*'([\s\S]*?)';", re.S)
-        matches = pattern.findall(js_blob)
-        if not matches:
-            return []
-
-        meta = self._parse_match_url(url)
-        player_map = {"1": meta["player1"], "2": meta["player2"]}
-
-        records: list[dict] = []
-        for var_name, raw_html in matches:
-            side   = "serve" if var_name.startswith("serve") else "return"
-            player = player_map[var_name[-1]]
-            canon  = self._normalize_player_name(player)
-
-            tables = pd.read_html(html.unescape(raw_html))
-            # tables[0] → Totals; tables[1] → 1st/2nd breakdown
-            for idx, tbl in enumerate(tables):
-                is_total = idx == 0
-                for _, row in tbl.iterrows():
-                    cat = row.iloc[0]
-                    import pandas as pd
-                    if pd.isna(cat) or str(cat).strip() == "":
-                        continue
-                    if is_total:
-                        total_pts   = self._to_int(row.iloc[1])
-                        won         = self._to_int(row.iloc[2])
-                        aces        = self._to_int(row.iloc[3])
-                        unret       = self._to_int(row.iloc[4])
-                        fcdE        = self._to_int(row.iloc[5])
-                        le3w        = self._to_int(row.iloc[6])
-                        canon       = self._normalize_player_name(player)
-
-                        rec = {
-                            "player": player,
-                            "Player_canonical": canon,
-                            "side": side,
-                            "category": cat,
-                            "total_pts": total_pts,
-                            "won": won,
-                            "won_pct": won / total_pts if total_pts else 0.0,
-                            "aces": aces,
-                            "aces_pct": aces / total_pts if total_pts else 0.0,
-                            "unret": unret,
-                            "unret_pct": unret / total_pts if total_pts else 0.0,
-                            "fcdE": fcdE,
-                            "fcdE_pct": fcdE / total_pts if total_pts else 0.0,
-                            "le3w": le3w,
-                            "le3w_pct": le3w / total_pts if total_pts else 0.0,
-                        }
-                        if side == "serve":
-                            rec["first_in"] = self._to_int(row.iloc[7])
-                            rec["double_faults"] = self._to_int(row.iloc[8])
-
-                        records.append(rec)
-                    else:
-                        first_pts   = self._to_int(row.iloc[1])
-                        first_won   = self._to_int(row.iloc[2])
-                        aces_first  = self._to_int(row.iloc[3])
-                        unret_first = self._to_int(row.iloc[4])
-                        fcdE_first  = self._to_int(row.iloc[5])
-                        le3w_first  = self._to_int(row.iloc[6])
-                        second_pts  = self._to_int(row.iloc[7])
-                        second_won  = self._to_int(row.iloc[8])
-                        canon       = self._normalize_player_name(player)
-
-                        rec = {
-                            "player": player,
-                            "Player_canonical": canon,
-                            "side": side,
-                            "category": cat,
-                            "first_pts": first_pts,
-                            "first_won": first_won,
-                            "first_won_pct": first_won / first_pts if first_pts else 0.0,
-                            "aces_first": aces_first,
-                            "aces_first_pct": aces_first / first_pts if first_pts else 0.0,
-                            "unret_first": unret_first,
-                            "unret_first_pct": unret_first / first_pts if first_pts else 0.0,
-                            "fcdE_first": fcdE_first,
-                            "fcdE_first_pct": fcdE_first / first_pts if first_pts else 0.0,
-                            "le3w_first": le3w_first,
-                            "le3w_first_pct": le3w_first / first_pts if first_pts else 0.0,
-                            "second_pts": second_pts,
-                            "second_won": second_won,
-                            "second_won_pct": second_won / second_pts if second_pts else 0.0,
-                        }
-
-                        records.append(rec)
-
-        if debug:
-            for rec in records[:8]:
-                print(rec)
-
-        return records
-
-    # ------------------------------------------------------------------
-    # KEY‑POINT OUTCOMES  (serve‑side **and** return‑side)
-    # ------------------------------------------------------------------
-    def scrape_key_point_outcomes(self, url, debug: bool = False):
-        """
-        Parse “Key point outcomes” tables.
-        TA now embeds SERVES and RETURNS tables in one blob (JS var *keypoints*).
-        We split them, tag rows with side = “serve” / “return”, and return a
-        unified list.
-        """
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # decode inline-JS variables
-        js_blob = "\n".join(s.string for s in soup.find_all("script") if s.string)
-        blocks = dict(re.findall(r"var\s+(\w+)\s*=\s*'([\s\S]*?)';", js_blob, re.S))
-
-        html_blob = html.unescape(blocks.get("keypoints", ""))
-        if not html_blob:  # fallback for very old pages
-            out = []
-            for side, var in (("serve", "keypoints"), ("return", "keypointsR")):
-                h = html.unescape(blocks.get(var, ""))
-                if h:
-                    out.extend(self._parse_key_points_table(h, url, side, debug))
-            return out
-
-        # new-format: one blob, two <table> blocks
-        soup_blob = BeautifulSoup(html_blob, "html.parser")
-        out = []
-        for tbl in soup_blob.find_all("table"):
-            heading = tbl.find("th").get_text(strip=True).lower()
-            side = "serve" if "serves" in heading else "return"
-            out.extend(self._parse_key_points_table(str(tbl), url, side, debug))
-        return out
-
-    # ------------------------------------------------------------------
-    # helper: parse one key‑points table (serve OR return)
-    # ------------------------------------------------------------------
-    def _parse_key_points_table(self, html_: str, url: str, side: str, debug: bool = False) -> list[dict]:
-        """Internal helper used by *scrape_key_point_outcomes*."""
-        match = self._parse_match_url(url)
-
-        # map initials → full names, e.g. "MS" ➝ "Mayar Sherif"
-        init = {"".join(w[0] for w in p.split()).upper(): p
-                for p in (match["player1"], match["player2"])}
-
-        tbl   = BeautifulSoup(html_, "html.parser").table
-        rows  = [[c.get_text(strip=True) for c in tr.find_all(["th", "td"])]
-                 for tr in tbl.find_all("tr")]
-
-        header = rows[0]
-        data   = rows[1:]
-        current_set = "Total"
-        out: list[dict] = []
-
-        for r in data:
-            if not r or all(not x for x in r):
-                continue
-
-            # set‑separator rows such as "SET 1"
-            if re.match(r"set\s+\d+", r[0].lower()):
-                current_set = r[0].title()
-                continue
-
-            parts = r[0].split(None, 1)
-            if len(parts) < 2:
-                continue
-            abbr, cat_raw = parts[0], parts[1]
-            player = init.get(abbr.upper())
-            if player is None:
-                continue
-
-            rec = {
-                "match_id"        : f"{match['Date']}-{self._normalize_player_name(player)}",
-                "Date"            : match["Date"],
-                "Tournament"      : match["tournament"],
-                "player"          : player,
-                "Player_canonical": self._normalize_player_name(player),
-                "set"             : current_set,
-                "context"         : re.sub(r"[^A-Za-z0-9]+", "_", cat_raw.lower()).strip("_"),
-                "side"            : side  # serve | return
-            }
-
-            # parse remaining cells
-            for h, v in zip(header[1:], r[1:]):
-                key = re.sub(r"[%\s+/\\-]", "_", h.lower())
-                key = re.sub(r"_+", "_", key).strip("_")
-                if v.endswith("%"):
-                    rec[key] = self._pct(v)
-                elif "/" in v:
-                    w, t = v.split("/")
-                    rec[f"{key}_won"]   = self._to_int(w)
-                    rec[f"{key}_total"] = self._to_int(t)
-                else:
-                    rec[key] = self._to_int(v)
-
-            out.append(rec)
-
-        if debug:
-            print(f"=== KEY POINTS ({side}) ===")
-            for row in out[:4]:
-                print(row)
-
-        return out
-
-    # ------------------------------------------------------------------
-    #  POINT OUTCOMES BY RALLY LENGTH
-    # ------------------------------------------------------------------
-    def scrape_rally_outcomes(self, url, debug: bool = False):
-        """
-        Extract “Point outcomes by rally length” table(s).
-        Returns one record per player × rally-length bin.
-        """
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        # --- pull JS variable(s) that hold the rally‑outcome tables -----------
-        js     = "\n".join(t.string for t in soup.find_all("script") if t.string)
-        blocks = dict(re.findall(r"var\s+(\w+)\s*=\s*'([\s\S]*?)';", js, re.S))
-
-        # Tennis‑Abstract sometimes names the blob “rallyoutcomes”, “rallyoutcomes1”, etc.
-        raw = ""
-        for k, v in blocks.items():
-            key = k.lower()
-            if key.startswith("rallyoutcomes") or key.startswith("ralloutcomes"):
-                raw = v
-                break
-
-        html_ = html.unescape(raw)
-        if not html_:
-            return []
-
-        match = self._parse_match_url(url)
-
-        tbl = BeautifulSoup(html_, "html.parser").table
-        rows = [[c.get_text(strip=True) for c in tr.find_all(["th", "td"])]
-                for tr in tbl.find_all("tr")]
-
-        header = [h.lower() for h in rows[0]]
-        out = []
-
-        for r in rows[1:]:
-            if len(r) < 2 or not r[0]:
-                continue
-            # ------------------------------------------------------------------
-            # First cell looks like e.g.  "Sv: 1-3 Shots"  or  "Rt: 4-6 Shots".
-            # Capture rally‑side (Sv | Rt) and the numeric bin, drop the word 'Shots'.
-            # ------------------------------------------------------------------
-            label = r[0].strip()
-            m = re.match(r'^(?:[A-Za-z]{2}\s+)?(Sv|Rt)\s*[:\s]\s*([0-9+<=\-]+)', label, flags=re.I)
-            if not m:
-                continue
-            side_tag, bin_lbl = m.groups()
-            side_tag = side_tag.lower()
-            rally_side = "serve" if side_tag == "sv" else "return"
-            bin_lbl = bin_lbl.replace("<=3", "<=3")  # preserve original label
-
-            # Skip aggregate rows such as "All: 1‑3 Shots"
-            if label.lower().startswith("all:"):
-                continue
-
-            # Identify the player via the two‑letter initials at the start
-            abbr_match = re.match(r'^([A-Za-z]{2})', label)
-            init = {"".join(w[0] for w in p.split()).upper(): p
-                    for p in (match["player1"], match["player2"])}
-            player = init.get(abbr_match.group(1).upper()) if abbr_match else None
-            if player is None:
-                continue  # ignore unrecognised rows
-
-            rec = {
-                "match_id": f"{match['Date']}-{self._normalize_player_name(player)}",
-                "Date": match["Date"],
-                "Tournament": match["tournament"],
-                "player": player,
-                "Player_canonical": self._normalize_player_name(player),
-                "rally_bin": bin_lbl,       # '<=3', '4-6', '7-9', '10+'
-                "side": rally_side          # 'serve' | 'return'
-            }
-
-            for h, v in zip(header[1:], r[1:]):
-                key = re.sub(r"[%\s+/\\:-]", "_", h.lower())
-                key = re.sub(r"_+", "_", key).strip("_")
-                rec[key] = self._pct(v) if v.endswith('%') else self._to_int(v)
-
-            out.append(rec)
-
-        if debug:
-            print("=== RALLY OUTCOMES ===")
-            for row in out[:6]:
-                print(row)
-
-        return out
-
-    # ------------------------------------------------------------------
-    #  POINT‑BY‑POINT DESCRIPTION (“pointlog” JS variable)
-    # ------------------------------------------------------------------
-    def scrape_pointlog(self, url, debug: bool = False):
-        """
-        Return the full point‑by‑point log.
-
-        Each record contains:
-          match_id, Date, Tournament, server, Player_canonical,
-          set_score, game_score, point_score, description
-        """
-        import html, re, requests
-        from bs4 import FeatureNotFound
-
-        resp = requests.get(url, headers=self.headers)
-        try:
-            soup = BeautifulSoup(resp.text, "lxml")
-        except FeatureNotFound:
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Inline‑JS variables
-        js_blob = "\n".join(tag.string for tag in soup.find_all("script") if tag.string)
-        blocks  = dict(re.findall(r"var\s+(\w+)\s*=\s*'([\s\S]*?)';", js_blob, re.S))
-        # Tennis‑Abstract may use pointlog, pointlog1, pointlog2, …
-        html_blob = ""
-        for k, v in blocks.items():
-            if k.lower().startswith("pointlog"):
-                html_blob = html.unescape(v)
-                break
-        if not html_blob:
-            return []
-
-        table = BeautifulSoup(html_blob, "html.parser").find("table")
-        if table is None:
-            return []
-
-        match = self._parse_match_url(url)
-        out   = []
-
-        # Skip header row
-        for tr in table.find_all("tr")[1:]:
-            cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-            if len(cells) < 5 or not cells[0]:
-                continue
-
-            server, sets_sc, games_sc, pts_sc, desc = cells[:5]
-            out.append({
-                "match_id"        : f"{match['Date']}-{self._normalize_player_name(server)}",
-                "Date"            : match["Date"],
-                "Tournament"      : match["tournament"],
-                "server"          : server,
-                "Player_canonical": self._normalize_player_name(server),
-                "set_score"       : sets_sc,
-                "game_score"      : games_sc,
-                "point_score"     : pts_sc,
-                "description"     : desc,
-            })
-
-        if debug:
-            print("=== POINT LOG ===")
-            for row in out[:10]:
-                print(row)
-
-        return out
-
-    def scrape_return_breakdown(self, url, debug: bool = False):
-        """
-        Extract return‑side breakdown categories.
-
-        This is a thin wrapper around *scrape_serve_breakdown* which
-        already parses both serve‑ and return‑side tables.  It filters
-        the combined list and keeps only records where ``side == 'return'``.
-
-        Parameters
-        ----------
-        url : str
-            Tennis‑Abstract charting URL.
-        debug : bool, optional
-            When True, print the first few parsed records.
-        """
-        records = self.scrape_serve_breakdown(url, debug=debug)
-        # normalise guard ensures strings like 'Return' or stray spaces still match
-        return [rec for rec in records if str(rec.get("side", "")).lower().strip() == "return"]
-
-    def scrape_net_points(self, url, debug: bool = False):
-        """
-        Parse Net‑Points and Serve‑and‑Volley tables embedded in the inline JavaScript variables ``netpts1`` and ``netpts2``.
-
-        Parameters
-        ----------
-        url : str
-            Tennis‑Abstract charting URL.
-        debug : bool, optional
-            When True, print a preview of the parsed records.
-
-        Returns
-        -------
-        list[dict]
-            One record per player × category row.
-        """
-        import re, html, requests
-        # ───────── helpers ────────────────────────────────────────────────
-        def _parse_count_pct(text: str) -> tuple[int, float | None]:
-            """'11  (48%)' → (11, 0.48); returns (cnt, None) if % missing."""
-            m = re.match(r"\s*(\d+)(?:\s*\(([\d.]+)%\))?", text or "")
-            cnt = int(m.group(1)) if m else 0
-            pct = float(m.group(2)) / 100 if m and m.group(2) else None
-            return cnt, pct
-
-        def _to_float(text: str) -> float:
-            """Extract leading numeric token as float; fallback 0.0."""
-            m = re.search(r"[\d.]+", text or "")
-            return float(m.group(0)) if m else 0.0
-        # ──────────────────────────────────────────────────────────────────
-
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-        js_blob = "\n".join(tag.string for tag in soup.find_all("script") if tag.string)
-
-        # Pull net‑points blobs:  var netpts1 = '…';  var netpts2 = '…';
-        matches = re.findall(r"var\s+(netpts\d+)\s*=\s*'([\s\S]*?)';", js_blob, re.S)
-        if not matches:
-            return []
-
-        meta = self._parse_match_url(url)
-        player_map = {"netpts1": meta.get("player1"), "netpts2": meta.get("player2")}
-
-        out: list[dict] = []
-
-        for var_name, raw_html in matches:
-            player = player_map.get(var_name)
-            if not player:
-                continue
-            canon = self._normalize_player_name(player)
-
-            html_blob = html.unescape(raw_html)
-            bs = BeautifulSoup(html_blob, "html.parser")
-            tables = bs.find_all("table")
-            if not tables:
-                continue
-            # iterate through every embedded <table>
-            for tbl in tables:
-                hdr_cell = tbl.find("th")
-                if not hdr_cell:
-                    continue
-                heading = hdr_cell.get_text(" ", strip=True).lower()
-
-                # ─── NET POINTS ──────────────────────────────────────────
-                if "net points" in heading:
-                    for tr in tbl.find_all("tr")[1:]:
-                        cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-                        if len(cells) < 9 or not cells[0]:
-                            continue
-
-                        cat = cells[0]
-                        pts = self._to_int(cells[1])
-                        won, won_pct = _parse_count_pct(cells[2])
-                        if won_pct is None:
-                            won_pct = won / pts if pts else 0.0
-                        wnr           = self._to_int(cells[3])
-                        ind_forced    = self._to_int(cells[4])
-                        ufe           = self._to_int(cells[5])
-                        passed        = self._to_int(cells[6])
-                        psg_indfcd    = self._to_int(cells[7])
-                        rally_len     = _to_float(cells[8])
-
-                        out.append({
-                            "player"             : player,
-                            "Player_canonical"   : canon,
-                            "category_group"     : "net_points",
-                            "category"           : cat,
-                            "pts"                : pts,
-                            "won"                : won,
-                            "won_pct"            : won_pct,
-                            "net_winners"        : wnr,
-                            "induced_forced_net" : ind_forced,
-                            "ufe_net"            : ufe,
-                            "passed_net"         : passed,
-                            "pass_shot_induced"  : psg_indfcd,
-                            "rally_len_avg"      : rally_len,
-                        })
-                # ─── SERVE‑AND‑VOLLEY ────────────────────────────────────
-                elif "serve-and-volley" in heading:
-                    for tr in tbl.find_all("tr")[1:]:
-                        cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-                        if len(cells) < 12 or not cells[0]:
-                            continue
-
-                        cat = cells[0]
-                        pts = self._to_int(cells[1])
-                        won,  won_pct  = _parse_count_pct(cells[2])
-                        if won_pct is None:
-                            won_pct = won / pts if pts else 0.0
-                        aces, ace_pct  = _parse_count_pct(cells[3])
-                        if ace_pct is None:
-                            ace_pct = aces / pts if pts else 0.0
-                        unret, unret_pct = _parse_count_pct(cells[4])
-                        if unret_pct is None:
-                            unret_pct = unret / pts if pts else 0.0
-                        retfcd, retfcd_pct = _parse_count_pct(cells[5])
-                        if retfcd_pct is None:
-                            retfcd_pct = retfcd / pts if pts else 0.0
-                        wnr   = self._to_int(cells[6])
-                        indf  = self._to_int(cells[7])
-                        ufe   = self._to_int(cells[8])
-                        passed= self._to_int(cells[9])
-                        psg   = self._to_int(cells[10])
-                        rally = _to_float(cells[11])
-
-                        out.append({
-                            "player"           : player,
-                            "Player_canonical" : canon,
-                            "category_group"   : "serve_and_volley",
-                            "category"         : cat,
-                            "pts"              : pts,
-                            "won"              : won,
-                            "won_pct"          : won_pct,
-                            "aces"             : aces,
-                            "aces_pct"         : ace_pct,
-                            "unret"            : unret,
-                            "unret_pct"        : unret_pct,
-                            "retFcd"           : retfcd,
-                            "retFcd_pct"       : retfcd_pct,
-                            "net_winners"      : wnr,
-                            "induced_forced_net": indf,
-                            "ufe_net"          : ufe,
-                            "passed_net"       : passed,
-                            "pass_shot_induced": psg,
-                            "rally_len_avg"    : rally,
-                        })
-
-        # ─── de‑duplicate --------------------------------------------------
-        unique = {}
-        for rec in out:
-            key = (rec["player"], rec["category_group"], rec["category"])
-            if key not in unique:
-                unique[key] = rec
-        # -------------------------------------------------------------------
-
-        if debug:
-            print("=== NET POINTS ===")
-            for row in unique.values():
-                print(row)
-
-        return list(unique.values())
-
-    def scrape_shot_types(self, url, debug: bool = False):
-        """
-        Parse shot‑type distribution tables embedded in inline‑JS variables
-        “shots1” and “shots2”.
-
-        Parameters
-        ----------
-        url : str
-            Tennis‑Abstract charting URL.
-        debug : bool, optional
-            When True, print a preview of the parsed rows.
-
-        Returns
-        -------
-        list[dict]
-            One record per player × shot‑type row.
-        """
-        import re, html, requests
-        import numpy as np
-
-        # ───────── helper ───────────────────────────────────────────────
-        def _parse_count_pct(txt: str) -> tuple[int, float | None]:
-            """
-            Convert strings like '23  (48%)' to a tuple ``(23, 0.48)``.
-            If the percentage is missing, returns ``(cnt, None)``.
-            """
-            m = re.match(r"\s*(\d+)(?:\s*\(([\d.]+)%\))?", txt or "")
-            cnt = int(m.group(1)) if m else 0
-            pct = float(m.group(2)) / 100 if m and m.group(2) else None
-            return cnt, pct
-        # ────────────────────────────────────────────────────────────────
-
-        resp = requests.get(url, headers=self.headers)
-        soup = BeautifulSoup(resp.text, "lxml")
-        js_blob = "\n".join(tag.string for tag in soup.find_all("script") if tag.string)
-
-        # grab JS blobs   var shots1 = '…';   var shots2 = '…';
-        matches = re.findall(r"var\s+(shots\d+)\s*=\s*'([\s\S]*?)';", js_blob, re.S)
-        if not matches:
-            return []
-
-        meta        = self._parse_match_url(url)
-        player_map  = {"shots1": meta.get("player1"), "shots2": meta.get("player2")}
-        out: list[dict] = []
-
-        for var_name, raw_html in matches:
-            player = player_map.get(var_name)
-            if not player:
-                continue
-            canon  = self._normalize_player_name(player)
-
-            html_blob = html.unescape(raw_html)
-            table = BeautifulSoup(html_blob, "html.parser").find("table")
-            # ... rest of the code ...
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tennis match win probability predictor")
-    parser.add_argument("--player1", required=True, help="Name of player 1")
-    parser.add_argument("--player2", required=True, help="Name of player 2")
-    parser.add_argument("--date", required=True, help="Match date in YYYY-MM-DD")
-    parser.add_argument("--tournament", required=True, help="Tournament name slug")
-    parser.add_argument("--gender", choices=["M","W"], required=True, help="Gender: M or W")
-    parser.add_argument("--best_of", type=int, default=3, help="Sets in match, default 3")
-    args = parser.parse_args()
-
-    # Load or generate data (with smarter caching)
-    hist, jeff_data, defaults = load_from_cache()
-    if hist is None:
-        print("No cache found. Generating full historical dataset (this will take a few minutes)...")
-        hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
-        save_to_cache(hist, jeff_data, defaults)
-        print("Historical data cached for future use.")
-    else:
-        print("Loaded historical data from cache.")
-
-    # Only integrate recent API data (post 6/10/2025)
-    print("Integrating recent API data...")
-
-    # Get API data from June 10, 2025 through today
-    days_since_june_10 = (date.today() - date(2025, 6, 10)).days
-    hist = integrate_api_tennis_data_incremental(hist)
-    # Re-save cache with new API data
-    save_to_cache(hist, jeff_data, defaults)
-
-    # Build composite_id for lookup
-    match_date = pd.to_datetime(args.date).date()
-    # Try both player orders since API might order by seeding
-    comp_id1 = build_composite_id(match_date, normalize_tournament_name(args.tournament, args.gender),
-                                  normalize_name(args.player1), normalize_name(args.player2))
-    comp_id2 = build_composite_id(match_date, normalize_tournament_name(args.tournament, args.gender),
-                                  normalize_name(args.player2), normalize_name(args.player1))
-
-    print(f"Looking for match: {comp_id1}")
-    print(f"Alternative order: {comp_id2}")
-
-    row = hist[hist["composite_id"] == comp_id1]
-    if row.empty:
-        print(f"First order not found, trying alternative...")
-        row = hist[hist["composite_id"] == comp_id2]
-        if not row.empty:
-            print(f"Found match with swapped player order")
-            # Swap the players in args to match the found order
-            args.player1, args.player2 = args.player2, args.player1
-
-    if row.empty:
-        print(f"No data for either order:")
-        print(f"  {comp_id1}")
-        print(f"  {comp_id2}")
-        exit(1)
-
-    # Extract stats
-    p1_stats = {col[len("winner_"):]: row.iloc[0][col] for col in hist.columns if col.startswith("winner_")}
-    p2_stats = {col[len("loser_"):]: row.iloc[0][col] for col in hist.columns if col.startswith("loser_")}
-
-    model = BayesianTennisModel()
-    prob = model.simulate_match(p1_stats, p2_stats, best_of=args.best_of)
-    print(f"P(player1 wins) = {prob:.3f}")
