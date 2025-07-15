@@ -577,109 +577,152 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
 
 
 def process_tennis_abstract_scraped_data(scraped_records):
-    """Process scraped Tennis Abstract data into standardized features"""
-    if not scraped_records:
-        return []
-
-    processed_records = []
-
-    # Group by composite_id (match)
+    """Convert scraped records into per-match player features"""
     matches = {}
+
     for record in scraped_records:
         comp_id = record.get('composite_id')
         if comp_id not in matches:
-            matches[comp_id] = {'players': {}, 'metadata': {}}
+            matches[comp_id] = {}
 
         player_canonical = record.get('Player_canonical')
-        if player_canonical and player_canonical not in matches[comp_id]['players']:
-            matches[comp_id]['players'][player_canonical] = {}
+        if not player_canonical:
+            continue
 
-        # Store metadata
-        for key in ['Date', 'gender', 'tournament', 'round', 'surface']:
-            if key in record:
-                matches[comp_id]['metadata'][key] = record[key]
+        if player_canonical not in matches[comp_id]:
+            matches[comp_id][player_canonical] = {}
 
-        # Store player-specific features
-        if player_canonical:
-            data_type = record.get('data_type')
-            stat_name = record.get('stat_name')
-            stat_value = record.get('stat_value')
+        # Extract key performance stats from Tennis Abstract
+        data_type = record.get('data_type')
+        stat_name = record.get('stat_name')
+        stat_value = record.get('stat_value')
 
-            if data_type and stat_name:
-                feature_key = f"ta_{data_type}_{stat_name}"
-                matches[comp_id]['players'][player_canonical][feature_key] = stat_value
+        if data_type and stat_name and stat_value is not None:
+            # Map to standardized feature names
+            feature_key = f"ta_{data_type}_{stat_name}"
+            matches[comp_id][player_canonical][feature_key] = stat_value
 
-    # Convert to standardized format
-    for comp_id, match_data in matches.items():
-        players = list(match_data['players'].keys())
-        if len(players) >= 2:
-            # Create records for both player orderings
-            for i, (p1, p2) in enumerate([(players[0], players[1]), (players[1], players[0])]):
-                record = {
-                    'composite_id': comp_id,
-                    'source': 'tennis_abstract',
-                    'data_quality_score': 1.0,  # Highest quality
-                    **match_data['metadata']
-                }
-
-                # Add player features with winner/loser prefixes
-                for feature, value in match_data['players'][p1].items():
-                    record[f'winner_{feature}'] = value
-
-                for feature, value in match_data['players'][p2].items():
-                    record[f'loser_{feature}'] = value
-
-                processed_records.append(record)
-                break  # Only need one ordering per match
-
-    return processed_records
+    return matches
 
 
-def integrate_scraped_data_into_pipeline_enhanced(historical_data, scraped_records):
-    """Enhanced integration of Tennis Abstract data with conflict resolution"""
+def integrate_scraped_data_hybrid(historical_data, scraped_records):
+    """Hybrid: enhance existing matches, add new TA matches if not in API"""
     if not scraped_records:
         return historical_data
 
-    print(f"Integrating {len(scraped_records)} Tennis Abstract records with enhanced processing")
+    print(f"Hybrid integration of {len(scraped_records)} Tennis Abstract records")
 
-    # Process scraped data
+    # Process scraped records into features by match
     processed_records = process_tennis_abstract_scraped_data(scraped_records)
 
-    if not processed_records:
-        print("No processable Tennis Abstract records found")
-        return historical_data
-
-    # Convert to DataFrame
-    ta_df = pd.DataFrame(processed_records)
-
-    # Add source ranking (Tennis Abstract = highest quality)
-    ta_df['source_rank'] = 1
-
-    # Merge with historical data
     enhanced_data = historical_data.copy()
+    new_matches_added = 0
+    existing_matches_enhanced = 0
 
-    # Add source_rank column if missing
-    if 'source_rank' not in enhanced_data.columns:
-        enhanced_data['source_rank'] = 3  # Default for tennis data files
+    for comp_id, match_players in processed_records.items():
+        # Find matching row in historical data
+        match_rows = enhanced_data[enhanced_data['composite_id'] == comp_id]
 
-    # Concatenate and resolve conflicts by source rank
-    combined_data = pd.concat([enhanced_data, ta_df], ignore_index=True, sort=False)
+        if not match_rows.empty:
+            # ENHANCE existing match (preserve API context)
+            row_idx = match_rows.index[0]
+            current_row = enhanced_data.loc[row_idx]
 
-    # Sort by source rank (ascending = higher quality first) and remove duplicates
-    combined_data = combined_data.sort_values('source_rank').drop_duplicates(
-        subset='composite_id', keep='first'
-    ).reset_index(drop=True)
+            winner_canonical = current_row['winner_canonical']
+            loser_canonical = current_row['loser_canonical']
 
-    # Calculate feature coverage statistics
-    ta_feature_cols = [col for col in ta_df.columns if col.startswith(('winner_ta_', 'loser_ta_'))]
+            # Overlay Tennis Abstract features while preserving API context
+            for player_canonical, ta_features in match_players.items():
+                if player_canonical == winner_canonical:
+                    prefix = 'winner_'
+                elif player_canonical == loser_canonical:
+                    prefix = 'loser_'
+                else:
+                    continue
 
-    matches_enhanced = len(combined_data[combined_data['source_rank'] == 1])
-    total_ta_features = len(ta_feature_cols)
+                for feature_name, feature_value in ta_features.items():
+                    col_name = f"{prefix}{feature_name}"
+                    if feature_value is not None and not pd.isna(feature_value):
+                        enhanced_data.loc[row_idx, col_name] = feature_value
 
-    print(f"Enhanced {matches_enhanced} matches with Tennis Abstract data")
-    print(f"Added {total_ta_features} Tennis Abstract feature columns")
+            enhanced_data.loc[row_idx, 'ta_enhanced'] = True
+            if enhanced_data.loc[row_idx, 'source_rank'] == 2:  # API data
+                enhanced_data.loc[row_idx, 'data_quality_score'] = 0.85  # High quality hybrid
 
-    return combined_data
+            existing_matches_enhanced += 1
+
+        else:
+            # ADD new Tennis Abstract match
+            players = list(match_players.keys())
+            if len(players) >= 2:
+                # Extract metadata from scraped records for this match
+                match_records = [r for r in scraped_records if r.get('composite_id') == comp_id]
+                if match_records:
+                    sample_record = match_records[0]
+
+                    # Create new match record with TA as primary source
+                    new_record = {
+                        'composite_id': comp_id,
+                        'source_rank': 1,  # Tennis Abstract = highest quality
+                        'data_quality_score': 0.9,
+                        'ta_enhanced': True,
+                        'Date': pd.to_datetime(sample_record.get('Date', ''), format='%Y%m%d', errors='coerce'),
+                        'date': pd.to_datetime(sample_record.get('Date', ''), format='%Y%m%d', errors='coerce').date(),
+                        'gender': sample_record.get('gender', 'M'),
+                        'tournament': sample_record.get('tournament', 'Unknown'),
+                        'tournament_canonical': sample_record.get('tournament', 'unknown').lower(),
+                        'surface': 'Grass',  # Default for Wimbledon
+                        'winner_canonical': players[0],
+                        'loser_canonical': players[1],
+                        'Winner': players[0].replace('_', ' ').title(),
+                        'Loser': players[1].replace('_', ' ').title(),
+                    }
+
+                    # Add all Tennis Abstract features
+                    for i, (player_canonical, ta_features) in enumerate(match_players.items()):
+                        prefix = 'winner_' if i == 0 else 'loser_'
+                        for feature_name, feature_value in ta_features.items():
+                            col_name = f"{prefix}{feature_name}"
+                            if feature_value is not None:
+                                new_record[col_name] = feature_value
+
+                    # Add to dataset
+                    enhanced_data = pd.concat([enhanced_data, pd.DataFrame([new_record])], ignore_index=True)
+                    new_matches_added += 1
+
+    print(f"Enhanced {existing_matches_enhanced} existing matches")
+    print(f"Added {new_matches_added} new Tennis Abstract matches")
+
+    return enhanced_data
+
+
+def process_tennis_abstract_scraped_data(scraped_records):
+    """Convert scraped records into per-match player features"""
+    matches = {}
+
+    for record in scraped_records:
+        comp_id = record.get('composite_id')
+        if comp_id not in matches:
+            matches[comp_id] = {}
+
+        player_canonical = record.get('Player_canonical')
+        if not player_canonical:
+            continue
+
+        if player_canonical not in matches[comp_id]:
+            matches[comp_id][player_canonical] = {}
+
+        # Extract key performance stats from Tennis Abstract
+        data_type = record.get('data_type')
+        stat_name = record.get('stat_name')
+        stat_value = record.get('stat_value')
+
+        if data_type and stat_name and stat_value is not None:
+            # Map to standardized feature names
+            feature_key = f"ta_{data_type}_{stat_name}"
+            matches[comp_id][player_canonical][feature_key] = stat_value
+
+    return matches
 
 
 def calculate_feature_importance_weights(historical_data, jeff_data):
@@ -1368,12 +1411,11 @@ def run_automated_tennis_abstract_integration(historical_data, days_back=None):
         print("No new Tennis Abstract data scraped")
         return historical_data
 
-    # Integrate into historical data
-    enhanced_data = integrate_scraped_data_into_pipeline(historical_data, scraped_records)
+    # Integrate into historical data with hybrid approach
+    enhanced_data = integrate_scraped_data_hybrid(historical_data, scraped_records)  # ← NEW LINE
 
     print(f"Tennis Abstract integration complete. Enhanced dataset with detailed charting features.")
     return enhanced_data
-
 
 # 2.6 API Integration Functions
 def get_fixtures_for_date(target_date, event_type_key=None):
@@ -1431,34 +1473,23 @@ def extract_embedded_statistics(fixture):
 
 # Inserted updated parse_match_statistics function after extract_embedded_statistics
 def parse_api_tennis_statistics(fixture: dict) -> dict[int, dict]:
-    """
-    Parse API-Tennis fixture statistics format into per-player dicts.
-
-    The API returns statistics as a list of dicts with format:
-    {
-        'player_key': 372,
-        'stat_period': 'match',
-        'stat_type': 'Service',
-        'stat_name': 'Aces',
-        'stat_value': '13',
-        'stat_won': None,
-        'stat_total': None
-    }
-
-    We convert this to the expected p1_/p2_ format.
-    """
     try:
         statistics = fixture.get('statistics', [])
         if not statistics:
             return {}
 
-        p1_key = safe_int_convert(fixture.get("first_player_key"))
-        p2_key = safe_int_convert(fixture.get("second_player_key"))
+        # Extract player keys from statistics instead of fixture metadata
+        player_keys = set()
+        for stat in statistics:
+            if stat.get('stat_period') == 'match':
+                player_key = safe_int_convert(stat.get('player_key'))
+                if player_key:
+                    player_keys.add(player_key)
 
-        if not p1_key or not p2_key:
+        if len(player_keys) != 2:
             return {}
 
-        player_stats = {p1_key: {}, p2_key: {}}
+        player_stats = {key: {} for key in player_keys}
 
         # Process only match-level statistics
         for stat in statistics:
@@ -1480,7 +1511,6 @@ def parse_api_tennis_statistics(fixture: dict) -> dict[int, dict]:
 
             # Parse the value
             if stat_won is not None and stat_total is not None:
-                # Use actual counts when available
                 player_stats[player_key][f"{key_name}_won"] = stat_won
                 player_stats[player_key][f"{key_name}_total"] = stat_total
                 if stat_total > 0:
@@ -1488,13 +1518,10 @@ def parse_api_tennis_statistics(fixture: dict) -> dict[int, dict]:
             else:
                 # Parse the stat_value
                 if '%' in str(stat_value):
-                    # Percentage value
                     pct_val = float(str(stat_value).replace('%', '')) / 100
                     player_stats[player_key][f"{key_name}_pct"] = pct_val
                 else:
-                    # Raw number
                     try:
-                        # Handle values like "194 km/h" by extracting just the number
                         import re
                         numeric_match = re.search(r'(\d+)', str(stat_value))
                         if numeric_match:
@@ -1509,7 +1536,6 @@ def parse_api_tennis_statistics(fixture: dict) -> dict[int, dict]:
     except Exception as e:
         logging.error(f"Error parsing API tennis statistics: {e}")
         return {}
-
 
 # Replace the parse_match_statistics function in tennis_updated.py with this version:
 def parse_match_statistics(fixture: dict) -> dict[int, dict]:
@@ -1944,7 +1970,7 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500):
 # ============================================================================
 
 def integrate_api_tennis_data_incremental(historical_data):
-    """Fetch API data for dates not already in dataset with full feature integration"""
+    """FIXED: Fetch API data with proper statistics integration"""
     df = historical_data.copy()
     if "source_rank" not in df.columns:
         df["source_rank"] = 3
@@ -1997,6 +2023,10 @@ def integrate_api_tennis_data_incremental(historical_data):
             all_fixtures.extend(fixtures)
 
         for fixture in all_fixtures:
+            # Only process completed matches
+            if fixture.get("event_status") != "Finished":
+                continue
+
             # Extract player keys
             p1_key = safe_int_convert(fixture.get("first_player_key"))
             p2_key = safe_int_convert(fixture.get("second_player_key"))
@@ -2032,7 +2062,7 @@ def integrate_api_tennis_data_incremental(historical_data):
                 normalize_name(fixture.get("event_second_player", ""))
             )
 
-            # Get all API data
+            # FIXED: Extract proper statistics from fixture
             stats_map = parse_match_statistics(fixture)
             embed = extract_embedded_statistics(fixture)
             h2h_data = get_h2h_data(p1_key, p2_key)
@@ -2042,22 +2072,24 @@ def integrate_api_tennis_data_incremental(historical_data):
             p1_profile = get_player_profile(p1_key)
             p2_profile = get_player_profile(p2_key)
 
-            if not stats_map:
-                continue
-
-            stats_dict = next(iter(stats_map.values()))
-            record = {**stats_dict, **embed}
-
-            # Add comprehensive API features
-            record.update({
+            # FIXED: Build comprehensive record with proper player mapping
+            record = {
                 "composite_id": comp_id,
                 "source_rank": 2,
                 "date": day,
                 "gender": gender,
                 "surface": surface,
-                "tournament_tier": event_info.get("event_type_type", ""),
+                "tournament_tier": event_info.get("event_type_type", "Unknown"),
+
+                # Player info
+                "Winner": fixture.get("event_first_player", ""),
+                "Loser": fixture.get("event_second_player", ""),
+                "winner_canonical": normalize_name(fixture.get("event_first_player", "")),
+                "loser_canonical": normalize_name(fixture.get("event_second_player", "")),
 
                 # Player rankings
+                "WRank": rankings.get(p1_key),
+                "LRank": rankings.get(p2_key),
                 "p1_ranking": rankings.get(p1_key),
                 "p2_ranking": rankings.get(p2_key),
                 "ranking_difference": abs(rankings.get(p1_key, 999) - rankings.get(p2_key, 999)),
@@ -2069,6 +2101,8 @@ def integrate_api_tennis_data_incremental(historical_data):
                 "p1_h2h_win_pct": h2h_data.get("p1_win_pct", 0.5),
 
                 # Betting odds and implied probabilities
+                "PSW": odds1,
+                "PSL": odds2,
                 "odds_p1": odds1,
                 "odds_p2": odds2,
                 "implied_prob_p1": 1 / odds1 if odds1 and odds1 > 0 else None,
@@ -2084,7 +2118,24 @@ def integrate_api_tennis_data_incremental(historical_data):
                 "tournament_key": tournament_key,
                 "tournament_round": fixture.get("tournament_round"),
                 "tournament_season": fixture.get("tournament_season"),
-            })
+            }
+
+            # FIXED: Add statistics from API with proper winner/loser mapping
+            if stats_map:
+                p1_stats = stats_map.get(p1_key, {})
+                p2_stats = stats_map.get(p2_key, {})
+
+                # Map API statistics to winner/loser prefixes
+                for stat_name, stat_value in p1_stats.items():
+                    if pd.notna(stat_value):
+                        record[f"winner_{stat_name}"] = stat_value
+
+                for stat_name, stat_value in p2_stats.items():
+                    if pd.notna(stat_value):
+                        record[f"loser_{stat_name}"] = stat_value
+
+            # Add embedded statistics
+            record.update(embed)
 
             df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
 
@@ -2494,81 +2545,120 @@ def calculate_data_quality_unified(match_data):
 
 
 def predict_match_unified(args, hist, jeff_data, defaults):
-    """UPDATED: Unified prediction function that works with any data source"""
+    """Enhanced prediction function that tries multiple composite_id variations"""
 
-    # Build composite_id for lookup
     match_date = pd.to_datetime(args.date).date()
-    comp_id1 = build_composite_id(match_date, normalize_tournament_name(args.tournament, args.gender),
-                                  normalize_name(args.player1), normalize_name(args.player2))
-    comp_id2 = build_composite_id(match_date, normalize_tournament_name(args.tournament, args.gender),
-                                  normalize_name(args.player2), normalize_name(args.player1))
 
-    print(f"Looking for match: {comp_id1}")
+    # Generate multiple tournament name variations
+    tournament_base = args.tournament.lower().strip()
+    tournament_variations = [
+        tournament_base,  # Original
+        tournament_base.replace(' ', '_'),  # Spaces to underscores
+        tournament_base.replace('_', ' '),  # Underscores to spaces
+        tournament_base.replace('-', ' '),  # Dashes to spaces
+        tournament_base.replace(' ', ''),  # Remove spaces
+        f"atp {tournament_base}",  # Add ATP prefix
+        f"wta {tournament_base}",  # Add WTA prefix
+        tournament_base.replace('atp ', ''),  # Remove ATP prefix
+        tournament_base.replace('wta ', ''),  # Remove WTA prefix
+    ]
 
-    row = hist[hist["composite_id"] == comp_id1]
-    player_order_swapped = False
+    # Generate multiple player name variations
+    def get_name_variations(player_name):
+        base = normalize_name(player_name)
+        variations = [base]
 
-    if row.empty:
-        print(f"First order not found, trying alternative...")
-        row = hist[hist["composite_id"] == comp_id2]
-        if not row.empty:
-            print(f"Found match with swapped player order")
-            player_order_swapped = True
+        # Try different formats
+        parts = player_name.lower().split()
+        if len(parts) >= 2:
+            first = parts[0]
+            last = parts[-1]
+            variations.extend([
+                f"{last}_{first[0]}",  # lastname_f
+                f"{first[0]}_{last}",  # f_lastname
+                f"{first}_{last}",  # firstname_lastname
+                f"{last}_{first}"  # lastname_firstname
+            ])
 
-    if row.empty:
-        print(f"No data found for match")
-        return None
+        return list(set(variations))
 
-    # Extract match data
-    match_row = row.iloc[0]
-    match_dict = match_row.to_dict()
+    p1_variations = get_name_variations(args.player1)
+    p2_variations = get_name_variations(args.player2)
 
-    # Handle player order swapping
-    if player_order_swapped:
-        # Swap winner/loser prefixes in the data
-        swapped_dict = {}
-        for key, value in match_dict.items():
-            if key.startswith('winner_'):
-                swapped_dict[key.replace('winner_', 'loser_')] = value
-            elif key.startswith('loser_'):
-                swapped_dict[key.replace('loser_', 'winner_')] = value
-            else:
-                swapped_dict[key] = value
-        match_dict = swapped_dict
-
-    # Extract unified features for both players
-    p1_features = extract_unified_features(match_dict, 'winner')
-    p2_features = extract_unified_features(match_dict, 'loser')
-    match_context = extract_unified_match_context(match_dict)
-
-    # Determine data source and quality
-    source_rank = match_dict.get('source_rank', 3)
-    data_sources = {1: 'Tennis Abstract', 2: 'API-Tennis', 3: 'Tennis Data Files'}
-    print(f"Data source: {data_sources.get(source_rank, 'Unknown')} (rank: {source_rank})")
-    print(f"Data quality score: {match_context['data_quality_score']:.2f}")
-
-    # Run prediction with unified model
-    model = UnifiedBayesianTennisModel()
-    prob = model.simulate_match(p1_features, p2_features, match_context, best_of=args.best_of)
-
-    # Show feature breakdown
-    print(f"\n=== UNIFIED FEATURE ANALYSIS ===")
-    print(f"Surface: {match_context.get('surface', 'Unknown')}")
-    print(f"Rankings: P1={match_context.get('p1_ranking', 'N/A')}, P2={match_context.get('p2_ranking', 'N/A')}")
     print(
-        f"H2H Record: {match_context.get('h2h_matches', 0)} matches, P1 win rate: {match_context.get('p1_h2h_win_pct', 0.5):.1%}")
+        f"Trying {len(tournament_variations)} tournament × {len(p1_variations)} × {len(p2_variations)} = {len(tournament_variations) * len(p1_variations) * len(p2_variations)} combinations")
 
-    if match_context.get('implied_prob_p1'):
-        print(
-            f"Market Odds: P1={match_context.get('implied_prob_p1'):.1%}, P2={match_context.get('implied_prob_p2'):.1%}")
+    # Try all combinations
+    for tournament in tournament_variations:
+        for p1 in p1_variations:
+            for p2 in p2_variations:
+                # Try both player orders
+                for player1, player2 in [(p1, p2), (p2, p1)]:
+                    comp_id = f"{match_date.strftime('%Y%m%d')}-{tournament}-{player1}-{player2}"
 
-    print(f"\n=== PLAYER FEATURES ===")
-    for feature_name, p1_val in p1_features.items():
-        p2_val = p2_features.get(feature_name, 0)
-        print(f"{feature_name}: P1={p1_val:.3f}, P2={p2_val:.3f}")
+                    row = hist[hist["composite_id"] == comp_id]
 
-    return prob
+                    if not row.empty:
+                        print(f"✅ Found match: {comp_id}")
 
+                        # Determine if players are swapped
+                        match_row = row.iloc[0]
+                        match_dict = match_row.to_dict()
+
+                        # If we swapped players, swap the features back
+                        if (player1, player2) == (p2, p1):
+                            print("  → Players were swapped, correcting features...")
+                            swapped_dict = {}
+                            for key, value in match_dict.items():
+                                if key.startswith('winner_'):
+                                    swapped_dict[key.replace('winner_', 'loser_')] = value
+                                elif key.startswith('loser_'):
+                                    swapped_dict[key.replace('loser_', 'winner_')] = value
+                                else:
+                                    swapped_dict[key] = value
+                            match_dict = swapped_dict
+
+                        # Extract features and predict
+                        p1_features = extract_unified_features(match_dict, 'winner')
+                        p2_features = extract_unified_features(match_dict, 'loser')
+                        match_context = extract_unified_match_context(match_dict)
+
+                        # Show data source info
+                        source_rank = match_dict.get('source_rank', 3)
+                        data_sources = {1: 'Tennis Abstract', 2: 'API-Tennis', 3: 'Tennis Data Files'}
+                        print(f"  → Data source: {data_sources.get(source_rank, 'Unknown')} (rank: {source_rank})")
+                        print(f"  → Data quality: {match_context['data_quality_score']:.2f}")
+
+                        # Show feature breakdown
+                        print(f"\n=== UNIFIED FEATURE ANALYSIS ===")
+                        print(f"Surface: {match_context.get('surface', 'Unknown')}")
+                        print(
+                            f"Rankings: P1={match_context.get('p1_ranking', 'N/A')}, P2={match_context.get('p2_ranking', 'N/A')}")
+                        print(
+                            f"H2H Record: {match_context.get('h2h_matches', 0)} matches, P1 win rate: {match_context.get('p1_h2h_win_pct', 0.5):.1%}")
+
+                        if match_context.get('implied_prob_p1'):
+                            print(
+                                f"Market Odds: P1={match_context.get('implied_prob_p1'):.1%}, P2={match_context.get('implied_prob_p2'):.1%}")
+
+                        print(f"\n=== PLAYER FEATURES ===")
+                        for feature_name, p1_val in p1_features.items():
+                            p2_val = p2_features.get(feature_name, 0)
+                            print(f"{feature_name}: P1={p1_val:.3f}, P2={p2_val:.3f}")
+
+                        # Run prediction
+                        model = UnifiedBayesianTennisModel()
+                        prob = model.simulate_match(p1_features, p2_features, match_context, best_of=args.best_of)
+
+                        # Show results
+                        print(f"\n=== PREDICTION RESULTS ===")
+                        print(f"P({args.player1} wins) = {prob:.3f}")
+                        print(f"P({args.player2} wins) = {1 - prob:.3f}")
+
+                        return prob
+
+    print("❌ No match found with any variation")
+    return None
 
 # Helper functions (should be imported from tennis_updated.py)
 def build_composite_id(match_date, tourney_slug, p1_slug, p2_slug):
@@ -2610,16 +2700,19 @@ def normalize_name(name):
     return prob
 
 
-# Update the main execution block
+# Main Execution Block #
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tennis match win probability predictor")
     parser.add_argument("--player1", required=True, help="Name of player 1")
     parser.add_argument("--player2", required=True, help="Name of player 2")
     parser.add_argument("--date", required=True, help="Match date in YYYY-MM-DD")
-    parser.add_argument("--tournament", required=True, help="Tournament name slug")
+    parser.add_argument("--tournament", required=True, help="Tournament name")
     parser.add_argument("--gender", choices=["M", "W"], required=True, help="Gender: M or W")
     parser.add_argument("--best_of", type=int, default=3, help="Sets in match, default 3")
     args = parser.parse_args()
+
+    print("🎾 TENNIS MATCH PREDICTION SYSTEM 🎾\n")
 
     # Load or generate data with Tennis Abstract integration
     hist, jeff_data, defaults = load_from_cache_with_scraping()
@@ -2638,12 +2731,36 @@ if __name__ == "__main__":
     hist = integrate_api_tennis_data_incremental(hist)
     save_to_cache(hist, jeff_data, defaults)
 
-    # Run enhanced prediction
-    prob = predict_match_with_enhanced_model(args, hist, jeff_data, defaults)
+    print(f"\n=== MATCH DETAILS ===")
+    print(f"Date: {args.date}")
+    print(f"Tournament: {args.tournament}")
+    print(f"Player 1: {args.player1}")
+    print(f"Player 2: {args.player2}")
+    print(f"Gender: {args.gender}")
+    print(f"Best of: {args.best_of}")
+
+    # Run enhanced prediction with flexible lookup
+    prob = predict_match_unified(args, hist, jeff_data, defaults)
 
     if prob is not None:
         print(f"\n=== FINAL PREDICTION ===")
-        print(f"P({args.player1} wins) = {prob:.3f}")
-        print(f"P({args.player2} wins) = {1 - prob:.3f}")
+        print(f"🏆 P({args.player1} wins) = {prob:.3f}")
+        print(f"🏆 P({args.player2} wins) = {1 - prob:.3f}")
+
+        # Add confidence assessment
+        confidence = "High" if abs(prob - 0.5) > 0.2 else "Medium" if abs(prob - 0.5) > 0.1 else "Low"
+        print(f"🎯 Prediction confidence: {confidence}")
+
     else:
-        print("Prediction failed - no match data found")
+        print("\nPREDICTION FAILED")
+        print("No match data found. Possible reasons:")
+        print("- Match not in dataset (check date, tournament, player names)")
+        print("- Tournament name mismatch (try different format)")
+        print("- Players not in our database")
+
+        print(f"\nSuggestions:")
+        print(f"- Try 'Wimbledon' instead of '{args.tournament}'")
+        print(f"- Check player name spelling")
+        print(f"- Verify match date")
+
+    print("\nPREDICTION COMPLETE ")
