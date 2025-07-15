@@ -2079,7 +2079,7 @@ def integrate_api_tennis_data_incremental(historical_data):
                 "date": day,
                 "gender": gender,
                 "surface": surface,
-                "tournament_tier": event_info.get("event_type_type", "Unknown"),
+                "tournament_tier": fixture.get("event_type_type", "Unknown"),
 
                 # Player info
                 "Winner": fixture.get("event_first_player", ""),
@@ -2120,17 +2120,30 @@ def integrate_api_tennis_data_incremental(historical_data):
                 "tournament_season": fixture.get("tournament_season"),
             }
 
-            # FIXED: Add statistics from API with proper winner/loser mapping
+            # Check actual winner
             if stats_map:
                 p1_stats = stats_map.get(p1_key, {})
                 p2_stats = stats_map.get(p2_key, {})
 
-                # Map API statistics to winner/loser prefixes
-                for stat_name, stat_value in p1_stats.items():
+                # Determine actual winner from API result
+                event_winner = fixture.get("event_winner", "")
+
+                if event_winner == "First Player":
+                    winner_stats = p1_stats
+                    loser_stats = p2_stats
+                elif event_winner == "Second Player":
+                    winner_stats = p2_stats
+                    loser_stats = p1_stats
+                else:
+                    # Skip matches without clear winner
+                    continue
+
+                # Map statistics to correct winner/loser columns
+                for stat_name, stat_value in winner_stats.items():
                     if pd.notna(stat_value):
                         record[f"winner_{stat_name}"] = stat_value
 
-                for stat_name, stat_value in p2_stats.items():
+                for stat_name, stat_value in loser_stats.items():
                     if pd.notna(stat_value):
                         record[f"loser_{stat_name}"] = stat_value
 
@@ -2233,26 +2246,32 @@ def safe_int_convert(value):
 
 def parse_match_statistics(fixture: dict) -> dict[int, dict]:
     """
-    Flatten API-Tennis fixture statistics into per-player dicts.
-    Returns a mapping from player_key (int) to a dict of their wide stats.
+    Parse match statistics from API-Tennis fixture format.
+    Returns a mapping from player_key (int) to a dict of their stats.
     """
-    df = flatten_fixtures([fixture])
-    stats = {}
-    if df.empty:
-        return stats
-    row = df.iloc[0]
-    # Player keys
-    p1_key = safe_int_convert(fixture.get("first_player_key"))
-    p2_key = safe_int_convert(fixture.get("second_player_key"))
-    # Extract p1_ and p2_ prefixed columns
-    p1_stats = {col[len("p1_"):]: row[col] for col in df.columns if col.startswith("p1_")}
-    p2_stats = {col[len("p2_"):]: row[col] for col in df.columns if col.startswith("p2_")}
-    if p1_key is not None:
-        stats[p1_key] = p1_stats
-    if p2_key is not None:
-        stats[p2_key] = p2_stats
-    return stats
+    # Try the new API format first
+    api_stats = parse_api_tennis_statistics(fixture)
+    if api_stats:
+        return api_stats
 
+    # Fallback to old flatten format (for compatibility)
+    try:
+        df = flatten_fixtures([fixture])
+        if df.empty:
+            return {}
+        row = df.iloc[0]
+        stats = {}
+        p1_key = safe_int_convert(fixture.get("first_player_key"))
+        p2_key = safe_int_convert(fixture.get("second_player_key"))
+        p1_stats = {col[len("p1_"):]: row[col] for col in df.columns if col.startswith("p1_")}
+        p2_stats = {col[len("p2_"):]: row[col] for col in df.columns if col.startswith("p2_")}
+        if p1_key is not None:
+            stats[p1_key] = p1_stats
+        if p2_key is not None:
+            stats[p2_key] = p2_stats
+        return stats
+    except Exception:
+        return {}
 # %%
 import random
 
