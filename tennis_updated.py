@@ -524,18 +524,44 @@ class TennisAbstractScraper:
 
             resp = requests.get(url, headers=self.headers, timeout=30)
             resp.raise_for_status()
+            html = resp.text
 
             match_meta = self._parse_match_url(url)
             if not match_meta:
                 print(f"Could not parse match metadata from URL: {url}")
                 return []
 
-            js_tables = self._extract_all_js_tables(resp.text)
+            # Extract player names from the page title
+            title_match = re.search(r"<title>.*?:\s(.+?) vs (.+?)\s+Detailed Stats", html, re.S)
+            if title_match:
+                name1, name2 = title_match.groups()
+                codes = [self._normalize_player_name(name1), self._normalize_player_name(name2)]
+            else:
+                raise ValueError("Cannot extract player names from title")
+
+            # Build mapping from row prefix to canonical code
+            prefix_map = {}
+            for code in codes:
+                parts = code.split('_')
+                initials = ''.join([p[0].upper() for p in parts[:2]])
+                prefix_map[initials] = code
+            self.prefix_map = prefix_map
+
+            js_tables = self._extract_all_js_tables(html)
             print(f"Extracted {len(js_tables)} JavaScript tables: {list(js_tables.keys())}")
 
             all_records = []
             for table_name, table_html in js_tables.items():
-                records = self._parse_tennis_abstract_table(table_html, table_name, match_meta)
+                if table_name.endswith('1') or table_name.endswith('2'):
+                    idx = 0 if table_name.endswith('1') else 1
+                    player_code = codes[idx]
+                    records = self._parse_single_player_table(
+                        table_html, table_name, match_meta, player_code
+                    )
+                else:
+                    records = self._parse_tennis_abstract_table(
+                        table_html, table_name, match_meta
+                    )
                 print(f"  {table_name}: {len(records)} records")
                 all_records.extend(records)
 
@@ -563,10 +589,7 @@ class TennisAbstractScraper:
             header_row = rows[0]
             headers = [th.get_text(strip=True) for th in header_row.find_all(['th', 'td'])]
 
-            player_map = {
-                'JS': self._normalize_player_name(match_meta.get('player1', '')),
-                'PM': self._normalize_player_name(match_meta.get('player2', ''))
-            }
+            player_map = getattr(self, 'prefix_map', {})
 
             for row in rows[1:]:
                 cells = row.find_all(['td', 'th'])
@@ -580,8 +603,11 @@ class TennisAbstractScraper:
                 player_code, stat_context = self._parse_row_identifier(identifier)
                 if not player_code:
                     continue
+                # Skip rows not matching known player prefixes
+                if player_code not in player_map:
+                    continue
 
-                player_canonical = player_map.get(player_code, player_code)
+                player_canonical = player_map[player_code]
 
                 for i, cell in enumerate(cells[1:], 1):
                     if i < len(headers):
@@ -613,29 +639,61 @@ class TennisAbstractScraper:
             print(f"Error parsing {table_type} table: {e}")
             return []
 
+    def _parse_single_player_table(self, table_html: str, table_type: str, match_meta: dict, player_canonical: str) -> list:
+        """Parse tables ending in ‘1’ or ‘2’ (only one player per table)"""
+        soup = BeautifulSoup(table_html, 'html.parser')
+        table = soup.find('table')
+        if not table:
+            return []
+        rows = table.find_all('tr')
+        if len(rows) < 2:
+            return []
+        headers = [th.get_text(strip=True) for th in rows[0].find_all(['th','td'])]
+        records = []
+        for row in rows[1:]:
+            cells = row.find_all(['td','th'])
+            if len(cells) < 2:
+                continue
+            stat_context = cells[0].get_text(strip=True)
+            if not stat_context:
+                continue
+            for i, cell in enumerate(cells[1:], 1):
+                if i >= len(headers):
+                    continue
+                header = headers[i]
+                text = cell.get_text(strip=True)
+                if not text or text == '-':
+                    continue
+                pv = self._parse_cell_value(text)
+                if not pv:
+                    continue
+                records.append({
+                    **match_meta,
+                    'Player_canonical': player_canonical,
+                    'stat_context': stat_context,
+                    'stat_name': self._normalize_header(header),
+                    'stat_value': pv.get('value', pv.get('count',0)),
+                    'stat_percentage': pv.get('percentage'),
+                    'raw_value': text,
+                    'data_type': table_type,
+                    'composite_id': self._build_composite_id(match_meta)
+                })
+        return records
+
     def _parse_row_identifier(self, identifier: str) -> tuple:
         """Parse row identifier to extract player code and context"""
-        if not identifier:
-            return None, None
-
-        if identifier.startswith('JS '):
-            return 'JS', identifier[3:].strip() or 'Total'
-        elif identifier.startswith('PM '):
-            return 'PM', identifier[3:].strip() or 'Total'
-        elif identifier in ['Jannik Sinner', 'JS']:
-            return 'JS', 'Total'
-        elif identifier in ['Pedro Martinez', 'PM']:
-            return 'PM', 'Total'
-        elif 'Sinner' in identifier:
-            return 'JS', identifier.replace('Jannik Sinner', '').strip() or 'Total'
-        elif 'Martinez' in identifier:
-            return 'PM', identifier.replace('Pedro Martinez', '').strip() or 'Total'
-        else:
-            parts = identifier.split()
-            if parts and len(parts[0]) <= 3:
-                return parts[0], ' '.join(parts[1:]) or 'Total'
-
-        return None, None
+        parts = identifier.split()
+        stat_context = ' '.join(parts[1:]).strip() or 'Total'
+        prefix = parts[0]
+        # Normalize prefix to match initials if full name used
+        if prefix not in getattr(self, 'prefix_map', {}):
+            low = identifier.lower()
+            for init, code in getattr(self, 'prefix_map', {}).items():
+                fname = code.split('_')[0]
+                if low.startswith(fname):
+                    prefix = init
+                    break
+        return prefix, stat_context
 
     def _parse_cell_value(self, cell_text: str) -> dict:
         """Parse Tennis Abstract cell values (e.g., '53  (72%)')"""
@@ -728,8 +786,12 @@ class AutomatedTennisAbstractScraper(TennisAbstractScraper):
             with open(self.scraped_urls_file, 'r') as f:
                 self.scraped_urls = set(line.strip() for line in f)
 
-    def automated_scraping_session(self, days_back=None, max_matches=100):
+    def automated_scraping_session(self, days_back=None, max_matches=100, force=False):
         """Run automated scraping session for matches after 6/10/2025"""
+        if force:
+            self.scraped_urls.clear()
+            if self.scraped_urls_file.exists():
+                self.scraped_urls_file.unlink()
         start_date = date(2025, 6, 10)
         end_date = date.today()
 
