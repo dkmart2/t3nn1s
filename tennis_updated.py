@@ -32,7 +32,10 @@ SESSION = requests.Session()
 # API CONFIGURATION AND CORE FUNCTIONS
 # ============================================================================
 
-API_KEY = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
+# API-Tennis configuration
+API_KEY = os.getenv("API_TENNIS_KEY")
+if not API_KEY:
+    raise ValueError("Environment variable API_TENNIS_KEY must be set")
 BASE = "https://api.api-tennis.com/tennis/"
 CACHE_API = Path.home() / ".api_tennis_cache"
 CACHE_API.mkdir(exist_ok=True)
