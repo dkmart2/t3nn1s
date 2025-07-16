@@ -23,6 +23,8 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run full pipeline
+        env:
+          API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
         run: |
           mkdir -p logs
           python - << 'EOF2'
