@@ -1,0 +1,55 @@
+name: Daily Data Pipeline
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run full pipeline
+        run: |
+          mkdir -p logs
+          python - << 'EOF2'
+          import logging
+          from tennis_updated import load_from_cache_with_scraping, generate_comprehensive_historical_data, save_to_cache, integrate_api_tennis_data_incremental
+
+          logging.basicConfig(filename='logs/pipeline.log',
+                              level=logging.INFO,
+                              format='%(asctime)s %(levelname)s %(message)s')
+
+          hist, jeff_data, defaults = load_from_cache_with_scraping()
+          if hist is None:
+              logging.info("No cache found, generating full historical data")
+              hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
+              save_to_cache(hist, jeff_data, defaults)
+          else:
+              logging.info("Cache loaded successfully")
+
+          updated = integrate_api_tennis_data_incremental(hist)
+          save_to_cache(updated, jeff_data, defaults)
+
+          logging.info("Daily pipeline complete")
+          EOF2
+
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v3
+        with:
+          name: pipeline-logs
+          path: logs/pipeline.log
