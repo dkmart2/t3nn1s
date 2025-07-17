@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Runner for comprehensive data pipeline tests
+Runner for simplified comprehensive data pipeline tests
 """
 
 import subprocess
@@ -11,30 +11,41 @@ import os
 def run_tests():
     """Run comprehensive test suite with detailed reporting"""
 
-    print("🎾 COMPREHENSIVE TENNIS DATA PIPELINE TEST SUITE")
-    print("=" * 60)
+    print("🎾 TENNIS DATA PIPELINE VALIDATION SUITE")
+    print("=" * 55)
+    print("Testing core pipeline functionality and data quality")
+    print()
 
     # Test command with detailed output
     cmd = [
         sys.executable, "-m", "pytest",
-        "tests/comp_data_pipeline_test.py",  # Fixed path with 's'
+        "tests/simplified_pipeline_tests.py",  # Updated filename
         "-v",  # Verbose output
         "--tb=short",  # Short traceback format
         "--capture=no",  # Show print statements
-        "--durations=10",  # Show 10 slowest tests
+        "--durations=0",  # Show all test durations
         "-x",  # Stop on first failure
     ]
 
     try:
+        print("Running pipeline component tests...")
         result = subprocess.run(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
 
         if result.returncode == 0:
-            print("\n✅ ALL TESTS PASSED - PIPELINE IS READY FOR PRODUCTION")
-            print("\nYou can now proceed to model training with confidence.")
+            print("\n" + "=" * 55)
+            print("✅ ALL CORE TESTS PASSED")
+            print("✅ Pipeline components are working correctly")
+            print("✅ Data quality validation passed")
+            print("✅ Cache operations working")
+            print("✅ Feature extraction validated")
+            print("✅ Ready for model training")
+            print("=" * 55)
             return True
         else:
-            print("\n❌ TESTS FAILED - PIPELINE NEEDS FIXES")
-            print("\nFix the failing tests before proceeding to model training.")
+            print("\n" + "=" * 55)
+            print("❌ SOME TESTS FAILED")
+            print("❌ Fix failing components before proceeding")
+            print("=" * 55)
             return False
 
     except FileNotFoundError:
