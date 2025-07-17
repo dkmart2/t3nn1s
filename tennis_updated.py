@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup, FeatureNotFound
 from urllib.parse import urljoin, urlparse
 import argparse
 import collections
+os.environ["API_TENNIS_KEY"] = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
@@ -35,7 +36,7 @@ SESSION = requests.Session()
 # API-Tennis configuration
 API_KEY = os.getenv("API_TENNIS_KEY")
 if not API_KEY:
-    raise ValueError("Environment variable API_TENNIS_KEY must be set")
+    logging.warning("Environment variable API_TENNIS_KEY is not set; API-Tennis calls will fail")
 BASE = "https://api.api-tennis.com/tennis/"
 CACHE_API = Path.home() / ".api_tennis_cache"
 CACHE_API.mkdir(exist_ok=True)
@@ -1783,7 +1784,17 @@ def load_from_cache_with_scraping():
             hist = run_automated_tennis_abstract_integration(hist)
             save_to_cache(hist, jeff_data, defaults)
         else:
-            latest_date = hist['date'].max() if 'date' in hist.columns else date(2025, 6, 10)
+            if 'date' in hist.columns:
+                # Coerce to datetime, extract dates, filter out invalid entries
+                dates = pd.to_datetime(hist['date'], errors='coerce')
+                date_vals = dates.dt.date
+                valid_dates = [d for d in date_vals if not pd.isna(d)]
+                if valid_dates:
+                    latest_date = max(valid_dates)
+                else:
+                    latest_date = date(2025, 6, 10)
+            else:
+                latest_date = date(2025, 6, 10)
             days_since_update = (date.today() - latest_date).days
 
             if days_since_update > 2:

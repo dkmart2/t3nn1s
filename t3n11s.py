@@ -18,6 +18,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from unidecode import unidecode
 
+#%%
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 SESSION.mount(
@@ -630,9 +631,6 @@ class TennisAbstractScraper:
                     print(f"    Error processing match {fixture.get('event_key', 'unknown')}: {e}")
                     continue
 
-        except Exception as e:
-            print(f"  Error processing day {day}: {e}")
-            continue
 
     if api_matches:
         try:
@@ -1487,9 +1485,3 @@ if "ta_stats_json" in after_cutoff.columns:
         )
 else:
     print("Column 'ta_stats_json' absent – no TA scrape data stored.")
-#%%
-fixtures = get_fixtures_for_date(day)
-day_urls = charting_urls_for_day(day)
-
-# DEBUG
-print(f"{day}: {len(day_urls)} TA URLs")
