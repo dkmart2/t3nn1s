@@ -1390,6 +1390,7 @@ def get_player_profile(player_key):
         logging.error(f"Error getting player {player_key}: {e}")
         return {}
 
+
 def integrate_api_tennis_data_incremental(historical_data):
     """FIXED: Fetch API data with proper statistics integration"""
     df = historical_data.copy()
@@ -1398,7 +1399,12 @@ def integrate_api_tennis_data_incremental(historical_data):
     else:
         df["source_rank"] = df["source_rank"].fillna(3)
 
-    existing_api_dates = set(df[df["source_rank"] == 2]["date"].dropna())
+    # FIX: Ensure date column is properly typed
+    if 'date' in df.columns:
+        df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
+        existing_api_dates = set(df[df["source_rank"] == 2]["date"].dropna())
+    else:
+        existing_api_dates = set()
 
     start_date = date(2025, 6, 10)
     end_date = date.today()
@@ -1484,7 +1490,7 @@ def integrate_api_tennis_data_incremental(historical_data):
             record = {
                 "composite_id": comp_id,
                 "source_rank": 2,
-                "date": day,
+                "date": day,  # This is already a date object
                 "gender": gender,
                 "surface": surface,
                 "tournament_tier": fixture.get("event_type_type", "Unknown"),
@@ -1615,6 +1621,8 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500):
         tennis_data['winner_canonical'] = tennis_data['Winner'].apply(normalize_name)
         tennis_data['loser_canonical'] = tennis_data['Loser'].apply(normalize_name)
         tennis_data['tournament_canonical'] = tennis_data['Tournament'].apply(normalize_tournament_name)
+
+        # FIX: Ensure date is properly converted and handled
         tennis_data['Date'] = pd.to_datetime(tennis_data['Date'], errors='coerce')
         tennis_data['date'] = tennis_data['Date'].dt.date
 
@@ -1624,9 +1632,12 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500):
                 r['tournament_canonical'],
                 r['winner_canonical'],
                 r['loser_canonical']
-            ),
+            ) if pd.notna(r['date']) else None,
             axis=1
         )
+
+        # Remove rows with invalid dates/composite_ids
+        tennis_data = tennis_data.dropna(subset=['date', 'composite_id'])
 
         tennis_data['tennis_data_odds1'] = pd.to_numeric(tennis_data.get('PSW', 0), errors='coerce')
         tennis_data['tennis_data_odds2'] = pd.to_numeric(tennis_data.get('PSL', 0), errors='coerce')
@@ -1685,7 +1696,12 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500):
             try:
                 gender = row['gender']
 
-                if row['date'] <= date(2025, 6, 10):
+                # FIX: Handle date comparison properly
+                match_date = row['date']
+                if pd.isna(match_date) or not isinstance(match_date, date):
+                    continue
+
+                if match_date <= date(2025, 6, 10):
                     winner_features = extract_comprehensive_jeff_features(
                         row['winner_canonical'], gender, jeff_data, weighted_defaults
                     )
@@ -1772,6 +1788,7 @@ def load_from_cache():
             logging.warning(f"Cache load failed, regenerating data: {e}")
     return None, None, None
 
+
 def load_from_cache_with_scraping():
     """Load data from cache and optionally run incremental Tennis Abstract scraping"""
     hist, jeff_data, defaults = load_from_cache()
@@ -1784,17 +1801,21 @@ def load_from_cache_with_scraping():
             hist = run_automated_tennis_abstract_integration(hist)
             save_to_cache(hist, jeff_data, defaults)
         else:
+            # FIX: Handle NaN dates properly
             if 'date' in hist.columns:
-                # Coerce to datetime, extract dates, filter out invalid entries
-                dates = pd.to_datetime(hist['date'], errors='coerce')
-                date_vals = dates.dt.date
-                valid_dates = [d for d in date_vals if not pd.isna(d)]
-                if valid_dates:
-                    latest_date = max(valid_dates)
+                valid_dates = hist['date'].dropna()
+                if len(valid_dates) > 0:
+                    latest_date = valid_dates.max()
+                    # Ensure latest_date is actually a date object
+                    if pd.isna(latest_date) or not isinstance(latest_date, (date, pd.Timestamp)):
+                        latest_date = date(2025, 6, 10)
+                    elif isinstance(latest_date, pd.Timestamp):
+                        latest_date = latest_date.date()
                 else:
                     latest_date = date(2025, 6, 10)
             else:
                 latest_date = date(2025, 6, 10)
+
             days_since_update = (date.today() - latest_date).days
 
             if days_since_update > 2:
