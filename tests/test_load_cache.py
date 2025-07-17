@@ -1,6 +1,7 @@
 import os
 import pickle
 import pandas as pd
+import pytest
 from datetime import date, timedelta
 from tennis_updated import (
     load_from_cache_with_scraping,
@@ -34,8 +35,8 @@ def test_initial_backfill_branch(capsys):
     captured = capsys.readouterr()
     assert "No Tennis Abstract data found in cache" in captured.out
     assert isinstance(hist, pd.DataFrame)
-    # On initial backfill jeff and defaults come through as dicts
-    assert isinstance(jeff, dict) and isinstance(defaults, dict)
+    assert isinstance(jeff, dict)
+    assert isinstance(defaults, dict)
 
 def test_skip_backfill_when_ta_present(capsys):
     # Create a dummy historical_data.parquet with one TA column already
@@ -45,19 +46,19 @@ def test_skip_backfill_when_ta_present(capsys):
         "winner_ta_points": [42]
     })
     data["date"] = pd.to_datetime(data["date"]).dt.date
-    # Ensure directory exists and write file
     os.makedirs(os.path.dirname(HD_PATH), exist_ok=True)
     data.to_parquet(HD_PATH, index=False)
 
     # Create dummy Jeff and defaults pickle files
+    os.makedirs(os.path.dirname(JEFF_PATH), exist_ok=True)
     with open(JEFF_PATH, "wb") as f:
         pickle.dump({}, f)
+    os.makedirs(os.path.dirname(DEF_PATH), exist_ok=True)
     with open(DEF_PATH, "wb") as f:
         pickle.dump({}, f)
 
     hist, jeff, defaults = load_from_cache_with_scraping()
     captured = capsys.readouterr()
     assert "Tennis Abstract data is current" in captured.out
-    # The returned DataFrame should still have that TA column
     assert "winner_ta_points" in hist.columns
     assert hist.loc[0, "winner_ta_points"] == 42
