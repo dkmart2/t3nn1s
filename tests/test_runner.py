@@ -17,7 +17,7 @@ def run_tests():
     # Test command with detailed output
     cmd = [
         sys.executable, "-m", "pytest",
-        "comp_data_pipeline_test.py",
+        "tests/comp_data_pipeline_test.py",  # Fixed path with 's'
         "-v",  # Verbose output
         "--tb=short",  # Short traceback format
         "--capture=no",  # Show print statements
@@ -26,7 +26,7 @@ def run_tests():
     ]
 
     try:
-        result = subprocess.run(cmd, cwd=os.path.dirname(__file__))
+        result = subprocess.run(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
 
         if result.returncode == 0:
             print("\n✅ ALL TESTS PASSED - PIPELINE IS READY FOR PRODUCTION")
