@@ -1,0 +1,204 @@
+# Tennis Pipeline Testing Strategy
+
+## Overview
+
+The pipeline uses a **hybrid testing approach** for optimal development experience and production confidence:
+
+- **Fast Tests** - Mocked, for development feedback (seconds)
+- **Integration Tests** - Real APIs, for production validation (minutes)
+
+## Quick Start
+
+```bash
+# Fast development tests (recommended for daily use)
+python tests/comprehensive_test_runner.py --mode fast
+
+# Integration tests (run before deployment)
+python tests/comprehensive_test_runner.py --mode integration
+
+# All tests (comprehensive validation)
+python tests/comprehensive_test_runner.py --mode all
+```
+
+## Test Types
+
+### 🏃‍♂️ Fast Tests (Development)
+- **Purpose**: Rapid feedback during development
+- **Speed**: ~30 seconds
+- **Mocking**: All external APIs mocked
+- **When**: Every code change, CI/CD fast feedback
+- **Command**: `--mode fast`
+
+**What's mocked:**
+- API-Tennis calls
+- Tennis Abstract scraping
+- External network requests
+
+### 🔍 Integration Tests (Validation)
+- **Purpose**: Production validation with real systems
+- **Speed**: ~5-10 minutes
+- **Mocking**: None - real API calls
+- **When**: Before deployment, weekly validation
+- **Command**: `--mode integration`
+
+**What's real:**
+- Actual API-Tennis requests
+- Real Tennis Abstract scraping
+- Network timeouts and rate limits
+
+## Usage Examples
+
+### Development Workflow
+```bash
+# 1. Make code changes
+# 2. Run fast tests for immediate feedback
+python tests/comprehensive_test_runner.py --mode fast
+
+# 3. If fast tests pass, continue development
+# 4. Before committing, run integration tests
+python tests/comprehensive_test_runner.py --mode integration
+```
+
+### CI/CD Pipeline
+```bash
+# Fast feedback stage (runs on every commit)
+python tests/comprehensive_test_runner.py --mode fast
+
+# Full validation stage (runs on main branch)
+python tests/comprehensive_test_runner.py --mode all
+```
+
+### Direct Pytest Usage
+```bash
+# Run only fast tests
+pytest -m "not integration and not slow"
+
+# Run only integration tests
+pytest -m "integration"
+
+# Run specific test file
+pytest tests/test_tennis_pipeline.py -v
+
+# Run with timeout
+pytest --timeout=600 tests/edge_case_tests.py
+```
+
+## Test Categories
+
+### Core Pipeline Tests
+- **File**: `test_tennis_pipeline.py`
+- **Coverage**: Date handling, orchestration, API parsing
+- **Fast version**: Mocked external calls
+- **Integration version**: Real API calls
+
+### Integration Tests
+- **File**: `test_pipeline_integration.py`
+- **Coverage**: Tennis Abstract integration, feature extraction
+- **Includes**: Real web scraping tests
+
+### Scraper Tests
+- **File**: `test_tennis_scraper.py`
+- **Coverage**: Web scraping, data extraction
+- **Note**: Always uses real HTTP requests
+
+### Edge Case Tests
+- **File**: `edge_case_tests.py`
+- **Coverage**: All identified gaps
+- **Includes**: Idempotency, error handling, environment validation
+
+## Environment Setup
+
+### For Fast Tests
+```bash
+# No special requirements - uses mocks
+python tests/comprehensive_test_runner.py --mode fast
+```
+
+### For Integration Tests
+```bash
+# Requires API key
+export API_TENNIS_KEY="your_api_key_here"
+
+# Run integration tests
+python tests/comprehensive_test_runner.py --mode integration
+```
+
+## Troubleshooting
+
+### Fast Tests Failing
+- Check mocking setup
+- Verify core logic
+- Fix unit test issues
+
+### Integration Tests Failing
+- Verify API credentials: `echo $API_TENNIS_KEY`
+- Check network connectivity
+- Confirm external service availability
+- Check rate limits
+
+### Timeouts
+```bash
+# Increase timeout for slow networks
+pytest --timeout=900 tests/
+
+# Skip slow tests
+pytest -m "not slow"
+```
+
+## Best Practices
+
+### For Development
+1. **Always run fast tests first**
+2. **Run integration tests before major commits**
+3. **Use fast tests for TDD/debugging**
+4. **Reserve integration tests for validation**
+
+### For Production
+1. **Run all tests before deployment**
+2. **Schedule periodic integration test runs**
+3. **Monitor integration test results for API changes**
+4. **Use integration failures to detect external service issues**
+
+### For CI/CD
+```yaml
+# Example GitHub Actions
+fast_tests:
+  runs-on: ubuntu-latest
+  steps:
+    - name: Fast Tests
+      run: python tests/comprehensive_test_runner.py --mode fast
+
+integration_tests:
+  runs-on: ubuntu-latest
+  needs: fast_tests
+  steps:
+    - name: Integration Tests
+      env:
+        API_TENNIS_KEY: ${{ secrets.API_TENNIS_KEY }}
+      run: python tests/comprehensive_test_runner.py --mode integration
+```
+
+## Performance Expectations
+
+| Test Type | Duration | Frequency | Purpose |
+|-----------|----------|-----------|---------|
+| Fast Tests | 30-60s | Every change | Development feedback |
+| Integration Tests | 5-10min | Pre-deployment | Validation |
+| All Tests | 6-12min | Release validation | Complete coverage |
+
+## Success Criteria
+
+### Fast Tests Pass ✅
+- Core pipeline logic works
+- Mocking setup correct
+- Ready for continued development
+
+### Integration Tests Pass ✅
+- Real APIs responding correctly
+- External services operational
+- Ready for production deployment
+
+### All Tests Pass ✅
+- Complete system validation
+- Production deployment ready
+- Model training can begin
