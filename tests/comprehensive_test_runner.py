@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-UPDATED: Comprehensive test runner for tennis data pipeline
-Uses fixed orchestration tests and fast unit tests
+Comprehensive test runner for tennis data pipeline
+Uses actual existing test files in tests/ directory
 """
 
 import subprocess
@@ -23,7 +23,6 @@ def run_test_suite(test_file, suite_name, timeout=300):
         "--tb=short",
         "--capture=no",
         "--durations=5",
-        "--timeout=300",  # 5 minute timeout per test
     ]
 
     start_time = time.time()
@@ -79,16 +78,15 @@ def run_python_script_test(script_path, test_name):
 
 
 def main():
-    """Run comprehensive test suite with fixed tests"""
-    print("🎾 COMPREHENSIVE TENNIS DATA PIPELINE TEST SUITE (FIXED)")
-    print("Testing both component functionality and orchestration workflows")
-    print("Using optimized tests to avoid long-running operations")
+    """Run comprehensive test suite using actual test files"""
+    print("🎾 COMPREHENSIVE TENNIS DATA PIPELINE TEST SUITE")
+    print("Testing pipeline using actual test files")
 
-    # Test suites to run (in order)
+    # Test suites to run - using actual files that exist
     test_configs = [
-        ("simplified_pipeline_tests.py", "COMPONENT TESTS", 180),
-        ("fixed_orchestration_tests.py", "ORCHESTRATION TESTS (FIXED)", 300),
-        ("fast_unit_tests.py", "FAST UNIT TESTS", 60),
+        ("test_tennis_pipeline.py", "CORE PIPELINE TESTS", 180),
+        ("test_pipeline_integration.py", "INTEGRATION TESTS", 300),
+        ("test_tennis_scraper.py", "SCRAPER TESTS", 60),
     ]
 
     # Standalone script tests
@@ -122,7 +120,7 @@ def main():
 
     # Final report
     print(f"\n{'=' * 60}")
-    print("📊 COMPREHENSIVE TEST RESULTS (FIXED)")
+    print("📊 COMPREHENSIVE TEST RESULTS")
     print(f"{'=' * 60}")
 
     passed_count = 0
@@ -147,22 +145,19 @@ def main():
 
     if passed_count == total_count and total_count > 0:
         print(f"\n🏆 ALL TESTS PASSED - PIPELINE IS PRODUCTION READY!")
-        print(f"✅ Component functionality validated")
-        print(f"✅ Orchestration workflows verified (with fixed cold start)")
-        print(f"✅ Fast unit tests passed")
-        print(f"✅ Pipeline script execution confirmed")
+        print(f"✅ Core pipeline functionality validated")
+        print(f"✅ Tennis Abstract integration verified")
+        print(f"✅ Scraper functionality confirmed")
+        print(f"✅ Pipeline script execution verified")
         print(f"✅ Data quality and integrity confirmed")
-        print(f"✅ Error handling and recovery verified")
-        print(f"✅ Performance characteristics acceptable")
         print(f"\n🚀 Ready to proceed with model training!")
 
         # Provide guidance for next steps
         print(f"\n📋 NEXT STEPS:")
-        print(f"   1. Your pipeline is validated and ready")
-        print(f"   2. All core components working correctly")
-        print(f"   3. Orchestration logic verified")
-        print(f"   4. Begin model training with confidence")
-        print(f"   5. Use: python scripts/train_model.py")
+        print(f"   1. Pipeline validation complete")
+        print(f"   2. All core components working")
+        print(f"   3. Begin model training")
+        print(f"   4. Use: python scripts/train_model.py")
 
         return True
     else:
@@ -174,12 +169,12 @@ def main():
         if failed_tests:
             print(f"\n🎯 FOCUS AREAS:")
             for test_name in failed_tests:
-                if "COMPONENT" in test_name:
-                    print(f"   - Fix core pipeline components")
-                elif "ORCHESTRATION" in test_name:
-                    print(f"   - Fix pipeline workflow integration")
-                elif "UNIT" in test_name:
-                    print(f"   - Fix individual function logic")
+                if "CORE PIPELINE" in test_name:
+                    print(f"   - Fix core pipeline function logic")
+                elif "INTEGRATION" in test_name:
+                    print(f"   - Fix Tennis Abstract integration")
+                elif "SCRAPER" in test_name:
+                    print(f"   - Fix web scraping functionality")
                 elif "SCRIPT" in test_name:
                     print(f"   - Fix pipeline script execution")
 
