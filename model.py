@@ -291,42 +291,49 @@ class StateDependentModifiers:
             return self.pressure_multipliers.get('break_point', {}).get('server', 1.0)
         return 1.0
 
-    def fit(self, match_data: pd.DataFrame):
-        """Train ensemble model"""
-        try:
-            X = self.engineer_match_features(match_data)
-            y = pd.to_numeric(match_data.get('actual_winner', 1), errors='coerce').fillna(1).astype(int)
+    def fit(self, point_data: pd.DataFrame):
+        """
+        Learn pressure multipliers from historical point data.
+        Expects columns: 'is_break_point', 'is_set_point', 'is_match_point',
+        'PtWinner', 'Svr' (server id 1/2).
+        """
+        # Baseline server win probability
+        overall = (point_data['PtWinner'] == point_data['Svr']).mean()
 
-            # Remove NaN
-            mask = X.notna().all(axis=1) & y.notna()
-            X, y = X[mask], y[mask]
+        # Compute conditional probabilities for different pressure situations
+        pressure_situations = {
+            'break_point': 'is_break_point',
+            'set_point': 'is_set_point',
+            'match_point': 'is_match_point'
+        }
 
-            if len(X) == 0:
-                print("No valid training data for match ensemble")
-                return
+        for situation_name, column_name in pressure_situations.items():
+            if column_name not in point_data.columns:
+                self.pressure_multipliers[situation_name] = {'server': 1.0, 'returner': 1.0}
+                continue
 
-            # Time-based split for calibration
-            split_idx = max(1, int(len(X) * 0.8))
-            X_train, X_cal = X[:split_idx], X[split_idx:]
-            y_train, y_cal = y[:split_idx], y[split_idx:]
+            # Points in this pressure situation
+            pressure_mask = point_data[column_name] == True
 
-            # Train match model
-            self.match_model.fit(X_train, y_train)
+            if pressure_mask.any():
+                # Server performance under pressure
+                server_wins_pressure = (
+                    (point_data[pressure_mask]['PtWinner'] == point_data[pressure_mask]['Svr']).mean()
+                )
 
-            # Calibrate if we have calibration data
-            if len(X_cal) > 0:
-                cal_probs = self.match_model.predict_proba(X_cal)[:, 1]
-                self.calibrator.fit(cal_probs, y_cal)
+                # Returner performance under pressure
+                returner_wins_pressure = 1 - server_wins_pressure
+
+                # Calculate multipliers relative to baseline
+                server_multiplier = server_wins_pressure / overall if overall > 0 else 1.0
+                returner_multiplier = returner_wins_pressure / (1 - overall) if overall < 1 else 1.0
+
+                self.pressure_multipliers[situation_name] = {
+                    'server': server_multiplier,
+                    'returner': returner_multiplier
+                }
             else:
-                # No calibration data, fit on training data
-                cal_probs = self.match_model.predict_proba(X_train)[:, 1]
-                self.calibrator.fit(cal_probs, y_train)
-
-            print("Match ensemble trained successfully!")
-
-        except Exception as e:
-            print(f"Match ensemble training failed: {e}")
-            raise e
+                self.pressure_multipliers[situation_name] = {'server': 1.0, 'returner': 1.0}
 
     def fit_momentum(self, point_data: pd.DataFrame):
         """Learn momentum decay parameter from point-by-point data"""
