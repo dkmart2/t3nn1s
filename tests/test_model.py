@@ -21,16 +21,19 @@ from model import TennisModelPipeline, DataDrivenTennisModel, PointLevelModel
 # Add these functions to the top of tests/test_model.py after imports:
 
 def generate_synthetic_point_data(n_matches=50, points_per_match=100):
-    """Generate realistic synthetic point data"""
+    """Generate realistic synthetic point data with surface info"""
     import pandas as pd
     import numpy as np
 
+    surfaces = ['Hard', 'Clay', 'Grass']
+
     data = []
     for match_id in range(n_matches):
+        # Each match has one surface
+        match_surface = np.random.choice(surfaces)
+
         for point_num in range(points_per_match):
-            # Simulate realistic point data
             server = np.random.choice([1, 2])
-            # Server wins ~65% of points
             winner = server if np.random.random() < 0.65 else (3 - server)
 
             data.append({
@@ -38,6 +41,7 @@ def generate_synthetic_point_data(n_matches=50, points_per_match=100):
                 'Pt': point_num + 1,
                 'Svr': server,
                 'PtWinner': winner,
+                'surface': match_surface,  # Add surface to point data
                 'is_break_point': np.random.random() < 0.08,
                 'is_set_point': np.random.random() < 0.05,
                 'is_match_point': np.random.random() < 0.02,
