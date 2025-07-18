@@ -715,10 +715,13 @@ class TennisModelPipeline:
             self.config.n_simulations = 50
             self.config.lgb_estimators = 100
 
-        self.point_model = PointLevelModel(fast_mode=fast_mode)
-        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode)
+        self.point_model = PointLevelModel(fast_mode=fast_mode, config=self.config)
+        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode, config=self.config)
         self.simulation_model = None
         self.n_simulations = self.config.n_simulations
+
+        self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.INFO)
 
     def train(self, point_data: pd.DataFrame, match_data: pd.DataFrame):
         """Train all components with structured logging"""
