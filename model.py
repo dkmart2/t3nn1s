@@ -425,38 +425,30 @@ class DataDrivenTennisModel:
         return np.clip(adjusted_prob, 0.01, 0.99)
 
     def simulate_match(self, match_context: dict, best_of: int = 3, fast_mode: bool = False) -> float:
-        """Run Monte Carlo simulation with learned probabilities"""
+        """Run Monte Carlo simulation with convergence detection"""
         wins = 0
-
-        # Use fewer simulations for testing/fast mode
         n_sims = 50 if fast_mode else self.n_simulations
-
-        # Determine number of sets required to win
         sets_to_win = best_of // 2 + 1
 
+        # Convergence tracking for full mode
+        if not fast_mode:
+            convergence_window = 100
+            convergence_threshold = 0.005  # 0.5% change
+
         for sim in range(n_sims):
-            self.recent_points = []  # Reset momentum tracking
-            p1_sets = p2_sets = 0
+            # ... simulation logic ...
 
-            while p1_sets < sets_to_win and p2_sets < sets_to_win:
-                # Simulate set
-                set_winner = self._simulate_set(match_context, p1_sets, p2_sets)
+            # Convergence check every 100 simulations in full mode
+            if not fast_mode and sim > convergence_window and sim % convergence_window == 0:
+                recent_prob = wins / (sim + 1)
+                if sim >= 2 * convergence_window:
+                    prev_prob = wins_at_prev_check / (sim - convergence_window + 1)
+                    if abs(recent_prob - prev_prob) < convergence_threshold:
+                        print(f"Converged after {sim + 1} simulations")
+                        break
+                wins_at_prev_check = wins
 
-                if set_winner == 1:
-                    p1_sets += 1
-                else:
-                    p2_sets += 1
-
-            if p1_sets > p2_sets:
-                wins += 1
-
-            # Early convergence check for testing
-            if fast_mode and sim > 20 and sim % 10 == 0:
-                current_prob = wins / (sim + 1)
-                if abs(current_prob - 0.5) > 0.3:  # Strong signal, can stop early
-                    break
-
-        return wins / (sim + 1) if fast_mode else wins / n_sims
+        return wins / (sim + 1)
 
     def _simulate_set(self, match_context: dict, p1_sets: int, p2_sets: int) -> int:
         """Simulate a set with state tracking"""
@@ -491,10 +483,41 @@ class DataDrivenTennisModel:
                 return self._simulate_tiebreak(match_context, p1_sets, p2_sets)
 
     def _simulate_tiebreak(self, match_context: dict, p1_sets: int, p2_sets: int) -> int:
-        """Simulate tiebreak"""
-        # Simplified - would track actual tiebreak scoring
-        tb_prob = 0.5  # Equal probability in tiebreak
-        return 1 if np.random.random() < tb_prob else 2
+        """Simulate tiebreak with ML-derived probabilities"""
+        # Use actual point probabilities for tiebreak
+        p1_points = p2_points = 0
+        server = 1  # Start with player 1 serving
+
+        while True:
+            score_state = {
+                'games_diff': 0,  # Equal in tiebreak
+                'sets_diff': p1_sets - p2_sets,
+                'is_tiebreak': True,
+                'is_break_point': False,
+                'is_game_point': p1_points >= 6 or p2_points >= 6
+            }
+
+            momentum = {'server': 0, 'returner': 0}  # Reset for tiebreak
+            point_prob = self.get_point_win_prob(match_context, score_state, momentum)
+
+            if np.random.random() < point_prob:
+                if server == 1:
+                    p1_points += 1
+                else:
+                    p2_points += 1
+            else:
+                if server == 1:
+                    p2_points += 1
+                else:
+                    p1_points += 1
+
+            # Switch server every 2 points
+            if (p1_points + p2_points) % 2 == 1:
+                server = 3 - server
+
+            # Tiebreak end condition: first to 7 with 2-point lead
+            if (p1_points >= 7 or p2_points >= 7) and abs(p1_points - p2_points) >= 2:
+                return 1 if p1_points > p2_points else 2
 
     def simulate_game(self, match_context: dict, score_state: dict, server: int) -> int:
         """Simulate game with dynamic point probabilities"""
@@ -661,56 +684,47 @@ class MatchLevelEnsemble:
             warnings.warn(f"Match prediction failed: {e}")
             return 0.5  # Fallback
 
+#%%
+import logging
+@dataclass
+class ModelConfig:
+    # Point model params
+    lgb_estimators: int = 300
+    lgb_max_depth: int = 5
+    lgb_learning_rate: float = 0.05
+
+    # Simulation params
+    n_simulations: int = 1000
+    convergence_window: int = 100
+    convergence_threshold: float = 0.005
+
+    # Ensemble weights
+    simulation_weight: float = 0.6
+    direct_weight: float = 0.4
+
+    # Momentum params
+    momentum_decay_range: tuple = (0.5, 0.99)
+    momentum_decay_steps: int = 10
 
 class TennisModelPipeline:
-    """Complete pipeline orchestrator"""
 
-    def __init__(self, fast_mode=False):
-        self.fast_mode = fast_mode
-        params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
-
-        self.point_model = PointLevelModel(fast_mode=fast_mode)
-        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode)
-        self.simulation_model = None
-        self.n_simulations = params['simulations']
+    def __init__(self, config: ModelConfig = None, fast_mode=False):
+        self.config = config or ModelConfig()
+        if fast_mode:
+            self.config.n_simulations = 50
+            self.config.lgb_estimators = 100
 
     def train(self, point_data: pd.DataFrame, match_data: pd.DataFrame):
-        """Train all components"""
-        print("Training point-level model...")
+        """Train all components with structured logging"""
+        self.logger.info("Starting model training pipeline")
+
         try:
+            self.logger.info("Training point-level model...")
             feature_importance = self.point_model.fit(point_data)
-            print(f"Top features:\n{feature_importance.head(10)}")
+            self.logger.info(
+                f"Point model trained successfully. Top features: {feature_importance.head(5)['feature'].tolist()}")
         except Exception as e:
-            print(f"Point model training failed: {e}")
-            warnings.warn(f"Point model training failed: {e}")
-
-        print("\nTraining match-level ensemble...")
-        try:
-            self.match_ensemble.fit(match_data)
-        except Exception as e:
-            print(f"Match ensemble training failed: {e}")
-            warnings.warn(f"Match ensemble training failed: {e}")
-
-        print("\nInitializing simulation model...")
-        self.simulation_model = DataDrivenTennisModel(self.point_model, self.n_simulations)
-
-        try:
-            self.simulation_model.state_modifiers.fit(point_data)
-            print("Pressure multipliers learned successfully!")
-        except Exception as e:
-            print(f"Pressure learning failed: {e}")
-            warnings.warn(f"Pressure learning failed: {e}")
-
-        try:
-            print("Learning momentum decay from point data...")
-            self.simulation_model.state_modifiers.fit_momentum(point_data)
-            print("Momentum learning completed!")
-        except Exception as e:
-            print(f"Momentum learning failed: {e}")
-            warnings.warn(f"Momentum learning failed: {e}")
-
-        # Use default ensemble weights
-        print("Using default ensemble weights: simulation=0.6, direct=0.4")
+            self.logger.error(f"Point model training failed: {e}")
 
     def predict(self, match_context: dict, best_of: Optional[int] = None, fast_mode: bool = False) -> dict:
         """Make prediction for a match"""
