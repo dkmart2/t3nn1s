@@ -14,11 +14,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(mes
 # Import your modules
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import TennisModelPipeline, DataDrivenTennisModel, PointLevelModel
 
-
-# Add these functions to the top of tests/test_model.py after imports:
 
 def generate_synthetic_point_data(n_matches=50, points_per_match=100):
     """Generate realistic synthetic point data"""
@@ -54,9 +53,6 @@ def generate_synthetic_point_data(n_matches=50, points_per_match=100):
 
 def generate_synthetic_match_data(n_matches=50):
     """Generate realistic synthetic match data"""
-    import pandas as pd
-    import numpy as np
-
     surfaces = ['Hard', 'Clay', 'Grass']
     players = ['player_a', 'player_b', 'player_c', 'player_d', 'player_e']
 
@@ -80,6 +76,80 @@ def generate_synthetic_match_data(n_matches=50):
         })
 
     return pd.DataFrame(data)
+
+
+def generate_synthetic_training_data_for_model():
+    """Generate comprehensive training data for model testing"""
+    # Generate point and match data
+    point_data = generate_synthetic_point_data(n_matches=100, points_per_match=80)
+    match_data = generate_synthetic_match_data(n_matches=200)
+
+    # Mock jeff_data and defaults (not used in model training but needed for function signature)
+    jeff_data = {'men': {}, 'women': {}}
+    defaults = {'men': {}, 'women': {}}
+
+    return point_data, match_data, jeff_data, defaults
+
+
+def extract_unified_features_fixed(match_data, player_prefix):
+    """Extract unified features for prediction - simplified version for testing"""
+    features = {}
+
+    # Serve effectiveness
+    serve_pts = match_data.get(f'{player_prefix}_serve_pts', 80)
+    serve_pts_won = match_data.get(f'{player_prefix}_pts_won', 52)
+    features['serve_effectiveness'] = serve_pts_won / serve_pts if serve_pts > 0 else 0.65
+
+    # Return effectiveness
+    return_pts = match_data.get(f'{player_prefix}_return_pts', 80)
+    return_pts_won = match_data.get(f'{player_prefix}_return_pts_won', 28)
+    features['return_effectiveness'] = return_pts_won / return_pts if return_pts > 0 else 0.35
+
+    # Winners rate
+    aces = match_data.get(f'{player_prefix}_aces', 5)
+    features['winners_rate'] = (aces / serve_pts) * 3 if serve_pts > 0 else 0.20
+
+    # Unforced rate
+    dfs = match_data.get(f'{player_prefix}_dfs', 2)
+    features['unforced_rate'] = (dfs / serve_pts) * 5 if serve_pts > 0 else 0.18
+
+    # Pressure performance
+    bp_saved = match_data.get(f'{player_prefix}_bp_saved', 3)
+    bk_pts = match_data.get(f'{player_prefix}_bk_pts', 7)
+    features['pressure_performance'] = (bp_saved / bk_pts) if bk_pts > 0 else 0.50
+
+    # Net effectiveness
+    features['net_effectiveness'] = 0.65
+
+    return features
+
+
+def extract_unified_match_context_fixed(match_data):
+    """Extract match context for prediction - simplified version for testing"""
+    context = {}
+
+    # Surface
+    surface = match_data.get('surface', 'Hard')
+    context['surface'] = surface
+
+    # Rankings
+    context['p1_ranking'] = match_data.get('WRank', 50)
+    context['p2_ranking'] = match_data.get('LRank', 50)
+
+    # H2H
+    context['h2h_matches'] = match_data.get('h2h_matches', 0)
+    context['p1_h2h_win_pct'] = match_data.get('p1_h2h_win_pct', 0.5)
+
+    # Odds
+    context['odds_p1'] = match_data.get('PSW', None)
+    context['odds_p2'] = match_data.get('PSL', None)
+
+    # Data quality
+    context['data_quality_score'] = 0.8
+    context['source_rank'] = match_data.get('source_rank', 3)
+
+    return context
+
 
 def test_synthetic_data_generation():
     """Test synthetic data generation"""
@@ -119,8 +189,6 @@ def test_momentum_learning(point_data):
 
     # Test pressure learning
     print("\n1. Testing pressure multiplier learning...")
-    # Add required columns for pressure learning
-    #point_data['is_break_point'] = (point_data['p1_games'] >= 5) | (point_data['p2_games'] >= 5)#
     point_data['is_set_point'] = (point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)
     point_data['is_match_point'] = ((point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)) & point_data[
         'is_set_point']
@@ -164,7 +232,8 @@ def test_point_model_training(point_data):
         print(importance.head())
 
         # Test prediction
-        test_features = point_data.iloc[:5][point_model.feature_names]
+        test_features = point_data.iloc[:5][
+            point_model.feature_names] if point_model.feature_names else point_data.iloc[:5]
         predictions = point_model.predict_proba(test_features)
         print(f"   Sample predictions: {predictions}")
 
