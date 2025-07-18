@@ -669,8 +669,8 @@ class TennisModelPipeline:
         self.fast_mode = fast_mode
         params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
 
-        self.point_model = PointLevelModel(fast_mode=fast_mode)
-        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode)
+        self.point_model = PointLevelModel(fast_mode=fast_mode, config=self.config)
+        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode, config=self.config)
         self.simulation_model = None
         self.n_simulations = params['simulations']
 
