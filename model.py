@@ -12,6 +12,8 @@ from typing import Dict, Tuple, Optional
 import joblib
 import os
 import warnings
+import logging
+from dataclasses import dataclass
 
 # Module-level constants
 DEFAULT_PRESSURE_MULTIPLIERS = {
@@ -32,6 +34,42 @@ FULL_MODE_PARAMS = {
     'simulations': 1000
 }
 
+@dataclass
+class ModelConfig:
+    # Point model params
+    lgb_estimators: int = 50  # Reduce for synthetic data
+    lgb_max_depth: int = 3    # Reduce depth
+    lgb_learning_rate: float = 0.1
+    lgb_verbose: int = -1     # Suppress LightGBM output
+            warnings.warn(f"Point model training failed: {e}")
+
+        print("\nTraining match-level ensemble...")
+        try:
+            self.match_ensemble.fit(match_data)
+        except Exception as e:
+            print(f"Match ensemble training failed: {e}")
+            warnings.warn(f"Match ensemble training failed: {e}")
+
+        print("\nInitializing simulation model...")
+        self.simulation_model = DataDrivenTennisModel(self.point_model, self.n_simulations)
+
+        try:
+            self.simulation_model.state_modifiers.fit(point_data)
+            print("Pressure multipliers learned successfully!")
+        except Exception as e:
+            print(f"Pressure learning failed: {e}")
+            warnings.warn(f"Pressure learning failed: {e}")
+
+        try:
+            print("Learning momentum decay from point data...")
+            self.simulation_model.state_modifiers.fit_momentum(point_data)
+            print("Momentum learning completed!")
+        except Exception as e:
+            print(f"Momentum learning failed: {e}")
+            warnings.warn(f"Momentum learning failed: {e}")
+
+        # Use default ensemble weights
+        print("Using default ensemble weights: simulation=0.6, direct=0.4")
 
 class PointLevelModel:
     """Learns P(point won | features) from historical point data"""
@@ -685,43 +723,6 @@ class TennisModelPipeline:
             print(f"Top features:\n{feature_importance.head(10)}")
         except Exception as e:
             print(f"Point model training failed: {e}")@dataclass
-
-@dataclass
-class ModelConfig:
-    # Point model params
-    lgb_estimators: int = 50  # Reduce for synthetic data
-    lgb_max_depth: int = 3    # Reduce depth
-    lgb_learning_rate: float = 0.1
-    lgb_verbose: int = -1     # Suppress LightGBM output
-            warnings.warn(f"Point model training failed: {e}")
-
-        print("\nTraining match-level ensemble...")
-        try:
-            self.match_ensemble.fit(match_data)
-        except Exception as e:
-            print(f"Match ensemble training failed: {e}")
-            warnings.warn(f"Match ensemble training failed: {e}")
-
-        print("\nInitializing simulation model...")
-        self.simulation_model = DataDrivenTennisModel(self.point_model, self.n_simulations)
-
-        try:
-            self.simulation_model.state_modifiers.fit(point_data)
-            print("Pressure multipliers learned successfully!")
-        except Exception as e:
-            print(f"Pressure learning failed: {e}")
-            warnings.warn(f"Pressure learning failed: {e}")
-
-        try:
-            print("Learning momentum decay from point data...")
-            self.simulation_model.state_modifiers.fit_momentum(point_data)
-            print("Momentum learning completed!")
-        except Exception as e:
-            print(f"Momentum learning failed: {e}")
-            warnings.warn(f"Momentum learning failed: {e}")
-
-        # Use default ensemble weights
-        print("Using default ensemble weights: simulation=0.6, direct=0.4")
 
     def predict(self, match_context: dict, best_of: Optional[int] = None, fast_mode: bool = False) -> dict:
         """Make prediction for a match"""
