@@ -686,6 +686,8 @@ class MatchLevelEnsemble:
 
 #%%
 import logging
+from dataclasses import dataclass
+
 @dataclass
 class ModelConfig:
     # Point model params
