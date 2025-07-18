@@ -707,12 +707,16 @@ class ModelConfig:
     momentum_decay_steps: int = 10
 
 class TennisModelPipeline:
-
     def __init__(self, config: ModelConfig = None, fast_mode=False):
         self.config = config or ModelConfig()
         if fast_mode:
             self.config.n_simulations = 50
             self.config.lgb_estimators = 100
+
+        self.point_model = PointLevelModel(fast_mode=fast_mode)
+        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode)
+        self.simulation_model = None
+        self.n_simulations = self.config.n_simulations
 
     def train(self, point_data: pd.DataFrame, match_data: pd.DataFrame):
         """Train all components with structured logging"""
