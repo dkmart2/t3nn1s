@@ -34,59 +34,46 @@ FULL_MODE_PARAMS = {
     'simulations': 1000
 }
 
+
 @dataclass
 class ModelConfig:
+    """Configuration for model parameters"""
     # Point model params
-    lgb_estimators: int = 50  # Reduce for synthetic data
-    lgb_max_depth: int = 3    # Reduce depth
+    lgb_estimators: int = 50
+    lgb_max_depth: int = 3
     lgb_learning_rate: float = 0.1
-    lgb_verbose: int = -1     # Suppress LightGBM output
-            warnings.warn(f"Point model training failed: {e}")
+    lgb_verbose: int = -1
 
-        print("\nTraining match-level ensemble...")
-        try:
-            self.match_ensemble.fit(match_data)
-        except Exception as e:
-            print(f"Match ensemble training failed: {e}")
-            warnings.warn(f"Match ensemble training failed: {e}")
+    # Match model params
+    rf_estimators: int = 100
+    rf_max_depth: int = 8
 
-        print("\nInitializing simulation model...")
-        self.simulation_model = DataDrivenTennisModel(self.point_model, self.n_simulations)
+    # Simulation params
+    n_simulations: int = 1000
 
-        try:
-            self.simulation_model.state_modifiers.fit(point_data)
-            print("Pressure multipliers learned successfully!")
-        except Exception as e:
-            print(f"Pressure learning failed: {e}")
-            warnings.warn(f"Pressure learning failed: {e}")
+    # Training params
+    calibration_split: float = 0.8
+    min_calibration_samples: int = 5
 
-        try:
-            print("Learning momentum decay from point data...")
-            self.simulation_model.state_modifiers.fit_momentum(point_data)
-            print("Momentum learning completed!")
-        except Exception as e:
-            print(f"Momentum learning failed: {e}")
-            warnings.warn(f"Momentum learning failed: {e}")
-
-        # Use default ensemble weights
-        print("Using default ensemble weights: simulation=0.6, direct=0.4")
 
 class PointLevelModel:
     """Learns P(point won | features) from historical point data"""
 
-    def __init__(self, fast_mode=False):
+    def __init__(self, fast_mode=False, config: ModelConfig = None):
         self.fast_mode = fast_mode
-        params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
+        self.config = config or ModelConfig()
 
+        # Use config values
         self.model = lgb.LGBMClassifier(
-            n_estimators=params['lgb_estimators'],
-            max_depth=5,
-            learning_rate=0.05,
+            n_estimators=self.config.lgb_estimators,
+            max_depth=self.config.lgb_max_depth,
+            learning_rate=self.config.lgb_learning_rate,
+            verbose=self.config.lgb_verbose,
             colsample_bytree=0.8,
             subsample=0.8,
             random_state=42
         )
-        self.base_model = None  # Store uncalibrated model
+        self.base_model = None
         self.calibrator = None
         self.scaler = StandardScaler()
         self.feature_names = None
@@ -182,15 +169,17 @@ class PointLevelModel:
         # Scale features
         X_scaled = self.scaler.fit_transform(X)
 
-        # Split for calibration (ensure we have enough data)
-        if len(X_scaled) < 20:
+        # Split for calibration using config values
+        min_samples = self.config.min_calibration_samples * 2  # Need samples for both train and cal
+        if len(X_scaled) < min_samples:
             # Too little data for proper train/test split
             self.base_model = self.model
             self.base_model.fit(X_scaled, y)
             self.calibrator = None
             print("Warning: Not enough data for calibration, using uncalibrated model")
         else:
-            split_idx = max(10, int(len(X_scaled) * 0.8))  # Ensure at least 10 samples for training
+            split_idx = max(self.config.min_calibration_samples,
+                            int(len(X_scaled) * self.config.calibration_split))
             X_train, X_cal = X_scaled[:split_idx], X_scaled[split_idx:]
             y_train, y_cal = y[:split_idx], y[split_idx:]
 
@@ -200,7 +189,7 @@ class PointLevelModel:
 
             # Calibrate on held-out data
             try:
-                if len(X_cal) >= 5:  # Need minimum samples for calibration
+                if len(X_cal) >= self.config.min_calibration_samples:
                     self.calibrator = CalibratedClassifierCV(self.base_model, method='isotonic', cv='prefit')
                     self.calibrator.fit(X_cal, y_cal)
                     self.model = self.calibrator
@@ -577,21 +566,22 @@ class DataDrivenTennisModel:
 class MatchLevelEnsemble:
     """Direct match prediction + simulation ensemble with stacking"""
 
-    def __init__(self, fast_mode=False):
+    def __init__(self, fast_mode=False, config: ModelConfig = None):
         self.fast_mode = fast_mode
-        params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
+        self.config = config or ModelConfig()
 
         # Base models for stacking
         base_models = [
             ('lgb', lgb.LGBMClassifier(
-                n_estimators=params['lgb_estimators'],
+                n_estimators=self.config.lgb_estimators,
                 max_depth=6,
                 learning_rate=0.03,
+                verbose=self.config.lgb_verbose,
                 random_state=42
             )),
             ('rf', RandomForestClassifier(
-                n_estimators=params['rf_estimators'],
-                max_depth=8,
+                n_estimators=self.config.rf_estimators,
+                max_depth=self.config.rf_max_depth,
                 random_state=42
             ))
         ]
@@ -704,16 +694,20 @@ class TennisModelPipeline:
     """Complete pipeline orchestrator"""
 
     def __init__(self, config: ModelConfig = None, fast_mode=False):
-        self.config = config or ModelConfig()  # THIS MUST BE FIRST
+        self.config = config or ModelConfig()
         self.fast_mode = fast_mode
 
         # Override config for fast mode
         if fast_mode:
             self.config.n_simulations = 50
-            self.config.lgb_estimators = 100
+            self.config.lgb_estimators = 50
+            self.config.rf_estimators = 50
 
         # Initialize components
         self.point_model = PointLevelModel(fast_mode=fast_mode, config=self.config)
+        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode, config=self.config)
+        self.simulation_model = None
+        self.n_simulations = self.config.n_simulations
 
     def train(self, point_data: pd.DataFrame, match_data: pd.DataFrame):
         """Train all components"""
@@ -722,7 +716,36 @@ class TennisModelPipeline:
             feature_importance = self.point_model.fit(point_data)
             print(f"Top features:\n{feature_importance.head(10)}")
         except Exception as e:
-            print(f"Point model training failed: {e}")@dataclass
+            print(f"Point model training failed: {e}")
+            warnings.warn(f"Point model training failed: {e}")
+
+        print("\nTraining match-level ensemble...")
+        try:
+            self.match_ensemble.fit(match_data)
+        except Exception as e:
+            print(f"Match ensemble training failed: {e}")
+            warnings.warn(f"Match ensemble training failed: {e}")
+
+        print("\nInitializing simulation model...")
+        self.simulation_model = DataDrivenTennisModel(self.point_model, self.config.n_simulations)
+
+        try:
+            self.simulation_model.state_modifiers.fit(point_data)
+            print("Pressure multipliers learned successfully!")
+        except Exception as e:
+            print(f"Pressure learning failed: {e}")
+            warnings.warn(f"Pressure learning failed: {e}")
+
+        try:
+            print("Learning momentum decay from point data...")
+            self.simulation_model.state_modifiers.fit_momentum(point_data)
+            print("Momentum learning completed!")
+        except Exception as e:
+            print(f"Momentum learning failed: {e}")
+            warnings.warn(f"Momentum learning failed: {e}")
+
+        # Use default ensemble weights
+        print("Using default ensemble weights: simulation=0.6, direct=0.4")
 
     def predict(self, match_context: dict, best_of: Optional[int] = None, fast_mode: bool = False) -> dict:
         """Make prediction for a match"""
@@ -781,6 +804,7 @@ class TennisModelPipeline:
                 'point_model': self.point_model,
                 'match_ensemble': self.match_ensemble,
                 'simulation_model': self.simulation_model,
+                'config': self.config,
                 'fast_mode': self.fast_mode,
                 'n_simulations': self.n_simulations
             }
@@ -796,6 +820,7 @@ class TennisModelPipeline:
             self.point_model = model_data['point_model']
             self.match_ensemble = model_data['match_ensemble']
             self.simulation_model = model_data['simulation_model']
+            self.config = model_data.get('config', ModelConfig())
             self.fast_mode = model_data.get('fast_mode', False)
             self.n_simulations = model_data.get('n_simulations', 1000)
             print(f"Model loaded from {path}")
