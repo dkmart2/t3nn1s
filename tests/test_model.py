@@ -12,15 +12,69 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # Import your modules
-from tennis_updated import (
-    generate_synthetic_training_data_for_model,
-    generate_synthetic_point_data,
-    generate_synthetic_match_data,
-    extract_unified_features_fixed,
-    extract_unified_match_context_fixed
-)
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import TennisModelPipeline, DataDrivenTennisModel, PointLevelModel
 
+
+# Add these functions to the top of tests/test_model.py after imports:
+
+def generate_synthetic_point_data(n_matches=50, points_per_match=100):
+    """Generate realistic synthetic point data"""
+    import pandas as pd
+    import numpy as np
+
+    data = []
+    for match_id in range(n_matches):
+        for point_num in range(points_per_match):
+            # Simulate realistic point data
+            server = np.random.choice([1, 2])
+            # Server wins ~65% of points
+            winner = server if np.random.random() < 0.65 else (3 - server)
+
+            data.append({
+                'match_id': f'match_{match_id}',
+                'Pt': point_num + 1,
+                'Svr': server,
+                'PtWinner': winner,
+                'is_break_point': np.random.random() < 0.08,
+                'is_set_point': np.random.random() < 0.05,
+                'is_match_point': np.random.random() < 0.02,
+                'rallyCount': np.random.poisson(4) + 1
+            })
+
+    return pd.DataFrame(data)
+
+
+def generate_synthetic_match_data(n_matches=50):
+    """Generate realistic synthetic match data"""
+    import pandas as pd
+    import numpy as np
+
+    surfaces = ['Hard', 'Clay', 'Grass']
+    players = ['player_a', 'player_b', 'player_c', 'player_d', 'player_e']
+
+    data = []
+    for i in range(n_matches):
+        winner = np.random.choice(players)
+        loser = np.random.choice([p for p in players if p != winner])
+
+        data.append({
+            'match_id': f'match_{i}',
+            'surface': np.random.choice(surfaces),
+            'winner_canonical': winner,
+            'loser_canonical': loser,
+            'WRank': np.random.randint(1, 200),
+            'LRank': np.random.randint(1, 200),
+            'winner_aces': np.random.poisson(7),
+            'loser_aces': np.random.poisson(5),
+            'winner_serve_pts': np.random.normal(80, 10),
+            'loser_serve_pts': np.random.normal(80, 10),
+            'tournament_tier': np.random.choice(['ATP 250', 'ATP 500', 'Masters 1000', 'Grand Slam'])
+        })
+
+    return pd.DataFrame(data)
 
 def test_synthetic_data_generation():
     """Test synthetic data generation"""
@@ -42,7 +96,7 @@ def test_synthetic_data_generation():
     print(f"   Generated {len(match_data)} match records")
     print(f"   Columns: {list(match_data.columns)}")
     print(f"   Sample data:")
-    print(match_data[['surface', 'winner_canonical', 'loser_canonical', 'winner_aces', 'loser_aces']].head(3))
+    print(match_data[['match_id', 'WRank', 'LRank', 'winner_aces', 'loser_aces']].head(3))
 
     return point_data, match_data
 
@@ -61,7 +115,7 @@ def test_momentum_learning(point_data):
     # Test pressure learning
     print("\n1. Testing pressure multiplier learning...")
     # Add required columns for pressure learning
-    point_data['is_break_point'] = (point_data['p1_games'] >= 5) | (point_data['p2_games'] >= 5)
+    #point_data['is_break_point'] = (point_data['p1_games'] >= 5) | (point_data['p2_games'] >= 5)#
     point_data['is_set_point'] = (point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)
     point_data['is_match_point'] = ((point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)) & point_data[
         'is_set_point']
