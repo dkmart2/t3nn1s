@@ -665,14 +665,17 @@ class MatchLevelEnsemble:
 class TennisModelPipeline:
     """Complete pipeline orchestrator"""
 
-    def __init__(self, fast_mode=False):
+    def __init__(self, config: ModelConfig = None, fast_mode=False):
+        self.config = config or ModelConfig()  # THIS MUST BE FIRST
         self.fast_mode = fast_mode
-        params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
 
+        # Override config for fast mode
+        if fast_mode:
+            self.config.n_simulations = 50
+            self.config.lgb_estimators = 100
+
+        # Initialize components
         self.point_model = PointLevelModel(fast_mode=fast_mode, config=self.config)
-        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode, config=self.config)
-        self.simulation_model = None
-        self.n_simulations = params['simulations']
 
     def train(self, point_data: pd.DataFrame, match_data: pd.DataFrame):
         """Train all components"""
@@ -681,7 +684,15 @@ class TennisModelPipeline:
             feature_importance = self.point_model.fit(point_data)
             print(f"Top features:\n{feature_importance.head(10)}")
         except Exception as e:
-            print(f"Point model training failed: {e}")
+            print(f"Point model training failed: {e}")@dataclass
+
+@dataclass
+class ModelConfig:
+    # Point model params
+    lgb_estimators: int = 50  # Reduce for synthetic data
+    lgb_max_depth: int = 3    # Reduce depth
+    lgb_learning_rate: float = 0.1
+    lgb_verbose: int = -1     # Suppress LightGBM output
             warnings.warn(f"Point model training failed: {e}")
 
         print("\nTraining match-level ensemble...")
