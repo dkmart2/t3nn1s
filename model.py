@@ -10,8 +10,9 @@ import lightgbm as lgb
 from typing import Dict, Tuple, Optional
 import joblib
 from sklearn.calibration import CalibratedClassifierCV
+from tennis_updated import TennisAbstractScraper
 
-
+#%%
 class PointLevelModel:
     """Learns P(point won | features) from historical point data"""
 
@@ -144,6 +145,46 @@ class StateDependentModifiers:
                 self.pressure_multipliers[label] = p / overall if overall > 0 else 1.0
             else:
                 self.pressure_multipliers[label] = 1.0
+
+    def fit_momentum(self, point_data: pd.DataFrame):
+        """
+        Learn momentum decay parameter from historical point-by-point data.
+        Dynamically detects server and winner columns.
+        """
+        cols = list(point_data.columns)
+        # Skip if raw pointlog columns are absent
+        if not any(c.lower() == 'svr' for c in cols) or not any('winner' in c.lower() and c.lower() != 'svr' for c in cols):
+            print("fit_momentum: missing raw Svr/PtWinner columns, skipping momentum learning")
+            return
+
+        # Find server and winner columns
+        server_col = next((c for c in cols if c.lower() == 'svr'), None)
+        winner_col = next((c for c in cols if 'winner' in c.lower() and c.lower() != 'svr'), None)
+
+        outcomes = (point_data[winner_col] == point_data[server_col]).astype(int).tolist()
+        best_decay = self.momentum_decay
+        best_corr = -float('inf')
+        # Search decay values between 0.5 and 0.99
+        for d in np.linspace(0.5, 0.99, 10):
+            momentums = []
+            for j in range(len(point_data)):
+                server = point_data[server_col].iloc[j]
+                prev_winners = point_data[winner_col].iloc[:j].tolist()
+                # Compute weighted sign series
+                if j > 0:
+                    weights = np.array([d ** (j - k - 1) for k in range(j)])
+                    signs = np.array([1 if w == server else -1 for w in prev_winners])
+                    m = (weights * signs).sum() / weights.sum()
+                else:
+                    m = 0.0
+                momentums.append(m)
+            # Compute Pearson correlation between momentum and actual outcomes
+            corr = np.corrcoef(momentums, outcomes)[0, 1] if len(momentums) > 1 else 0
+            if corr > best_corr:
+                best_corr = corr
+                best_decay = d
+        self.momentum_decay = best_decay
+        print(f"Learned momentum_decay = {self.momentum_decay:.3f} (corr={best_corr:.3f})")
 
 
 class DataDrivenTennisModel:
@@ -401,6 +442,13 @@ class TennisModelPipeline:
         # point_data must include context flags
         self.simulation_model = DataDrivenTennisModel(self.point_model)
         self.simulation_model.state_modifiers.fit(point_data)
+
+        # Instantiate scraper to fetch raw pointlog for momentum learning
+        scraper = TennisAbstractScraper()
+        url = match_data.get('url') if isinstance(match_data, dict) else match_data.iloc[0].get('url')
+        print("Fetching raw pointlog data for momentum learning...")
+        raw_points = scraper.get_raw_pointlog(url)
+        self.simulation_model.state_modifiers.fit_momentum(raw_points)
 
         # Cross-validation for ensemble weights
         self._optimize_ensemble_weights(match_data)

@@ -22,6 +22,7 @@ from bs4 import BeautifulSoup, FeatureNotFound
 from urllib.parse import urljoin, urlparse
 import argparse
 import collections
+import json
 os.environ["API_TENNIS_KEY"] = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
 
 # Configure logging
@@ -467,6 +468,59 @@ def extract_unified_features_fixed(match_data, player_prefix):
 class TennisAbstractScraper:
     def __init__(self):
         self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+    def get_raw_pointlog(self, url: str) -> pd.DataFrame:
+        """
+        Fetch the raw HTML 'pointlog' table from Tennis Abstract for momentum fitting.
+        """
+        import pandas as pd
+        from bs4 import BeautifulSoup
+
+        # Fetch and parse page
+        resp = SESSION.get(url, headers=self.headers, timeout=30)
+        resp.raise_for_status()
+        html = resp.text
+
+        # Extract the raw HTML table for pointlog
+        js_tables = self._extract_all_js_tables(html)
+        if 'pointlog' not in js_tables:
+            raise ValueError("pointlog HTML table not found in JavaScript variables")
+        raw_html = js_tables['pointlog']
+
+        # Parse the HTML table
+        soup = BeautifulSoup(raw_html, 'html.parser')
+        table = soup.find('table')
+        if table is None:
+            raise ValueError("No <table> tag found in pointlog HTML")
+
+        rows = table.find_all('tr')
+        # Extract headers
+        header_cells = rows[0].find_all(['th', 'td'])
+        headers = [cell.get_text(strip=True) for cell in header_cells]
+        # Extract row data
+        data = []
+        for tr in rows[1:]:
+            cells = tr.find_all('td')
+            if not cells:
+                continue
+            data.append([cell.get_text(strip=True) for cell in cells])
+
+        df = pd.DataFrame(data, columns=headers)
+
+        # Map server names to numeric codes
+        server_names = list(pd.unique(df['Server']))
+        df['Svr'] = df['Server'].apply(lambda x: server_names.index(x) + 1)
+
+        # The last column is the point winner indicator; convert to numeric
+        last_col = headers[-1]
+        df['PtWinner'] = pd.to_numeric(df[last_col], errors='coerce')
+
+        # Drop rows where conversion failed
+        df = df.dropna(subset=['Svr', 'PtWinner']).copy()
+        df['Svr'] = df['Svr'].astype(int)
+        df['PtWinner'] = df['PtWinner'].astype(int)
+
+        return df[['Svr', 'PtWinner']]
 
     def _normalize_player_name(self, name: str) -> str:
         import unicodedata
