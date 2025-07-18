@@ -51,6 +51,131 @@ def generate_synthetic_point_data(n_matches=50, points_per_match=100):
     return pd.DataFrame(data)
 
 
+def generate_synthetic_training_data_for_model():
+    """Generate comprehensive training data that matches real pipeline expectations"""
+    import pandas as pd
+    import numpy as np
+
+    print("   Generating comprehensive point data...")
+    # Generate point data with all required features
+    point_data = generate_synthetic_point_data(n_matches=30, points_per_match=100)
+
+    # Add ELO and H2H features to point data
+    point_data['server_elo'] = np.random.normal(1500, 200, len(point_data))
+    point_data['returner_elo'] = np.random.normal(1500, 200, len(point_data))
+    point_data['server_h2h_win_pct'] = np.random.uniform(0.3, 0.7, len(point_data))
+    point_data['momentum'] = np.random.normal(0, 0.1, len(point_data))
+    point_data['serve_prob_used'] = np.random.uniform(0.6, 0.8, len(point_data))
+    point_data['skill_differential'] = np.random.normal(0, 50, len(point_data))
+
+    # Add game/set progression for realistic momentum learning
+    point_data['p1_games'] = 0
+    point_data['p2_games'] = 0
+    point_data['p1_sets'] = 0
+    point_data['p2_sets'] = 0
+
+    print("   Generating comprehensive match data...")
+    # Generate match data with all required features
+    match_data = generate_synthetic_match_data(n_matches=30)
+
+    # Add comprehensive match features
+    match_data['winner_elo'] = np.random.normal(1600, 200, len(match_data))
+    match_data['loser_elo'] = np.random.normal(1400, 200, len(match_data))
+    match_data['p1_h2h_win_pct'] = np.random.uniform(0.3, 0.7, len(match_data))
+    match_data['p1_surface_h2h_wins'] = np.random.randint(0, 5, len(match_data))
+    match_data['p2_surface_h2h_wins'] = np.random.randint(0, 5, len(match_data))
+    match_data['winner_last10_wins'] = np.random.randint(4, 10, len(match_data))
+    match_data['loser_last10_wins'] = np.random.randint(2, 8, len(match_data))
+    match_data['data_quality_score'] = np.random.uniform(0.6, 1.0, len(match_data))
+
+    # Add serve statistics
+    match_data['winner_serve_pts'] = np.random.normal(85, 15, len(match_data)).clip(50, 120)
+    match_data['loser_serve_pts'] = np.random.normal(80, 15, len(match_data)).clip(50, 120)
+    match_data['winner_aces'] = np.random.poisson(8)
+    match_data['loser_aces'] = np.random.poisson(6)
+    match_data['winner_dfs'] = np.random.poisson(3)
+    match_data['loser_dfs'] = np.random.poisson(4)
+
+    print("   Creating mock Jeff data structures...")
+    # Create realistic mock jeff_data structure
+    jeff_data = {
+        'men': {
+            'overview': pd.DataFrame({
+                'Player_canonical': ['player_a', 'player_b', 'player_c'],
+                'set': ['Total', 'Total', 'Total'],
+                'serve_pts': [80, 85, 75],
+                'aces': [8, 6, 10],
+                'dfs': [3, 4, 2],
+                'first_in': [45, 50, 40],
+                'first_won': [35, 38, 32],
+                'second_won': [15, 18, 12],
+                'bp_saved': [5, 7, 4],
+                'return_pts_won': [25, 28, 22],
+                'winners': [30, 25, 35],
+                'winners_fh': [18, 15, 20],
+                'winners_bh': [12, 10, 15],
+                'unforced': [25, 30, 20],
+                'unforced_fh': [15, 18, 12],
+                'unforced_bh': [10, 12, 8]
+            }),
+            'serve_basics': pd.DataFrame({
+                'Player_canonical': ['player_a', 'player_b'],
+                'pts': [80, 85],
+                'aces': [8, 6]
+            })
+        },
+        'women': {
+            'overview': pd.DataFrame({
+                'Player_canonical': ['player_w1', 'player_w2'],
+                'set': ['Total', 'Total'],
+                'serve_pts': [75, 80],
+                'aces': [4, 6]
+            })
+        }
+    }
+
+    print("   Creating weighted defaults...")
+    # Create realistic weighted defaults
+    defaults = {
+        'men': {
+            'serve_pts': 80.0,
+            'aces': 7.0,
+            'double_faults': 3.5,
+            'first_serve_pct': 0.62,
+            'first_serve_won': 35.0,
+            'second_serve_won': 16.0,
+            'break_points_saved': 4.5,
+            'return_pts_won': 28.0,
+            'winners_total': 28.0,
+            'unforced_errors': 25.0,
+            'aggression_index': 0.53,
+            'consistency_index': 0.48,
+            'pressure_performance': 0.52,
+            'net_game_strength': 0.65
+        },
+        'women': {
+            'serve_pts': 75.0,
+            'aces': 5.0,
+            'double_faults': 3.0,
+            'first_serve_pct': 0.60,
+            'first_serve_won': 32.0,
+            'second_serve_won': 15.0,
+            'break_points_saved': 4.0,
+            'return_pts_won': 26.0,
+            'winners_total': 25.0,
+            'unforced_errors': 23.0,
+            'aggression_index': 0.52,
+            'consistency_index': 0.49,
+            'pressure_performance': 0.51,
+            'net_game_strength': 0.60
+        }
+    }
+
+    print(f"   Generated: {len(point_data)} point records, {len(match_data)} match records")
+    print(f"   Jeff data: {len(jeff_data['men'])} men's datasets, {len(jeff_data['women'])} women's datasets")
+
+    return point_data, match_data, jeff_data, defaults
+
 def generate_synthetic_match_data(n_matches=50):
     """Generate realistic synthetic match data"""
     import pandas as pd
