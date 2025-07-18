@@ -12,9 +12,7 @@ from typing import Dict, Tuple, Optional
 import joblib
 import os
 import warnings
-import logging
-from dataclasses import dataclass
-# test #
+
 # Module-level constants
 DEFAULT_PRESSURE_MULTIPLIERS = {
     'break_point': {'server': 0.95, 'returner': 1.08},
@@ -35,52 +33,37 @@ FULL_MODE_PARAMS = {
 }
 
 
-@dataclass
-class ModelConfig:
-    """Configuration for model parameters"""
-    # Point model params
-    lgb_estimators: int = 50
-    lgb_max_depth: int = 3
-    lgb_learning_rate: float = 0.1
-    lgb_verbose: int = -1
-
-    # Match model params
-    rf_estimators: int = 100
-    rf_max_depth: int = 8
-
-    # Simulation params
-    n_simulations: int = 1000
-
-    # Training params
-    calibration_split: float = 0.8
-    min_calibration_samples: int = 5
-
-
 class PointLevelModel:
     """Learns P(point won | features) from historical point data"""
 
-    def __init__(self, fast_mode=False, config: ModelConfig = None):
+    def __init__(self, fast_mode=False):
         self.fast_mode = fast_mode
-        self.config = config or ModelConfig()
+        params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
 
-        # Use config values
         self.model = lgb.LGBMClassifier(
-            n_estimators=self.config.lgb_estimators,
-            max_depth=self.config.lgb_max_depth,
-            learning_rate=self.config.lgb_learning_rate,
-            verbose=self.config.lgb_verbose,
+            n_estimators=params['lgb_estimators'],
+            max_depth=5,
+            learning_rate=0.05,
             colsample_bytree=0.8,
             subsample=0.8,
-            random_state=42
+            random_state=42,
+            verbose=-1
         )
-        self.base_model = None
+        self.base_model = None  # Store uncalibrated model
         self.calibrator = None
         self.scaler = StandardScaler()
         self.feature_names = None
 
     def engineer_point_features(self, point_data: pd.DataFrame) -> pd.DataFrame:
         """Extract features from raw point data"""
-        features = pd.DataFrame()
+        features = pd.DataFrame(index=point_data.index)
+
+        # Helper function to safely extract numeric columns
+        def safe_numeric_extract(data, col_name, default_val):
+            if col_name in data.columns:
+                return pd.to_numeric(data[col_name], errors='coerce').fillna(default_val)
+            else:
+                return pd.Series([default_val] * len(data), index=data.index)
 
         # Serve features (simplified since we don't have detailed serve coding)
         features['is_first_serve'] = 1  # Assume first serve for simplicity
@@ -91,43 +74,50 @@ class PointLevelModel:
         # Rally features
         rally_col = 'rallyCount' if 'rallyCount' in point_data.columns else 'rally_length'
         if rally_col in point_data.columns:
-            features['rally_length'] = point_data[rally_col].fillna(3)
+            features['rally_length'] = pd.to_numeric(point_data[rally_col], errors='coerce').fillna(3)
         else:
             features['rally_length'] = 3  # Default rally length
 
         features['is_net_point'] = 0  # Simplified - no net point detection
 
         # Score state
-        features['games_diff'] = point_data.get('p1_games', 0) - point_data.get('p2_games', 0)
-        features['sets_diff'] = point_data.get('p1_sets', 0) - point_data.get('p2_sets', 0)
+        features['games_diff'] = (safe_numeric_extract(point_data, 'p1_games', 0) -
+                                  safe_numeric_extract(point_data, 'p2_games', 0))
+        features['sets_diff'] = (safe_numeric_extract(point_data, 'p1_sets', 0) -
+                                 safe_numeric_extract(point_data, 'p2_sets', 0))
         features['is_tiebreak'] = 0  # Simplified - no tiebreak detection
 
         # Point importance - FIX: Handle boolean conversion properly
         bp_col = point_data.get('is_break_point', False)
         if hasattr(bp_col, 'astype'):
             features['is_break_point'] = bp_col.astype(int)
+        elif isinstance(bp_col, (bool, int, float)):
+            features['is_break_point'] = int(bp_col)
         else:
-            features['is_break_point'] = int(bp_col) if isinstance(bp_col, bool) else 0
+            features['is_break_point'] = 0
 
         gp_col = point_data.get('is_game_point', False)
         if hasattr(gp_col, 'astype'):
             features['is_game_point'] = gp_col.astype(int)
+        elif isinstance(gp_col, (bool, int, float)):
+            features['is_game_point'] = int(gp_col)
         else:
-            features['is_game_point'] = int(gp_col) if isinstance(gp_col, bool) else 0
+            features['is_game_point'] = 0
 
         # Surface features
-        features['surface_clay'] = point_data.get('surface_clay', 0)
-        features['surface_grass'] = point_data.get('surface_grass', 0)
-        features['surface_hard'] = point_data.get('surface_hard', 0)
+        features['surface_clay'] = safe_numeric_extract(point_data, 'surface_clay', 0)
+        features['surface_grass'] = safe_numeric_extract(point_data, 'surface_grass', 0)
+        features['surface_hard'] = safe_numeric_extract(point_data, 'surface_hard', 0)
 
         # Player strength differential
-        features['elo_diff'] = point_data.get('server_elo', 1500) - point_data.get('returner_elo', 1500)
-        features['h2h_server_advantage'] = point_data.get('server_h2h_win_pct', 0.5) - 0.5
+        features['elo_diff'] = (safe_numeric_extract(point_data, 'server_elo', 1500) -
+                                safe_numeric_extract(point_data, 'returner_elo', 1500))
+        features['h2h_server_advantage'] = safe_numeric_extract(point_data, 'server_h2h_win_pct', 0.5) - 0.5
 
         # Additional features that might be useful
-        features['momentum'] = point_data.get('momentum', 0)
-        features['serve_prob_used'] = point_data.get('serve_prob_used', 0.65)
-        features['skill_differential'] = point_data.get('skill_differential', 0)
+        features['momentum'] = safe_numeric_extract(point_data, 'momentum', 0)
+        features['serve_prob_used'] = safe_numeric_extract(point_data, 'serve_prob_used', 0.65)
+        features['skill_differential'] = safe_numeric_extract(point_data, 'skill_differential', 0)
         features['round_level'] = 1  # Default round level
 
         # Match state features
@@ -169,17 +159,15 @@ class PointLevelModel:
         # Scale features
         X_scaled = self.scaler.fit_transform(X)
 
-        # Split for calibration using config values
-        min_samples = self.config.min_calibration_samples * 2  # Need samples for both train and cal
-        if len(X_scaled) < min_samples:
+        # Split for calibration (ensure we have enough data)
+        if len(X_scaled) < 20:
             # Too little data for proper train/test split
             self.base_model = self.model
             self.base_model.fit(X_scaled, y)
             self.calibrator = None
             print("Warning: Not enough data for calibration, using uncalibrated model")
         else:
-            split_idx = max(self.config.min_calibration_samples,
-                            int(len(X_scaled) * self.config.calibration_split))
+            split_idx = max(10, int(len(X_scaled) * 0.8))  # Ensure at least 10 samples for training
             X_train, X_cal = X_scaled[:split_idx], X_scaled[split_idx:]
             y_train, y_cal = y[:split_idx], y[split_idx:]
 
@@ -189,8 +177,11 @@ class PointLevelModel:
 
             # Calibrate on held-out data
             try:
-                if len(X_cal) >= self.config.min_calibration_samples:
-                    self.calibrator = CalibratedClassifierCV(self.base_model, method='isotonic', cv='prefit')
+                if len(X_cal) >= 5:  # Need minimum samples for calibration
+                    from sklearn.base import clone
+                    calibrated_model = clone(self.base_model)
+                    calibrated_model.fit(X_train, y_train)
+                    self.calibrator = CalibratedClassifierCV(calibrated_model, method='isotonic', cv='prefit')
                     self.calibrator.fit(X_cal, y_cal)
                     self.model = self.calibrator
                 else:
@@ -230,12 +221,14 @@ class PointLevelModel:
         # Scale features
         X_scaled = self.scaler.transform(X_array)
 
-        if self.calibrator is not None:
-            proba = self.calibrator.predict_proba(X_scaled)
-            return proba[:, 1] if proba.shape[1] > 1 else proba[:, 0]
-        else:
-            proba = self.model.predict_proba(X_scaled)
-            return proba[:, 1] if proba.shape[1] > 1 else proba[:, 0]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            if self.calibrator is not None:
+                proba = self.calibrator.predict_proba(X_scaled)
+                return proba[:, 1] if proba.shape[1] > 1 else proba[:, 0]
+            else:
+                proba = self.base_model.predict_proba(X_scaled)
+                return proba[:, 1] if proba.shape[1] > 1 else proba[:, 0]
 
 
 class StateDependentModifiers:
@@ -418,28 +411,19 @@ class DataDrivenTennisModel:
 
         # Get base probability from model with optimized prediction
         try:
-            # Convert to numpy array directly to avoid DataFrame overhead
+            # Create DataFrame with proper feature ordering
             if hasattr(self.point_model, 'feature_names') and self.point_model.feature_names:
-                # Ensure feature order matches training
-                feature_values = np.array([[features_dict.get(fname, 0) for fname in self.point_model.feature_names]])
+                feature_values = pd.DataFrame(
+                    [[features_dict.get(fname, 0) for fname in self.point_model.feature_names]],
+                    columns=self.point_model.feature_names
+                )
             else:
-                # Fallback to simple array
-                feature_values = np.array([list(features_dict.values())]).reshape(1, -1)
+                feature_values = pd.DataFrame([list(features_dict.values())])
 
-            # Scale and predict
-            if hasattr(self.point_model.scaler, 'transform'):
-                feature_values_scaled = self.point_model.scaler.transform(feature_values)
+            proba = self.point_model.predict_proba(feature_values)
+            base_prob = proba[0] if hasattr(proba, '__getitem__') else 0.65
 
-                if self.point_model.calibrator is not None:
-                    base_prob = self.point_model.calibrator.predict_proba(feature_values_scaled)[0, 1]
-                elif hasattr(self.point_model.model, 'predict_proba'):
-                    proba = self.point_model.model.predict_proba(feature_values_scaled)
-                    base_prob = proba[0, 1] if proba.shape[1] > 1 else proba[0, 0]
-                else:
-                    base_prob = 0.65
-            else:
-                base_prob = 0.65
-        except:
+        except Exception as e:
             base_prob = 0.65  # Fallback
 
         # Apply state-dependent modifiers
@@ -566,22 +550,22 @@ class DataDrivenTennisModel:
 class MatchLevelEnsemble:
     """Direct match prediction + simulation ensemble with stacking"""
 
-    def __init__(self, fast_mode=False, config: ModelConfig = None):
+    def __init__(self, fast_mode=False):
         self.fast_mode = fast_mode
-        self.config = config or ModelConfig()
+        params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
 
         # Base models for stacking
         base_models = [
             ('lgb', lgb.LGBMClassifier(
-                n_estimators=self.config.lgb_estimators,
+                n_estimators=params['lgb_estimators'],
                 max_depth=6,
                 learning_rate=0.03,
-                verbose=self.config.lgb_verbose,
-                random_state=42
+                random_state=42,
+                verbose=-1
             )),
             ('rf', RandomForestClassifier(
-                n_estimators=self.config.rf_estimators,
-                max_depth=self.config.rf_max_depth,
+                n_estimators=params['rf_estimators'],
+                max_depth=8,
                 random_state=42
             ))
         ]
@@ -604,42 +588,49 @@ class MatchLevelEnsemble:
         """Create match-level features - FIXED VERSION"""
         features = pd.DataFrame(index=match_data.index)
 
+        # Helper function to safely extract numeric features
+        def safe_numeric_series(data, col_name, default_val):
+            if col_name in data.columns:
+                return pd.to_numeric(data[col_name], errors='coerce').fillna(default_val)
+            else:
+                return pd.Series([default_val] * len(data), index=data.index)
+
         # Basic features with proper handling
-        features['rank_diff'] = (pd.to_numeric(match_data.get('WRank', 100), errors='coerce').fillna(100) -
-                                 pd.to_numeric(match_data.get('LRank', 100), errors='coerce').fillna(100))
+        features['rank_diff'] = (safe_numeric_series(match_data, 'WRank', 100) -
+                                 safe_numeric_series(match_data, 'LRank', 100))
 
         # Add some realistic variation to ELO if not present
         if 'winner_elo' not in match_data.columns:
             features['elo_diff'] = np.random.normal(0, 100, len(match_data))
         else:
-            features['elo_diff'] = (pd.to_numeric(match_data.get('winner_elo', 1500), errors='coerce').fillna(1500) -
-                                    pd.to_numeric(match_data.get('loser_elo', 1500), errors='coerce').fillna(1500))
+            features['elo_diff'] = (safe_numeric_series(match_data, 'winner_elo', 1500) -
+                                    safe_numeric_series(match_data, 'loser_elo', 1500))
 
-        features['h2h_balance'] = (
-                pd.to_numeric(match_data.get('p1_h2h_win_pct', 0.5), errors='coerce').fillna(0.5) - 0.5)
+        features['h2h_balance'] = safe_numeric_series(match_data, 'p1_h2h_win_pct', 0.5) - 0.5
 
         # Serve stats with realistic variation
-        winner_aces = pd.to_numeric(match_data.get('winner_aces', 5), errors='coerce').fillna(5)
-        winner_serve_pts = pd.to_numeric(match_data.get('winner_serve_pts', 80), errors='coerce').fillna(80)
+        winner_aces = safe_numeric_series(match_data, 'winner_aces', 5)
+        winner_serve_pts = safe_numeric_series(match_data, 'winner_serve_pts', 80)
         features['winner_serve_dominance'] = winner_aces / winner_serve_pts.clip(lower=1)
 
-        loser_aces = pd.to_numeric(match_data.get('loser_aces', 5), errors='coerce').fillna(5)
-        loser_serve_pts = pd.to_numeric(match_data.get('loser_serve_pts', 80), errors='coerce').fillna(80)
+        loser_aces = safe_numeric_series(match_data, 'loser_aces', 5)
+        loser_serve_pts = safe_numeric_series(match_data, 'loser_serve_pts', 80)
         features['loser_serve_dominance'] = loser_aces / loser_serve_pts.clip(lower=1)
 
         # Form indicators
-        features['winner_recent_win_pct'] = (
-                pd.to_numeric(match_data.get('winner_last10_wins', 5), errors='coerce').fillna(5) / 10)
-        features['loser_recent_win_pct'] = (
-                pd.to_numeric(match_data.get('loser_last10_wins', 5), errors='coerce').fillna(5) / 10)
+        features['winner_recent_win_pct'] = safe_numeric_series(match_data, 'winner_last10_wins', 5) / 10
+        features['loser_recent_win_pct'] = safe_numeric_series(match_data, 'loser_last10_wins', 5) / 10
 
         # Surface-specific H2H
-        features['h2h_surface_diff'] = (
-                pd.to_numeric(match_data.get('p1_surface_h2h_wins', 0), errors='coerce').fillna(0) -
-                pd.to_numeric(match_data.get('p2_surface_h2h_wins', 0), errors='coerce').fillna(0))
+        features['h2h_surface_diff'] = (safe_numeric_series(match_data, 'p1_surface_h2h_wins', 0) -
+                                        safe_numeric_series(match_data, 'p2_surface_h2h_wins', 0))
 
-        # Tournament importance
-        tournament_tier = match_data.get('tournament_tier', pd.Series('')).fillna('').astype(str)
+        # Tournament importance - handle string columns properly
+        if 'tournament_tier' in match_data.columns:
+            tournament_tier = match_data['tournament_tier'].fillna('').astype(str)
+        else:
+            tournament_tier = pd.Series([''] * len(match_data), index=match_data.index)
+
         features['is_grand_slam'] = tournament_tier.str.contains('Grand Slam', na=False).astype(int)
         features['is_masters'] = tournament_tier.str.contains('Masters', na=False).astype(int)
 
@@ -662,7 +653,9 @@ class MatchLevelEnsemble:
             # Ensure we have enough data for time series split
             if len(X) >= 10:
                 try:
-                    self.match_model.fit(X, y)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        self.match_model.fit(X, y)
                     print("Match ensemble trained successfully!")
                 except Exception as e:
                     warnings.warn(f"Match ensemble training failed: {e}. Using fallback.")
@@ -679,12 +672,14 @@ class MatchLevelEnsemble:
     def predict(self, match_features: pd.DataFrame) -> float:
         """Predict match outcome"""
         try:
-            if hasattr(self.match_model, 'predict_proba'):
-                probs = self.match_model.predict_proba(match_features)
-                return probs[0, 1] if probs.shape[1] > 1 else probs[0, 0]
-            else:
-                # Fallback to simple prediction
-                return 0.5
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                if hasattr(self.match_model, 'predict_proba'):
+                    probs = self.match_model.predict_proba(match_features)
+                    return probs[0, 1] if probs.shape[1] > 1 else probs[0, 0]
+                else:
+                    # Fallback to simple prediction
+                    return 0.5
         except Exception as e:
             warnings.warn(f"Match prediction failed: {e}")
             return 0.5  # Fallback
@@ -693,21 +688,14 @@ class MatchLevelEnsemble:
 class TennisModelPipeline:
     """Complete pipeline orchestrator"""
 
-    def __init__(self, config: ModelConfig = None, fast_mode=False):
-        self.config = config or ModelConfig()
+    def __init__(self, fast_mode=False):
         self.fast_mode = fast_mode
+        params = FAST_MODE_PARAMS if fast_mode else FULL_MODE_PARAMS
 
-        # Override config for fast mode
-        if fast_mode:
-            self.config.n_simulations = 50
-            self.config.lgb_estimators = 50
-            self.config.rf_estimators = 50
-
-        # Initialize components
-        self.point_model = PointLevelModel(fast_mode=fast_mode, config=self.config)
-        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode, config=self.config)
+        self.point_model = PointLevelModel(fast_mode=fast_mode)
+        self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode)
         self.simulation_model = None
-        self.n_simulations = self.config.n_simulations
+        self.n_simulations = params['simulations']
 
     def train(self, point_data: pd.DataFrame, match_data: pd.DataFrame):
         """Train all components"""
@@ -727,7 +715,7 @@ class TennisModelPipeline:
             warnings.warn(f"Match ensemble training failed: {e}")
 
         print("\nInitializing simulation model...")
-        self.simulation_model = DataDrivenTennisModel(self.point_model, self.config.n_simulations)
+        self.simulation_model = DataDrivenTennisModel(self.point_model, self.n_simulations)
 
         try:
             self.simulation_model.state_modifiers.fit(point_data)
@@ -768,7 +756,13 @@ class TennisModelPipeline:
 
         # Get direct prediction
         try:
-            match_features = self.match_ensemble.engineer_match_features(pd.DataFrame([match_context]))
+            # Ensure match_context is properly formatted as DataFrame
+            if isinstance(match_context, dict):
+                context_df = pd.DataFrame([match_context])
+            else:
+                context_df = match_context
+
+            match_features = self.match_ensemble.engineer_match_features(context_df)
             direct_prob = self.match_ensemble.predict(match_features)
         except Exception as e:
             warnings.warn(f"Direct prediction failed: {e}")
@@ -804,7 +798,6 @@ class TennisModelPipeline:
                 'point_model': self.point_model,
                 'match_ensemble': self.match_ensemble,
                 'simulation_model': self.simulation_model,
-                'config': self.config,
                 'fast_mode': self.fast_mode,
                 'n_simulations': self.n_simulations
             }
@@ -820,7 +813,6 @@ class TennisModelPipeline:
             self.point_model = model_data['point_model']
             self.match_ensemble = model_data['match_ensemble']
             self.simulation_model = model_data['simulation_model']
-            self.config = model_data.get('config', ModelConfig())
             self.fast_mode = model_data.get('fast_mode', False)
             self.n_simulations = model_data.get('n_simulations', 1000)
             print(f"Model loaded from {path}")
