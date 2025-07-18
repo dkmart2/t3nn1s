@@ -116,9 +116,9 @@ def test_momentum_learning(point_data):
     print("\n1. Testing pressure multiplier learning...")
     # Add required columns for pressure learning
     #point_data['is_break_point'] = (point_data['p1_games'] >= 5) | (point_data['p2_games'] >= 5)#
-    point_data['is_set_point'] = (point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)
-    point_data['is_match_point'] = ((point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)) & point_data[
-        'is_set_point']
+    #point_data['is_set_point'] = (point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)#
+    #point_data['is_match_point'] = ((point_data['p1_sets'] >= 2) | (point_data['p2_sets'] >= 2)) & point_data[
+       # 'is_set_point']#
 
     modifiers.fit(point_data)
     print(f"   Learned pressure multipliers: {modifiers.pressure_multipliers}")
