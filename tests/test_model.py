@@ -11,14 +11,13 @@ import logging
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# Import your modules
 import sys
 import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from model import TennisModelPipeline, DataDrivenTennisModel, PointLevelModel
 try:
-    from model import TennisModelPipeline, DataDrivenTennisModel, PointLevelModel, ModelConfig
+    from model_pipeline import ModelConfig
 except ImportError as e:
     print(f"Import error: {e}")
     print("Make sure model.py is in the same directory as this script")

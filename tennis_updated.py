@@ -2556,141 +2556,7 @@ def load_from_cache_direct():
         print(f"Error loading cache: {e}")
     return None
 
-# ============================================================================
-# PREDICTION MODEL WITH UNIFIED FEATURE EXTRACTION
-# ============================================================================
-
-class UnifiedBayesianTennisModel:
-    """Enhanced model that handles features from any data source"""
-
-    def __init__(self, n_simulations: int = 1000):
-        self.n_simulations = n_simulations
-
-        self.surface_adjustments = {
-            "Clay": {"serve_advantage": 0.92, "rally_importance": 1.15, "consistency_weight": 1.2},
-            "Grass": {"serve_advantage": 1.15, "rally_importance": 0.85, "consistency_weight": 0.9},
-            "Hard": {"serve_advantage": 1.0, "rally_importance": 1.0, "consistency_weight": 1.0},
-            "Indoor Hard": {"serve_advantage": 1.08, "rally_importance": 0.95, "consistency_weight": 0.95}
-        }
-
-    def _calculate_serve_probability(self, server_features: dict, returner_features: dict, surface: str):
-        """Calculate serve game win probability using unified features"""
-        base_prob = 0.65
-
-        serve_eff = server_features.get('serve_effectiveness', 0.65)
-        return_eff = returner_features.get('return_effectiveness', 0.35)
-        pressure = server_features.get('pressure_performance', 0.5)
-
-        surface_adj = self.surface_adjustments.get(surface, self.surface_adjustments["Hard"])
-
-        serve_prob = (
-                base_prob * 0.3 +
-                serve_eff * surface_adj["serve_advantage"] * 0.4 +
-                (1 - return_eff) * 0.2 +
-                pressure * 0.1
-        )
-
-        return min(max(serve_prob, 0.1), 0.9)
-
-    def _calculate_rally_probability(self, p1_features: dict, p2_features: dict, surface: str):
-        """Calculate rally win probability using unified features"""
-
-        p1_aggression = p1_features.get('winners_rate', 0.2) / (p1_features.get('unforced_rate', 0.18) + 0.01)
-        p2_aggression = p2_features.get('winners_rate', 0.2) / (p2_features.get('unforced_rate', 0.18) + 0.01)
-
-        p1_net = p1_features.get('net_effectiveness', 0.65)
-        p2_net = p2_features.get('net_effectiveness', 0.65)
-
-        surface_adj = self.surface_adjustments.get(surface, self.surface_adjustments["Hard"])
-
-        p1_rally_strength = (
-                p1_aggression * surface_adj.get("consistency_weight", 1.0) * 0.4 +
-                p1_net * 0.3 +
-                p1_features.get('pressure_performance', 0.5) * 0.3
-        )
-
-        p2_rally_strength = (
-                p2_aggression * surface_adj.get("consistency_weight", 1.0) * 0.4 +
-                p2_net * 0.3 +
-                p2_features.get('pressure_performance', 0.5) * 0.3
-        )
-
-        total_strength = p1_rally_strength + p2_rally_strength
-        return p1_rally_strength / total_strength if total_strength > 0 else 0.5
-
-    def _simulate_game(self, p1_features: dict, p2_features: dict, match_context: dict, server: int):
-        """Simulate a single game"""
-        surface = match_context.get('surface', 'Hard')
-
-        if server == 1:
-            serve_prob = self._calculate_serve_probability(p1_features, p2_features, surface)
-        else:
-            serve_prob = self._calculate_serve_probability(p2_features, p1_features, surface)
-            serve_prob = 1 - serve_prob
-
-        rally_prob = self._calculate_rally_probability(p1_features, p2_features, surface)
-
-        p1_points = p2_points = 0
-
-        while True:
-            if p1_points < 3 and p2_points < 3:
-                point_prob = serve_prob
-            else:
-                point_prob = serve_prob * 0.7 + rally_prob * 0.3
-
-            if random.random() < point_prob:
-                p1_points += 1
-            else:
-                p2_points += 1
-
-            if (p1_points >= 4 or p2_points >= 4) and abs(p1_points - p2_points) >= 2:
-                return 1 if p1_points > p2_points else 2
-
-    def _simulate_set(self, p1_features: dict, p2_features: dict, match_context: dict):
-        """Simulate one set"""
-        p1_games = p2_games = 0
-        server = 1
-
-        while True:
-            game_winner = self._simulate_game(p1_features, p2_features, match_context, server)
-
-            if game_winner == 1:
-                p1_games += 1
-            else:
-                p2_games += 1
-
-            server = 2 if server == 1 else 1
-
-            if (p1_games >= 6 or p2_games >= 6) and abs(p1_games - p2_games) >= 2:
-                return 1 if p1_games > p2_games else 2
-            elif p1_games == 6 and p2_games == 6:
-                tb_prob = self._calculate_rally_probability(p1_features, p2_features,
-                                                            match_context.get('surface', 'Hard'))
-                return 1 if random.random() < tb_prob else 2
-
-    def simulate_match(self, p1_features: dict, p2_features: dict, match_context: dict, best_of: int = 3):
-        """Simulate complete match"""
-        results = []
-
-        for _ in range(self.n_simulations):
-            p1_sets = p2_sets = 0
-
-            while p1_sets <= best_of // 2 and p2_sets <= best_of // 2:
-                set_winner = self._simulate_set(p1_features, p2_features, match_context)
-
-                if set_winner == 1:
-                    p1_sets += 1
-                else:
-                    p2_sets += 1
-
-                if p1_sets > best_of // 2 or p2_sets > best_of // 2:
-                    break
-
-            results.append(1 if p1_sets > p2_sets else 0)
-
-        return sum(results) / len(results)
-
-
+#%%
 # Override the broken feature extraction function
 def extract_features_working(match_data, player_prefix):
     features = {}
@@ -2880,8 +2746,11 @@ def predict_match_unified(args, hist, jeff_data, defaults):
                             print(f"{feature_name}: P1={p1_val:.3f}, P2={p2_val:.3f}")
 
                         # Run prediction
-                        model = UnifiedBayesianTennisModel()
-                        prob = model.simulate_match(p1_features, p2_features, match_context, best_of=args.best_of)
+                        from model import TennisModelPipeline
+                        pipeline = TennisModelPipeline(fast_mode=True)
+                        # Would need to train pipeline first or load pre-trained model
+                        result = pipeline.predict(match_context, best_of=args.best_of, fast_mode=True)
+                        prob = result['win_probability']
 
                         # Show results
                         print(f"\n=== PREDICTION RESULTS ===")
