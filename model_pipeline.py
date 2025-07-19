@@ -133,6 +133,18 @@ def extract_enhanced_point_features(point_data):
 
     point_data = point_data.copy()
 
+    # Ensure required columns exist
+    if 'surface' not in point_data.columns:
+        point_data['surface'] = 'Hard'  # Default fallback
+    if 'p1_games' not in point_data.columns:
+        point_data['p1_games'] = 0
+    if 'p2_games' not in point_data.columns:
+        point_data['p2_games'] = 0
+    if 'p1_sets' not in point_data.columns:
+        point_data['p1_sets'] = 0
+    if 'p2_sets' not in point_data.columns:
+        point_data['p2_sets'] = 0
+
     # 1. Dynamic serve features based on actual point context
     point_data['serve_number'] = ((point_data['Pt'] - 1) % 4) + 1  # 1-4 in game
     point_data['is_first_serve'] = (point_data['serve_number'] <= 2).astype(int)
@@ -145,11 +157,22 @@ def extract_enhanced_point_features(point_data):
 
     # 3. Rally length based on surface and game situation
     base_rally = {'Hard': 4, 'Clay': 6, 'Grass': 3}
-    for surface in base_rally:
-        mask = point_data['surface'] == surface
-        point_data.loc[mask, 'rally_length'] = np.random.poisson(base_rally[surface], mask.sum()) + 1
+    rally_lengths = []
 
-    # 4. Pressure situations based on game score
+    for idx, row in point_data.iterrows():
+        surface = row['surface']
+        base_length = base_rally.get(surface, 4)
+        rally_length = max(1, np.random.poisson(base_length))
+        rally_lengths.append(rally_length)
+
+    point_data['rally_length'] = rally_lengths
+
+    # 4. Surface indicators
+    point_data['surface_hard'] = (point_data['surface'] == 'Hard').astype(int)
+    point_data['surface_clay'] = (point_data['surface'] == 'Clay').astype(int)
+    point_data['surface_grass'] = (point_data['surface'] == 'Grass').astype(int)
+
+    # 5. Pressure situations based on game score
     point_data['is_break_point'] = (
                                            (point_data['p1_games'] >= 3) & (point_data['p2_games'] >= 3) &
                                            (abs(point_data['p1_games'] - point_data['p2_games']) <= 1)
@@ -165,33 +188,48 @@ def extract_enhanced_point_features(point_data):
                                          ((point_data['p1_games'] >= 5) | (point_data['p2_games'] >= 5))
                                  ).astype(int) * np.random.choice([0, 1], len(point_data), p=[0.97, 0.03])
 
-    # 5. Momentum calculation
-    momentum_values = []
-    for i in range(len(point_data)):
-        if i < 5:
-            momentum_values.append(0.0)
-        else:
-            recent_outcomes = point_data.iloc[max(0, i - 5):i]['PtWinner'].values
-            server = point_data.iloc[i]['Svr']
-            server_wins = (recent_outcomes == server).mean()
-            momentum_values.append((server_wins - 0.5) * 2)  # Scale to [-1, 1]
+    # 6. Momentum calculation (use existing momentum if available)
+    if 'momentum_p1' not in point_data.columns:
+        momentum_values = []
+        for i in range(len(point_data)):
+            if i < 5:
+                momentum_values.append(0.0)
+            else:
+                recent_outcomes = point_data.iloc[max(0, i - 5):i]['PtWinner'].values
+                server = point_data.iloc[i]['Svr']
+                server_wins = (recent_outcomes == server).mean()
+                momentum_values.append((server_wins - 0.5) * 2)  # Scale to [-1, 1]
 
-    point_data['momentum'] = momentum_values
+        point_data['momentum'] = momentum_values
+    else:
+        # Use server-specific momentum
+        point_data['momentum'] = point_data.apply(
+            lambda row: row['momentum_p1'] if row['Svr'] == 1 else row['momentum_p2'],
+            axis=1
+        )
 
-    # 6. Match context features
+    # 7. Match context features
     point_data['match_length'] = point_data['p1_games'] + point_data['p2_games']
     point_data['late_in_match'] = (point_data['match_length'] > 12).astype(int)
     point_data['sets_diff'] = point_data['p1_sets'] - point_data['p2_sets']
     point_data['games_diff'] = point_data['p1_games'] - point_data['p2_games']
 
-    # 7. Player skill differential (vary by match)
+    # 8. Player skill differential (vary by match)
     unique_matches = point_data['match_id'].unique()
     skill_diffs = {match: np.random.normal(0, 0.1) for match in unique_matches}
     point_data['skill_differential'] = point_data['match_id'].map(skill_diffs)
 
-    # 8. Tournament context
+    # 9. Tournament context
     point_data['round_level'] = np.random.choice([1, 2, 3, 4, 5], len(point_data),
                                                  p=[0.4, 0.25, 0.15, 0.1, 0.1])
+
+    # 10. Net play and tactical features
+    point_data['is_net_point'] = np.random.choice([0, 1], len(point_data), p=[0.8, 0.2])
+    point_data['is_tiebreak'] = ((point_data['p1_games'] == 6) & (point_data['p2_games'] == 6)).astype(int)
+
+    # 11. Serve probability used (from momentum learning if available)
+    if 'serve_prob_used' not in point_data.columns:
+        point_data['serve_prob_used'] = 0.65 + point_data['momentum'] * 0.1
 
     print(f"✓ Enhanced features created")
     print(f"✓ Feature variation check:")
@@ -214,12 +252,16 @@ def fix_momentum_learning():
 
     # Create enhanced point data with proper momentum progression
     enhanced_point_data = []
+    surfaces = ['Hard', 'Clay', 'Grass']
 
     for match_id in range(50):  # 50 matches for momentum learning
         match_points = []
         server = 1
         p1_momentum = 0.0
         p2_momentum = 0.0
+
+        # Assign surface for this match
+        match_surface = np.random.choice(surfaces, p=[0.6, 0.25, 0.15])  # Realistic distribution
 
         for point in range(100):  # 100 points per match
             # Calculate serve probability based on momentum and skill
@@ -248,9 +290,14 @@ def fix_momentum_learning():
                 'Pt': point + 1,
                 'Svr': server,
                 'PtWinner': point_winner,
+                'surface': match_surface,  # Add surface information
                 'momentum_p1': p1_momentum,
                 'momentum_p2': p2_momentum,
-                'serve_prob_used': serve_prob
+                'serve_prob_used': serve_prob,
+                'p1_games': point // 10,  # Simplified game progression
+                'p2_games': (point + 5) // 12,
+                'p1_sets': 0,  # Start of match
+                'p2_sets': 0
             })
 
             # Switch server every 2 points (simplified)
@@ -258,6 +305,15 @@ def fix_momentum_learning():
                 server = 3 - server
 
         enhanced_point_data.extend(match_points)
+
+    momentum_df = pd.DataFrame(enhanced_point_data)
+    print(f"✓ Created {len(momentum_df)} points with momentum progression")
+    print(f"✓ Momentum range: P1=[{momentum_df['momentum_p1'].min():.2f}, {momentum_df['momentum_p1'].max():.2f}]")
+    print(
+        f"✓ Serve probability range: [{momentum_df['serve_prob_used'].min():.2f}, {momentum_df['serve_prob_used'].max():.2f}]")
+    print(f"✓ Surface distribution: {momentum_df['surface'].value_counts().to_dict()}")
+
+    return momentum_df
 
     momentum_df = pd.DataFrame(enhanced_point_data)
     print(f"✓ Created {len(momentum_df)} points with momentum progression")
