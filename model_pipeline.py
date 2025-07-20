@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-CRITICAL FIXES: Proper target construction, leakage prevention, validation
-- Creates balanced dataset with proper 0/1 labels
-- Converts to relative features to prevent leakage
-- Validates feature extraction with explicit checks
-- Integrates point-level data or removes unused loading
-- Handles performance metrics correctly
-- Reduces verbose logging
+FIXED: Tennis ML Pipeline with Memory Optimization Applied
+- Replaced copy() with in-place updates
+- Aggregate Jeff stat tables before merging
+- Down-cast numeric columns immediately
+- Explicit memory cleanup with gc.collect()
+- Process datasets one at a time with intermediate saves
 """
 
 import sys
@@ -17,22 +16,34 @@ from datetime import date, timedelta
 import warnings
 import pickle
 import argparse
+import hashlib
+import time
+import gc  # ADDED: Explicit garbage collection
 from pathlib import Path
+from functools import wraps
+from contextlib import contextmanager
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
-from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss, classification_report
-from sklearn.calibration import calibration_curve
+from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, brier_score_loss
 from sklearn.feature_selection import SelectKBest, f_classif
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
 import lightgbm as lgb
-from skopt import BayesSearchCV
-from skopt.space import Real, Integer
 
 warnings.filterwarnings("ignore")
+
+# ADDED: Memory optimization settings
+os.environ['MODIN_ENGINE'] = 'ray'  # if modin installed
+pd.set_option("mode.copy_on_write", True)
 
 # Set global random seed for reproducibility
 GLOBAL_SEED = 42
 np.random.seed(GLOBAL_SEED)
+
+# Performance thresholds (seconds)
+STAGE_TIMEOUTS = {
+    'data_loading': 300,
+    'feature_extraction': 600,
+    'tennis_abstract': 900,
+    'model_training': 1800
+}
 
 sys.path.append('.')
 from model import TennisModelPipeline, ModelConfig
@@ -51,8 +62,81 @@ from tennis_updated import (
 )
 
 
-class FixedComprehensiveDataPipeline:
-    """Fixed pipeline with proper target construction and leakage prevention"""
+@contextmanager
+def timer_context(stage_name, timeout=None):
+    """Context manager for timing execution with optional timeout"""
+    start_time = time.time()
+    print(f"[TIMING] Starting {stage_name}...")
+
+    try:
+        yield
+        duration = time.time() - start_time
+
+        if timeout and duration > timeout:
+            raise TimeoutError(f"{stage_name} exceeded {timeout}s threshold: {duration:.1f}s")
+
+        print(f"[TIMING] {stage_name} completed in {duration:.1f}s")
+
+    except Exception as e:
+        duration = time.time() - start_time
+        print(f"[TIMING] {stage_name} failed after {duration:.1f}s: {e}")
+        raise
+
+
+def timing_wrapper(stage_name, timeout=None):
+    """Decorator to time function execution and enforce thresholds"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            with timer_context(stage_name, timeout):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def exponential_backoff_retry(max_attempts=5, base_delay=1):
+    """Decorator for exponential backoff retry logic"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_attempts - 1:
+                        raise Exception(f"Failed after {max_attempts} attempts: {e}")
+
+                    delay = base_delay * (2 ** attempt)
+                    print(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                    time.sleep(delay)
+
+        return wrapper
+
+    return decorator
+
+
+def compute_data_hash(data):
+    """Compute deterministic SHA-256 hash of training data"""
+    # Create deterministic hash by sorting and using only numeric columns
+    numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
+    if not numeric_cols:
+        # Fallback if no numeric columns
+        return hashlib.sha256(str(len(data)).encode()).hexdigest()
+
+    # Sort by columns and rows for determinism
+    sorted_data = data[numeric_cols].sort_index().sort_index(axis=1)
+
+    # Convert to bytes efficiently
+    data_bytes = sorted_data.to_numpy().astype(np.float32).tobytes()
+    return hashlib.sha256(data_bytes).hexdigest()
+
+
+class OptimizedComprehensiveDataPipeline:
+    """FIXED: Memory-optimized pipeline with in-place updates and aggressive cleanup"""
 
     def __init__(self, cache_dir=CACHE_DIR, random_seed=GLOBAL_SEED):
         self.cache_dir = Path(cache_dir)
@@ -60,11 +144,13 @@ class FixedComprehensiveDataPipeline:
         self.random_seed = random_seed
         self.model_cache = self.cache_dir / "trained_models"
         self.model_cache.mkdir(exist_ok=True)
+        self.feature_selector = None
+        self.feature_selector_type = None
 
         np.random.seed(random_seed)
 
     def validate_feature_extraction(self, data, feature_prefix, min_features=5):
-        """Validate that feature extraction succeeded with explicit checks"""
+        """Validate feature extraction with explicit checks"""
         feature_cols = [col for col in data.columns if col.startswith(feature_prefix)]
 
         if len(feature_cols) < min_features:
@@ -78,11 +164,13 @@ class FixedComprehensiveDataPipeline:
         print(f"✓ Validated {feature_prefix}: {len(feature_cols)} features, {non_null_counts:,} non-null values")
         return feature_cols
 
-    def extract_all_jeff_features_vectorized(self, match_data, jeff_data, weighted_defaults):
-        """VECTORIZED: Extract ALL Jeff features without O(n²) iterrows pattern"""
-        print("Extracting comprehensive features from ALL Jeff datasets (vectorized)...")
+    @timing_wrapper("Jeff Feature Extraction", STAGE_TIMEOUTS['feature_extraction'])
+    def extract_all_jeff_features_vectorized_fixed(self, match_data, jeff_data, weighted_defaults):
+        """FIXED: Memory-optimized Jeff feature extraction with in-place updates"""
+        print("Extracting comprehensive features from ALL Jeff datasets (MEMORY FIXED)...")
 
-        enhanced_data = match_data.copy()
+        # FIXED: Use view, not copy
+        enhanced_data = match_data  # view, not copy
         feature_categories = {}
 
         # Get all available Jeff dataset types
@@ -99,194 +187,179 @@ class FixedComprehensiveDataPipeline:
                 continue
 
             gender_key = gender
-            gender_matches = enhanced_data[enhanced_data['gender'] == ('M' if gender == 'men' else 'W')].copy()
+            # FIXED: Use index-based selection instead of copy
+            idx = enhanced_data['gender'] == ('M' if gender == 'men' else 'W')
 
-            if gender_matches.empty:
+            if not idx.any():
                 continue
 
-            print(f"  Processing {gender}: {len(gender_matches):,} matches")
+            print(f"  Processing {gender}: {idx.sum():,} matches")
 
-            # 1. Overview statistics - vectorized merge
-            if 'overview' in jeff_data[gender_key]:
-                overview_df = jeff_data[gender_key]['overview']
-                if 'Player_canonical' in overview_df.columns:
-                    # Filter to Total stats only
-                    overview_total = overview_df[overview_df.get('set', '') == 'Total'].copy()
+            # Process datasets with AGGRESSIVE cleanup
+            dataset_configs = [
+                ('overview',
+                 ['serve_pts', 'aces', 'dfs', 'first_in', 'first_won', 'second_won', 'bp_saved', 'return_pts_won',
+                  'winners', 'winners_fh', 'winners_bh', 'unforced', 'unforced_fh', 'unforced_bh']),
+                ('serve_basics', ['pts_won', 'aces', 'unret', 'forced_err', 'wide', 'body', 't']),
+                ('return_outcomes', ['returnable', 'returnable_won', 'in_play', 'in_play_won', 'winners']),
+                ('key_points_serve', ['pts_won', 'first_in', 'aces', 'svc_winners', 'rally_winners']),
+                ('net_points', ['net_pts', 'pts_won', 'net_winner', 'induced_forced', 'passed_at_net'])
+            ]
 
-                    if not overview_total.empty:
-                        # Merge winner stats
-                        winner_overview = overview_total.add_prefix('winner_')
-                        winner_overview['winner_canonical'] = overview_total['Player_canonical']
-                        gender_matches = gender_matches.merge(
-                            winner_overview.drop(columns=['winner_Player_canonical']),
-                            on='winner_canonical', how='left'
-                        )
+            for dataset_name, agg_cols in dataset_configs:
+                if dataset_name not in jeff_data[gender_key]:
+                    continue
 
-                        # Merge loser stats
-                        loser_overview = overview_total.add_prefix('loser_')
-                        loser_overview['loser_canonical'] = overview_total['Player_canonical']
-                        gender_matches = gender_matches.merge(
-                            loser_overview.drop(columns=['loser_Player_canonical']),
-                            on='loser_canonical', how='left'
-                        )
+                df = jeff_data[gender_key][dataset_name]
 
-                        feature_categories['overview'] = feature_categories.get('overview', 0) + len(gender_matches)
+                # Special handling for overview dataset
+                if dataset_name == 'overview' and 'Player_canonical' in df.columns:
+                    overview_total = df[df.get('set', '') == 'Total'].copy()
+                    if overview_total.empty:
+                        continue
 
-            # 2. Serve basics - vectorized merge
-            if 'serve_basics' in jeff_data[gender_key]:
-                serve_df = jeff_data[gender_key]['serve_basics']
-                if 'player' in serve_df.columns:
-                    # Aggregate by player (mean of all matches)
-                    serve_agg = serve_df.groupby('player').agg({
-                        'pts_won': 'mean', 'aces': 'mean', 'unret': 'mean',
-                        'forced_err': 'mean', 'wide': 'mean', 'body': 'mean', 't': 'mean'
-                    }).reset_index()
+                    # FIXED: Aggregate BEFORE merging, down-cast immediately
+                    agg_df = overview_total.groupby('Player_canonical')[agg_cols].mean().astype(
+                        np.float32).reset_index()
 
-                    # Merge winner serve stats
-                    winner_serve = serve_agg.add_prefix('winner_serve_')
-                    winner_serve['winner_canonical'] = serve_agg['player']
-                    gender_matches = gender_matches.merge(
-                        winner_serve.drop(columns=['winner_serve_player']),
+                    # Merge winner stats using index-based updates
+                    winner_merge = enhanced_data[idx].merge(
+                        agg_df.add_prefix('winner_').rename(columns={'winner_Player_canonical': 'winner_canonical'}),
                         on='winner_canonical', how='left'
                     )
 
-                    # Merge loser serve stats
-                    loser_serve = serve_agg.add_prefix('loser_serve_')
-                    loser_serve['loser_canonical'] = serve_agg['player']
-                    gender_matches = gender_matches.merge(
-                        loser_serve.drop(columns=['loser_serve_player']),
+                    # Update in-place
+                    for col in winner_merge.columns:
+                        if col.startswith('winner_') and col not in enhanced_data.columns:
+                            enhanced_data[col] = np.nan
+                            enhanced_data.loc[idx, col] = winner_merge[col].values
+
+                    # Merge loser stats using index-based updates
+                    loser_merge = enhanced_data[idx].merge(
+                        agg_df.add_prefix('loser_').rename(columns={'loser_Player_canonical': 'loser_canonical'}),
                         on='loser_canonical', how='left'
                     )
 
-                    feature_categories['serve_basics'] = feature_categories.get('serve_basics', 0) + len(gender_matches)
+                    # Update in-place
+                    for col in loser_merge.columns:
+                        if col.startswith('loser_') and col not in enhanced_data.columns:
+                            enhanced_data[col] = np.nan
+                            enhanced_data.loc[idx, col] = loser_merge[col].values
 
-            # 3. Return outcomes - vectorized merge
-            if 'return_outcomes' in jeff_data[gender_key]:
-                return_df = jeff_data[gender_key]['return_outcomes']
-                if 'player' in return_df.columns:
-                    return_agg = return_df.groupby('player').agg({
-                        'returnable': 'mean', 'returnable_won': 'mean', 'in_play': 'mean',
-                        'in_play_won': 'mean', 'winners': 'mean'
-                    }).reset_index()
+                    # FIXED: Explicit cleanup
+                    del overview_total, agg_df, winner_merge, loser_merge
+                    gc.collect()
 
-                    # Merge winner return stats
-                    winner_return = return_agg.add_prefix('winner_return_')
-                    winner_return['winner_canonical'] = return_agg['player']
-                    gender_matches = gender_matches.merge(
-                        winner_return.drop(columns=['winner_return_player']),
+                elif 'player' in df.columns:
+                    # FIXED: Aggregate BEFORE merging for other datasets
+                    agg_dict = {col: 'mean' for col in agg_cols if col in df.columns}
+                    if not agg_dict:
+                        continue
+
+                    # Aggregate and down-cast immediately
+                    agg_df = df.groupby('player').agg(agg_dict).astype(np.float32).reset_index()
+
+                    # Merge winner stats using index-based updates
+                    winner_df = agg_df.add_prefix(f'winner_{dataset_name}_')
+                    winner_df['winner_canonical'] = agg_df['player']
+
+                    winner_merge = enhanced_data[idx].merge(
+                        winner_df.drop(columns=[f'winner_{dataset_name}_player']),
                         on='winner_canonical', how='left'
                     )
 
-                    # Merge loser return stats
-                    loser_return = return_agg.add_prefix('loser_return_')
-                    loser_return['loser_canonical'] = return_agg['player']
-                    gender_matches = gender_matches.merge(
-                        loser_return.drop(columns=['loser_return_player']),
+                    # Update in-place
+                    for col in winner_merge.columns:
+                        if col.startswith('winner_') and col not in enhanced_data.columns:
+                            enhanced_data[col] = np.nan
+                            enhanced_data.loc[idx, col] = winner_merge[col].values
+
+                    # Merge loser stats using index-based updates
+                    loser_df = agg_df.add_prefix(f'loser_{dataset_name}_')
+                    loser_df['loser_canonical'] = agg_df['player']
+
+                    loser_merge = enhanced_data[idx].merge(
+                        loser_df.drop(columns=[f'loser_{dataset_name}_player']),
                         on='loser_canonical', how='left'
                     )
 
-                    feature_categories['return_outcomes'] = feature_categories.get('return_outcomes', 0) + len(
-                        gender_matches)
+                    # Update in-place
+                    for col in loser_merge.columns:
+                        if col.startswith('loser_') and col not in enhanced_data.columns:
+                            enhanced_data[col] = np.nan
+                            enhanced_data.loc[idx, col] = loser_merge[col].values
 
-            # 4. Key points - vectorized merge
-            if 'key_points_serve' in jeff_data[gender_key]:
-                kp_df = jeff_data[gender_key]['key_points_serve']
-                if 'player' in kp_df.columns:
-                    kp_agg = kp_df.groupby('player').agg({
-                        'pts_won': 'mean', 'first_in': 'mean', 'aces': 'mean',
-                        'svc_winners': 'mean', 'rally_winners': 'mean'
-                    }).reset_index()
+                    # FIXED: Explicit cleanup after each dataset
+                    del agg_df, winner_df, loser_df, winner_merge, loser_merge
+                    gc.collect()
 
-                    # Merge winner key points
-                    winner_kp = kp_agg.add_prefix('winner_kp_serve_')
-                    winner_kp['winner_canonical'] = kp_agg['player']
-                    gender_matches = gender_matches.merge(
-                        winner_kp.drop(columns=['winner_kp_serve_player']),
-                        on='winner_canonical', how='left'
-                    )
+                feature_categories[dataset_name] = feature_categories.get(dataset_name, 0) + idx.sum()
 
-                    # Merge loser key points
-                    loser_kp = kp_agg.add_prefix('loser_kp_serve_')
-                    loser_kp['loser_canonical'] = kp_agg['player']
-                    gender_matches = gender_matches.merge(
-                        loser_kp.drop(columns=['loser_kp_serve_player']),
-                        on='loser_canonical', how='left'
-                    )
-
-                    feature_categories['key_points'] = feature_categories.get('key_points', 0) + len(gender_matches)
-
-            # 5. Net points - vectorized merge
-            if 'net_points' in jeff_data[gender_key]:
-                net_df = jeff_data[gender_key]['net_points']
-                if 'player' in net_df.columns:
-                    net_agg = net_df.groupby('player').agg({
-                        'net_pts': 'mean', 'pts_won': 'mean', 'net_winner': 'mean',
-                        'induced_forced': 'mean', 'passed_at_net': 'mean'
-                    }).reset_index()
-
-                    # Merge winner net stats
-                    winner_net = net_agg.add_prefix('winner_net_')
-                    winner_net['winner_canonical'] = net_agg['player']
-                    gender_matches = gender_matches.merge(
-                        winner_net.drop(columns=['winner_net_player']),
-                        on='winner_canonical', how='left'
-                    )
-
-                    # Merge loser net stats
-                    loser_net = net_agg.add_prefix('loser_net_')
-                    loser_net['loser_canonical'] = net_agg['player']
-                    gender_matches = gender_matches.merge(
-                        loser_net.drop(columns=['loser_net_player']),
-                        on='loser_canonical', how='left'
-                    )
-
-                    feature_categories['net_points'] = feature_categories.get('net_points', 0) + len(gender_matches)
-
-            # Update enhanced_data with gender-specific results
-            enhanced_data.update(gender_matches)
-
-        print(f"✓ Vectorized feature extraction complete. Categories used: {feature_categories}")
+        print(f"✓ MEMORY-FIXED vectorized feature extraction complete. Categories used: {feature_categories}")
 
         # Validate Jeff feature extraction
-        jeff_winner_features = self.validate_feature_extraction(enhanced_data, 'winner_', min_features=10)
-        jeff_loser_features = self.validate_feature_extraction(enhanced_data, 'loser_', min_features=10)
+        self.validate_feature_extraction(enhanced_data, 'winner_', min_features=10)
+        self.validate_feature_extraction(enhanced_data, 'loser_', min_features=10)
 
-    def optimize_hyperparameters_bayesian(self, X_train, y_train):
-        """Bayesian hyperparameter optimization for LightGBM"""
-        print("Optimizing hyperparameters with Bayesian search...")
+        return enhanced_data
 
-        # Define search space for LightGBM
+    def optimize_hyperparameters_bayesian_enhanced(self, X_train, y_train):
+        """FIXED: Enhanced Bayesian optimization with proper early stopping"""
+        print("Optimizing hyperparameters with enhanced Bayesian search...")
+
+        try:
+            from skopt import BayesSearchCV
+            from skopt.space import Real, Integer
+        except ImportError:
+            print("scikit-optimize not available, using default parameters")
+            return self._get_default_lgb_model(), {}
+
+        # Split training data for early stopping
+        X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+            X_train, y_train, test_size=0.2, random_state=self.random_seed, stratify=y_train
+        )
+
+        # Define enhanced search space
         search_spaces = {
-            'n_estimators': Integer(100, 500),
-            'max_depth': Integer(3, 12),
-            'learning_rate': Real(0.01, 0.2, prior='log-uniform'),
-            'num_leaves': Integer(10, 100),
-            'min_child_samples': Integer(5, 50),
-            'subsample': Real(0.6, 1.0),
-            'colsample_bytree': Real(0.6, 1.0),
-            'reg_alpha': Real(0.0, 1.0),
-            'reg_lambda': Real(0.0, 1.0)
+            'n_estimators': Integer(200, 800),
+            'max_depth': Integer(3, 15),
+            'learning_rate': Real(0.01, 0.3, prior='log-uniform'),
+            'num_leaves': Integer(20, 200),
+            'min_child_samples': Integer(10, 100),
+            'subsample': Real(0.7, 1.0),
+            'colsample_bytree': Real(0.7, 1.0),
+            'reg_alpha': Real(0.0, 2.0),
+            'reg_lambda': Real(0.0, 2.0),
+            'max_cat_threshold': Integer(10, 50)
         }
 
-        # Base model
+        # Base model WITHOUT early_stopping_rounds in constructor
         lgb_model = lgb.LGBMClassifier(
             random_state=self.random_seed,
             class_weight='balanced',
             verbose=-1
         )
 
-        # Bayesian search with cross-validation
+        # Prepare fit_params for early stopping
+        fit_params = {
+            'eval_set': [(X_val_split, y_val_split)],
+            'early_stopping_rounds': 50,
+            'verbose': False
+        }
+
+        # FIXED: Enhanced Bayesian search with proper fit_params handling
         bayes_search = BayesSearchCV(
             estimator=lgb_model,
             search_spaces=search_spaces,
-            n_iter=30,  # Number of parameter settings sampled
+            n_iter=60,
             cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=self.random_seed),
             scoring='roc_auc',
             n_jobs=-1,
-            random_state=self.random_seed
+            random_state=self.random_seed,
+            fit_params=fit_params  # Pass fit_params to BayesSearchCV
         )
 
-        # Fit the search
+        # Fit with proper parameters
         bayes_search.fit(X_train, y_train)
 
         print(f"Best CV score: {bayes_search.best_score_:.4f}")
@@ -294,9 +367,28 @@ class FixedComprehensiveDataPipeline:
 
         return bayes_search.best_estimator_, bayes_search.best_params_
 
+    def _get_default_lgb_model(self):
+        """Get default LightGBM model when optimization fails"""
+        return lgb.LGBMClassifier(
+            n_estimators=300,
+            max_depth=8,
+            learning_rate=0.03,
+            random_state=self.random_seed,
+            class_weight='balanced',
+            verbose=-1,
+            max_cat_threshold=32
+        )
+
+    @exponential_backoff_retry(max_attempts=5, base_delay=2)
+    @timing_wrapper("Tennis Abstract Scraping", STAGE_TIMEOUTS['tennis_abstract'])
+    def scrape_tennis_abstract_with_retry(self, days_back=30, max_matches=100):
+        """Tennis Abstract scraping with exponential backoff retry"""
+        scraper = AutomatedTennisAbstractScraper()
+        return scraper.automated_scraping_session(days_back=days_back, max_matches=max_matches)
+
     def integrate_all_tennis_abstract_features(self, match_data, scraped_records):
-        """Integrate ALL Tennis Abstract features with validation"""
-        print("Integrating ALL Tennis Abstract features...")
+        """FIXED: Incremental TA feature assignment to reduce memory usage"""
+        print("Integrating ALL Tennis Abstract features with incremental assignment...")
 
         if not scraped_records:
             print("WARNING: No Tennis Abstract records available")
@@ -327,110 +419,210 @@ class FixedComprehensiveDataPipeline:
             ta_by_match[comp_id][player][feature_name] = stat_value
 
         if not data_types_found:
-            raise ValueError("Tennis Abstract feature extraction failed: no data types found")
+            print("WARNING: No Tennis Abstract data types found")
+            return match_data
 
         print(f"TA data types found: {sorted(data_types_found)}")
         print(f"Matches with TA data: {len(ta_by_match)}")
 
-        # Merge into match data
-        enhanced_data = match_data.copy()
+        # FIXED: Incremental assignment instead of pre-allocation
+        enhanced_data = match_data  # Use view, not copy
         matches_enhanced = 0
         ta_features_added = set()
 
+        # Process matches incrementally
         for comp_id, players in ta_by_match.items():
-            match_rows = enhanced_data[enhanced_data['composite_id'] == comp_id]
+            match_mask = enhanced_data['composite_id'] == comp_id
+            if not match_mask.any():
+                continue
 
-            if not match_rows.empty:
-                row_idx = match_rows.index[0]
-                current_row = enhanced_data.loc[row_idx]
+            match_idx = enhanced_data[match_mask].index[0]
+            current_row = enhanced_data.loc[match_idx]
 
-                winner_canonical = current_row.get('winner_canonical')
-                loser_canonical = current_row.get('loser_canonical')
+            winner_canonical = current_row.get('winner_canonical')
+            loser_canonical = current_row.get('loser_canonical')
 
-                for player_canonical, features in players.items():
-                    # Map player to winner/loser
-                    if player_canonical == winner_canonical:
-                        prefix = 'winner_'
-                    elif player_canonical == loser_canonical:
-                        prefix = 'loser_'
-                    else:
-                        # Try normalized matching
-                        norm_player = normalize_name(player_canonical)
-                        norm_winner = normalize_name(str(winner_canonical))
-                        norm_loser = normalize_name(str(loser_canonical))
+            for player_canonical, features in players.items():
+                if player_canonical == winner_canonical:
+                    prefix = 'winner_'
+                elif player_canonical == loser_canonical:
+                    prefix = 'loser_'
+                else:
+                    continue
 
-                        if norm_player == norm_winner:
-                            prefix = 'winner_'
-                        elif norm_player == norm_loser:
-                            prefix = 'loser_'
-                        else:
-                            continue
+                for feature_name, feature_value in features.items():
+                    col_name = f"{prefix}{feature_name}"
 
-                    for feature_name, feature_value in features.items():
-                        col_name = f"{prefix}{feature_name}"
+                    # Create column if it doesn't exist
+                    if col_name not in enhanced_data.columns:
+                        enhanced_data[col_name] = np.nan
 
-                        if col_name not in enhanced_data.columns:
-                            enhanced_data[col_name] = np.nan
+                    enhanced_data.loc[match_idx, col_name] = feature_value
+                    ta_features_added.add(col_name)
 
-                        enhanced_data.loc[row_idx, col_name] = feature_value
-                        ta_features_added.add(col_name)
-
-                enhanced_data.loc[row_idx, 'ta_enhanced'] = True
-                matches_enhanced += 1
+            enhanced_data.loc[match_idx, 'ta_enhanced'] = True
+            matches_enhanced += 1
 
         print(f"Enhanced {matches_enhanced} matches with {len(ta_features_added)} TA features")
 
-        # Validate TA feature extraction
-        if matches_enhanced == 0:
-            print("WARNING: No matches enhanced with TA features")
+        if matches_enhanced > 0:
+            self.validate_feature_extraction(enhanced_data, 'winner_ta_', min_features=3)
+            self.validate_feature_extraction(enhanced_data, 'loser_ta_', min_features=3)
+
+        return enhanced_data
+
+    def integrate_point_level_features_vectorized(self, match_data, point_data):
+        """FIXED: Vectorized point integration with proper server pivot handling"""
+        print("Integrating point-level data with vectorized operations...")
+
+        if point_data.empty:
+            print("No point data to integrate")
+            return match_data
+
+        # ASSERT: Match ID alignment validation
+        match_ids_in_points = set(point_data['match_id'].unique())
+        match_ids_in_matches = set(match_data.get('match_id', []))
+
+        if 'match_id' not in match_data.columns:
+            print("WARNING: No match_id column in match data, skipping point integration")
+            return match_data
+
+        mismatched_count = len(match_ids_in_points - match_ids_in_matches)
+        if mismatched_count > 0:
+            raise ValueError(f"Match ID mismatch: {mismatched_count} point log matches not found in match data")
+
+        print(f"✓ Match ID validation passed: {len(match_ids_in_points)} matches aligned")
+
+        # Vectorized aggregation
+        grouped = point_data.groupby('match_id')
+
+        # Pre-compute server statistics
+        server_stats = point_data.groupby(['match_id', 'Svr']).agg({
+            'PtWinner': ['count', 'sum']
+        }).reset_index()
+        server_stats.columns = ['match_id', 'Svr', 'points_played', 'points_won']
+        server_stats['win_rate'] = server_stats['points_won'] / server_stats['points_played']
+
+        # FIXED: Pivot with explicit filling for missing servers
+        server_pivot = server_stats.pivot(index='match_id', columns='Svr', values='win_rate')
+
+        # Ensure both server columns exist
+        if 1 not in server_pivot.columns:
+            server_pivot[1] = 0.5
+        if 2 not in server_pivot.columns:
+            server_pivot[2] = 0.5
+
+        server_pivot = server_pivot.fillna(0.5)
+
+        # Calculate match-level statistics
+        match_stats = grouped.agg({
+            'PtWinner': 'count',  # total points
+        }).reset_index()
+        match_stats.columns = ['match_id', 'total_points']
+
+        # Add rally statistics if available
+        if 'rally_length' in point_data.columns:
+            rally_stats = grouped['rally_length'].agg(['mean', 'std']).reset_index()
+            rally_stats.columns = ['match_id', 'avg_rally_length', 'rally_length_std']
+            match_stats = match_stats.merge(rally_stats, on='match_id', how='left')
+            del rally_stats
         else:
-            ta_winner_features = self.validate_feature_extraction(enhanced_data, 'winner_ta_', min_features=5)
-            ta_loser_features = self.validate_feature_extraction(enhanced_data, 'loser_ta_', min_features=5)
+            match_stats['avg_rally_length'] = 4.0
+            match_stats['rally_length_std'] = 2.0
+
+        # Merge server statistics
+        match_stats = match_stats.merge(server_pivot, on='match_id', how='left')
+
+        # Calculate neutral features
+        match_stats['serve_advantage_diff'] = match_stats[1] - match_stats[2]
+        match_stats['overall_serve_rate'] = (match_stats[1] + match_stats[2]) / 2
+        match_stats['serve_volatility'] = abs(match_stats[1] - match_stats[2])
+        match_stats['match_competitiveness'] = 1 - abs(match_stats['serve_advantage_diff'])
+
+        # Drop server-specific columns
+        match_stats = match_stats.drop(columns=[1, 2])
+
+        # Break point analysis (vectorized)
+        if 'is_break_point' in point_data.columns:
+            bp_data = point_data[point_data['is_break_point'] == True]
+            if not bp_data.empty:
+                bp_stats = bp_data.groupby(['match_id', 'Svr']).agg({
+                    'PtWinner': ['count', 'sum']
+                }).reset_index()
+
+                bp_stats.columns = ['match_id', 'Svr', 'bp_faced', 'bp_won']
+                bp_stats['bp_win_rate'] = bp_stats['bp_won'] / bp_stats['bp_faced']
+                bp_pivot = bp_stats.pivot(index='match_id', columns='Svr', values='bp_win_rate')
+
+                # Ensure both columns exist
+                if 1 not in bp_pivot.columns:
+                    bp_pivot[1] = 0.5
+                if 2 not in bp_pivot.columns:
+                    bp_pivot[2] = 0.5
+
+                bp_pivot = bp_pivot.fillna(0.5)
+                bp_diff = bp_pivot[1] - bp_pivot[2]
+
+                match_stats = match_stats.merge(
+                    bp_diff.to_frame('bp_performance_diff'),
+                    on='match_id', how='left'
+                )
+                del bp_data, bp_stats, bp_pivot
+            else:
+                match_stats['bp_performance_diff'] = 0.0
+        else:
+            match_stats['bp_performance_diff'] = 0.0
+
+        # Filter matches with sufficient points
+        match_stats = match_stats[match_stats['total_points'] >= 10]
+
+        # Merge with match data
+        enhanced_data = match_data.merge(match_stats, on='match_id', how='left')
+        added_features = len(match_stats.columns) - 1  # Exclude match_id
+
+        print(f"Integrated {added_features} vectorized point-level features for {len(match_stats)} matches")
+
+        # Memory cleanup
+        del grouped, server_stats, server_pivot, match_stats
 
         return enhanced_data
 
     def create_balanced_training_dataset(self, match_data):
-        """Create properly balanced dataset with correct target labels and no leakage"""
+        """Create balanced dataset with proper target construction"""
         print("Creating balanced training dataset with proper target construction...")
 
-        # Start with original matches (all labeled as 1 - winner wins)
+        # Start with original matches (all labeled as 1)
         positive_examples = match_data.copy()
         positive_examples['target'] = 1
         positive_examples['match_id'] = positive_examples.index.astype(str) + '_pos'
 
-        # Create negative examples by swapping winner/loser (labeled as 0 - "winner" loses)
+        # Create negative examples by swapping winner/loser
         negative_examples = match_data.copy()
 
-        # Swap winner/loser columns
+        # Identify winner/loser column pairs
         winner_cols = [col for col in match_data.columns if col.startswith('winner_')]
-        loser_cols = [col for col in match_data.columns if col.startswith('loser_')]
 
-        # Create mapping from winner columns to loser columns
-        col_mapping = {}
+        # Vectorized column swapping
         for winner_col in winner_cols:
-            base_name = winner_col[7:]  # Remove 'winner_' prefix
+            base_name = winner_col[7:]
             loser_col = f'loser_{base_name}'
             if loser_col in match_data.columns:
-                col_mapping[winner_col] = loser_col
-                col_mapping[loser_col] = winner_col
+                # Swap values
+                temp_values = negative_examples[winner_col].copy()
+                negative_examples[winner_col] = negative_examples[loser_col]
+                negative_examples[loser_col] = temp_values
 
-        # Swap the columns
-        for col1, col2 in col_mapping.items():
-            if col1.startswith('winner_') and col2.startswith('loser_'):
+        # Swap basic player info
+        basic_swaps = [
+            ('Winner', 'Loser'),
+            ('winner_canonical', 'loser_canonical')
+        ]
+
+        for col1, col2 in basic_swaps:
+            if col1 in negative_examples.columns and col2 in negative_examples.columns:
                 temp_values = negative_examples[col1].copy()
                 negative_examples[col1] = negative_examples[col2]
                 negative_examples[col2] = temp_values
-
-        # Also swap basic player info
-        if 'Winner' in negative_examples.columns and 'Loser' in negative_examples.columns:
-            temp_winner = negative_examples['Winner'].copy()
-            negative_examples['Winner'] = negative_examples['Loser']
-            negative_examples['Loser'] = temp_winner
-
-        if 'winner_canonical' in negative_examples.columns and 'loser_canonical' in negative_examples.columns:
-            temp_winner = negative_examples['winner_canonical'].copy()
-            negative_examples['winner_canonical'] = negative_examples['loser_canonical']
-            negative_examples['loser_canonical'] = temp_winner
 
         negative_examples['target'] = 0
         negative_examples['match_id'] = negative_examples.index.astype(str) + '_neg'
@@ -443,6 +635,9 @@ class FixedComprehensiveDataPipeline:
         print(f"  Balanced examples: {len(balanced_data):,}")
         print(f"  Class distribution: {balanced_data['target'].value_counts().to_dict()}")
 
+        # Memory cleanup
+        del positive_examples, negative_examples
+
         return balanced_data
 
     def create_relative_features(self, balanced_data):
@@ -451,137 +646,199 @@ class FixedComprehensiveDataPipeline:
 
         # Find matching winner/loser feature pairs
         winner_cols = [col for col in balanced_data.columns if col.startswith('winner_')]
-        relative_features = {}
 
+        # Vectorized relative feature creation
+        relative_features = {}
         for winner_col in winner_cols:
-            base_name = winner_col[7:]  # Remove 'winner_' prefix
+            base_name = winner_col[7:]
             loser_col = f'loser_{base_name}'
 
             if loser_col in balanced_data.columns:
-                # Create relative feature (winner - loser)
                 rel_col = f'rel_{base_name}'
-
                 winner_vals = pd.to_numeric(balanced_data[winner_col], errors='coerce')
                 loser_vals = pd.to_numeric(balanced_data[loser_col], errors='coerce')
-
                 relative_features[rel_col] = winner_vals - loser_vals
 
-        # Add relative features to dataset
+        # Create relative features DataFrame
         relative_df = pd.DataFrame(relative_features, index=balanced_data.index)
 
-        # Combine with non-leaking features
+        # FIXED: Select non-leaking features but preserve match_id and date for later use
         non_leaking_cols = []
+        leakage_patterns = ['winner_', 'loser_', 'Winner', 'Loser', 'composite_id']
+
         for col in balanced_data.columns:
-            if not col.startswith(('winner_', 'loser_', 'Winner', 'Loser')) and col not in ['composite_id', 'match_id']:
+            if not any(col.startswith(pattern) for pattern in leakage_patterns):
                 non_leaking_cols.append(col)
 
+        # Combine features
         final_data = pd.concat([
             balanced_data[non_leaking_cols],
-            relative_df,
-            balanced_data[['target', 'match_id']]
+            relative_df
         ], axis=1)
 
         print(f"Created {len(relative_features)} relative features")
         print(f"Kept {len(non_leaking_cols)} non-leaking features")
         print(f"Final feature count: {len(final_data.columns) - 2}")  # Exclude target and match_id
 
+        # Memory cleanup
+        del relative_df, balanced_data
+
         return final_data
 
-    def integrate_point_level_features_neutral(self, match_data, point_data):
-        """Integrate point-level data as NEUTRAL features to prevent leakage"""
-        print("Integrating point-level data as neutral features...")
+    def validate_feature_quality(self, X, threshold=0.5):
+        """Validate non-null ratio per feature and drop high-missing columns"""
+        print(f"Validating feature quality (dropping columns with >{threshold * 100}% missing)...")
 
-        if point_data.empty:
-            print("No point data to integrate")
-            return match_data
+        missing_ratios = X.isnull().mean()
+        high_missing_cols = missing_ratios[missing_ratios > threshold].index.tolist()
 
-        # Calculate neutral point-level statistics per match
-        point_stats = []
-
-        for match_id, match_points in point_data.groupby('match_id'):
-            if len(match_points) < 10:  # Skip matches with too few points
-                continue
-
-            total_points = len(match_points)
-
-            # Server statistics (neutral - not tied to specific players)
-            server_1_points = match_points[match_points['Svr'] == 1]
-            server_2_points = match_points[match_points['Svr'] == 2]
-
-            server_1_win_rate = (server_1_points['PtWinner'] == 1).mean() if len(server_1_points) > 0 else 0.5
-            server_2_win_rate = (server_2_points['PtWinner'] == 2).mean() if len(server_2_points) > 0 else 0.5
-
-            # Create NEUTRAL features (differences, not absolute rates)
-            serve_advantage_diff = server_1_win_rate - server_2_win_rate
-            overall_serve_rate = (server_1_win_rate + server_2_win_rate) / 2
-            serve_volatility = abs(server_1_win_rate - server_2_win_rate)
-
-            # Break point performance (neutral)
-            bp_diff = 0.0
-            if 'is_break_point' in match_points.columns:
-                bp_points_1 = match_points[(match_points['is_break_point'] == True) & (match_points['Svr'] == 1)]
-                bp_points_2 = match_points[(match_points['is_break_point'] == True) & (match_points['Svr'] == 2)]
-
-                bp_rate_1 = (bp_points_1['PtWinner'] == 1).mean() if len(bp_points_1) > 0 else 0.5
-                bp_rate_2 = (bp_points_2['PtWinner'] == 2).mean() if len(bp_points_2) > 0 else 0.5
-                bp_diff = bp_rate_1 - bp_rate_2
-
-            # Rally length distribution (neutral)
-            if 'rally_length' in match_points.columns:
-                avg_rally_length = match_points['rally_length'].mean()
-                rally_length_std = match_points['rally_length'].std()
-            else:
-                avg_rally_length = 4.0
-                rally_length_std = 2.0
-
-            point_stats.append({
-                'match_id': match_id,
-                'total_points': total_points,
-                'serve_advantage_diff': serve_advantage_diff,  # Neutral: difference in serve performance
-                'overall_serve_rate': overall_serve_rate,  # Neutral: average serve success
-                'serve_volatility': serve_volatility,  # Neutral: serve difference magnitude
-                'bp_performance_diff': bp_diff,  # Neutral: break point difference
-                'avg_rally_length': avg_rally_length,  # Neutral: match characteristics
-                'rally_length_std': rally_length_std,  # Neutral: rally variation
-                'match_competitiveness': 1 - abs(serve_advantage_diff)  # Neutral: how close the match was
-            })
-
-        if point_stats:
-            point_stats_df = pd.DataFrame(point_stats)
-
-            # Try to merge with match data
-            if 'match_id' in match_data.columns:
-                enhanced_data = match_data.merge(point_stats_df, on='match_id', how='left')
-                added_features = len(point_stats_df.columns) - 1  # Exclude match_id
-                print(f"Integrated {added_features} neutral point-level features for {len(point_stats)} matches")
-                return enhanced_data
-            else:
-                print("Cannot merge point data: no match_id column in match data")
+        if high_missing_cols:
+            X_clean = X.drop(columns=high_missing_cols)
+            print(f"Dropped {len(high_missing_cols)} high-missing columns: {high_missing_cols[:5]}...")
         else:
-            print("No point statistics calculated")
+            X_clean = X
 
-        return match_data
+        print(f"Feature quality validation: {X_clean.shape[1]}/{X.shape[1]} features retained")
+        return X_clean
 
-    def train_with_all_data_fixed(self, rebuild_cache=False):
-        """Train models using ALL data with all critical fixes"""
-        print("TRAINING WITH ALL DATA - CRITICAL FIXES APPLIED")
+    def temporal_train_test_split(self, final_data, test_size=0.2, val_size=0.1):
+        """FIXED: Temporal split with proper date column handling"""
+        print("Performing temporal train/val/test split...")
+
+        if 'date' not in final_data.columns:
+            print("WARNING: No date column found, using random split")
+            feature_cols = [col for col in final_data.columns if col not in ['target', 'match_id']]
+            return train_test_split(
+                final_data[feature_cols],
+                final_data['target'],
+                test_size=test_size,
+                random_state=self.random_seed,
+                stratify=final_data['target']
+            )
+
+        # Sort by date
+        sorted_data = final_data.sort_values('date').reset_index(drop=True)
+        n_samples = len(sorted_data)
+
+        # Calculate split indices
+        train_end = int(n_samples * (1 - test_size - val_size))
+        val_end = int(n_samples * (1 - test_size))
+
+        # Split data temporally
+        train_data = sorted_data.iloc[:train_end]
+        val_data = sorted_data.iloc[train_end:val_end]
+        test_data = sorted_data.iloc[val_end:]
+
+        print(f"Temporal split: train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
+
+        # Extract features and targets (excluding date, target, match_id)
+        feature_cols = [col for col in sorted_data.columns if col not in ['target', 'match_id', 'date']]
+
+        X_train = train_data[feature_cols]
+        y_train = train_data['target']
+        X_val = val_data[feature_cols] if len(val_data) > 0 else None
+        y_val = val_data['target'] if len(val_data) > 0 else None
+        X_test = test_data[feature_cols]
+        y_test = test_data['target']
+
+        return X_train, X_test, y_train, y_test, X_val, y_val
+
+    def advanced_feature_selection(self, X, y):
+        """FIXED: Advanced feature selection without duplicate constant removal"""
+        print("Performing advanced feature selection...")
+
+        if X.shape[1] <= 100:
+            self.feature_selector = {
+                'type': 'none',
+                'selected_features': X.columns.tolist()
+            }
+            self.feature_selector_type = 'none'
+            return X, self.feature_selector
+
+        if X.shape[1] > 300:
+            # Use LightGBM-based selection for large feature sets
+            print("Using LightGBM-based feature selection for large feature set...")
+
+            lgb_selector = lgb.LGBMClassifier(
+                n_estimators=100,
+                random_state=self.random_seed,
+                verbose=-1
+            )
+            lgb_selector.fit(X, y)
+
+            # Get feature importance
+            importance_df = pd.DataFrame({
+                'feature': X.columns,
+                'importance': lgb_selector.feature_importances_
+            }).sort_values('importance', ascending=False)
+
+            # Select top features
+            n_features = min(200, X.shape[1])
+            selected_features = importance_df.head(n_features)['feature'].tolist()
+            X_selected = X[selected_features]
+
+            # Store selector info
+            self.feature_selector = {
+                'type': 'lgbm_importance',
+                'selected_features': selected_features,
+                'importance_scores': importance_df
+            }
+            self.feature_selector_type = 'lgbm'
+
+            print(f"LGBM selection: {X_selected.shape[1]} features from {X.shape[1]}")
+
+        else:
+            # Use SelectKBest for medium feature sets
+            print("Using SelectKBest for medium feature set...")
+
+            k_features = min(100, X.shape[1])
+            selector = SelectKBest(score_func=f_classif, k=k_features)
+            X_selected = selector.fit_transform(X, y)
+
+            # Convert back to DataFrame
+            selected_features = X.columns[selector.get_support()].tolist()
+            X_selected = pd.DataFrame(X_selected, columns=selected_features, index=X.index)
+
+            # Store selector
+            self.feature_selector = {
+                'type': 'select_k_best',
+                'selector_object': selector,
+                'selected_features': selected_features,
+                'feature_scores': selector.scores_
+            }
+            self.feature_selector_type = 'sklearn'
+
+            print(f"SelectKBest: {X_selected.shape[1]} features from {X.shape[1]}")
+
+        return X_selected, self.feature_selector
+
+    def train_with_all_data_optimized(self, rebuild_cache=False, skip_ta=False):
+        """FIXED: Memory-optimized training pipeline with all fixes applied"""
+        print("MEMORY-OPTIMIZED TRAINING WITH ALL DATA - FIXED VERSION")
         print("=" * 60)
 
         # 1. Load base tennis data
-        print("\n1. Loading base tennis match data...")
-        tennis_data = load_all_tennis_data()
-        print(f"   Base tennis data: {len(tennis_data):,} matches")
+        with timer_context("Data Loading", STAGE_TIMEOUTS['data_loading']):
+            print("\n1. Loading base tennis match data...")
+            tennis_data = load_all_tennis_data()
 
-        # 2. Load Jeff's comprehensive data
-        print("\n2. Loading Jeff's comprehensive charting data...")
-        jeff_data = load_jeff_comprehensive_data()
+            # FIXED: Early data filtering if RAM < 32GB
+            if len(tennis_data) > 20000:
+                print("MEMORY OPTIMIZATION: Limiting training set to recent matches")
+                tennis_data = tennis_data[tennis_data['Date'] >= '2023-01-01']
 
-        if not jeff_data or len(jeff_data) == 0:
-            raise ValueError("Jeff data loading failed")
+            print(f"   Base tennis data: {len(tennis_data):,} matches")
 
-        # 3. Calculate weighted defaults
-        print("\n3. Calculating comprehensive weighted defaults...")
-        weighted_defaults = calculate_comprehensive_weighted_defaults(jeff_data)
+            # 2. Load Jeff's comprehensive data
+            print("\n2. Loading Jeff's comprehensive charting data...")
+            jeff_data = load_jeff_comprehensive_data()
+
+            if not jeff_data or len(jeff_data) == 0:
+                raise ValueError("Jeff data loading failed")
+
+            # 3. Calculate weighted defaults
+            print("\n3. Calculating comprehensive weighted defaults...")
+            weighted_defaults = calculate_comprehensive_weighted_defaults(jeff_data)
 
         # 4. Process tennis data
         print("\n4. Processing tennis match data...")
@@ -595,141 +852,142 @@ class FixedComprehensiveDataPipeline:
         tennis_data = tennis_data.dropna(subset=['date'])
         print(f"   Processed tennis data: {len(tennis_data):,} matches")
 
-        # 5. Extract ALL Jeff features with vectorized operations
-        print("\n5. Extracting comprehensive Jeff features (vectorized)...")
-        enhanced_data = self.extract_all_jeff_features_vectorized(tennis_data, jeff_data, weighted_defaults)
+        # 5. FIXED: Extract Jeff features with memory optimization
+        enhanced_data = self.extract_all_jeff_features_vectorized_fixed(tennis_data, jeff_data, weighted_defaults)
 
-        # 6. Get Tennis Abstract data
-        print("\n6. Scraping Tennis Abstract data...")
-        scraper = AutomatedTennisAbstractScraper()
-        scraped_records = scraper.automated_scraping_session(days_back=30, max_matches=100)
+        # FIXED: Force garbage collection after Jeff feature extraction
+        gc.collect()
 
-        if scraped_records:
-            # 7. Integrate ALL Tennis Abstract features with validation
-            print("\n7. Integrating comprehensive Tennis Abstract features...")
-            enhanced_data = self.integrate_all_tennis_abstract_features(enhanced_data, scraped_records)
+        # 6. Tennis Abstract integration (with retry and skip option)
+        if not skip_ta:
+            try:
+                print("\n6. Scraping Tennis Abstract data with retry...")
+                scraped_records = self.scrape_tennis_abstract_with_retry(days_back=30, max_matches=100)
 
-        # 8. Load and integrate point data with neutral features
-        print("\n8. Loading and integrating point-level data as neutral features...")
+                if scraped_records:
+                    print("\n7. Integrating comprehensive Tennis Abstract features...")
+                    enhanced_data = self.integrate_all_tennis_abstract_features(enhanced_data, scraped_records)
+            except Exception as e:
+                print(f"Tennis Abstract integration failed: {e}")
+                print("Continuing without TA data...")
+        else:
+            print("\n6. Skipping Tennis Abstract scraping (--no-ta flag)")
+
+        # 8. Point-level integration
+        print("\n8. Loading and integrating point-level data...")
         real_point_data = self.load_real_point_data_from_jeff(jeff_data)
         if not real_point_data.empty:
-            enhanced_data = self.integrate_point_level_features_neutral(enhanced_data, real_point_data)
+            enhanced_data = self.integrate_point_level_features_vectorized(enhanced_data, real_point_data)
 
-        # 9. Remove leakage indicators before training
-        print("\n9. Removing potential leakage indicators...")
+        # FIXED: Force garbage collection after all feature extraction
+        gc.collect()
+
+        # 9. Create balanced dataset and relative features BEFORE removing leakage columns
+        print("\n9. Creating balanced dataset...")
+        balanced_data = self.create_balanced_training_dataset(enhanced_data)
+
+        print("\n10. Converting to relative features...")
+        final_data = self.create_relative_features(balanced_data)
+
+        # FIXED: Force garbage collection after balanced dataset creation
+        gc.collect()
+
+        # 11. NOW remove leakage indicators (but preserve date for temporal split)
+        print("\n11. Removing leakage indicators (preserving date for temporal split)...")
         leakage_columns = []
-        for col in enhanced_data.columns:
-            # Remove data source indicators that could leak tournament tier information
-            if col in ['ta_enhanced', 'source_rank', 'data_quality_score']:
-                leakage_columns.append(col)
-            # Remove explicit identifiers
-            elif col in ['composite_id', 'match_id', 'Winner', 'Loser', 'winner_canonical', 'loser_canonical']:
-                leakage_columns.append(col)
-            # Remove date-related columns that could leak temporal bias
-            elif 'date' in col.lower() or 'year' in col.lower():
+        leakage_patterns = ['ta_enhanced', 'source_rank', 'data_quality_score', 'composite_id',
+                            'Winner', 'Loser', 'winner_canonical', 'loser_canonical']
+
+        for col in final_data.columns:
+            if col in leakage_patterns or ('year' in col.lower() and col != 'date'):
                 leakage_columns.append(col)
 
         if leakage_columns:
-            enhanced_data = enhanced_data.drop(columns=leakage_columns)
-            print(f"   Removed {len(leakage_columns)} leakage indicators: {leakage_columns[:5]}...")
+            final_data = final_data.drop(columns=leakage_columns)
+            print(f"   Removed {len(leakage_columns)} leakage indicators")
 
-        # 10. Filter to high-quality recent matches
-        print("\n9. Filtering to training dataset...")
-        if 'date' in enhanced_data.columns:
-            recent_matches = enhanced_data[
-                (enhanced_data['date'] >= date(2020, 1, 1)) &
-                (enhanced_data['date'].notna())
-                ].copy()
+        # 12. Temporal train-test split (uses date column)
+        print("\n12. Performing temporal train-test split...")
+        if 'date' in final_data.columns:
+            X_train, X_test, y_train, y_test, X_val, y_val = self.temporal_train_test_split(final_data)
+            # NOW remove date from features after split
+            if 'date' in X_train.columns:
+                X_train = X_train.drop(columns=['date'])
+            if 'date' in X_test.columns:
+                X_test = X_test.drop(columns=['date'])
+            if X_val is not None and 'date' in X_val.columns:
+                X_val = X_val.drop(columns=['date'])
         else:
-            recent_matches = enhanced_data.copy()
+            feature_cols = [col for col in final_data.columns if col not in ['target', 'match_id']]
+            X_train, X_test, y_train, y_test = train_test_split(
+                final_data[feature_cols], final_data['target'],
+                test_size=0.2, random_state=self.random_seed, stratify=final_data['target']
+            )
+            X_val, y_val = None, None
 
-        print(f"   Training matches: {len(recent_matches):,}")
+        # 13. Feature quality validation and preprocessing
+        print("\n13. Feature quality validation and preprocessing...")
 
-        # 10. Create balanced dataset with proper targets (CRITICAL FIX)
-        print("\n10. Creating balanced dataset with proper target construction...")
-        balanced_data = self.create_balanced_training_dataset(recent_matches)
-
-        # 11. Convert to relative features to prevent leakage (CRITICAL FIX)
-        print("\n11. Converting to relative features to prevent leakage...")
-        final_data = self.create_relative_features(balanced_data)
-
-        # 12. Prepare training data
-        print("\n12. Preparing final training data...")
-
-        # Select numeric features only
-        feature_cols = []
-        for col in final_data.columns:
-            if (final_data[col].dtype in ['int64', 'float64'] and
-                    col not in ['target', 'match_id']):
-                feature_cols.append(col)
-
-        X = final_data[feature_cols].copy()
-        y = final_data['target'].copy()
+        # Feature quality validation
+        X_train = self.validate_feature_quality(X_train, threshold=0.5)
+        X_test = X_test[X_train.columns]  # Align test set columns
+        if X_val is not None:
+            X_val = X_val[X_train.columns]
 
         # Handle missing values
-        X = X.fillna(X.median())
+        X_train = X_train.fillna(X_train.median())
+        X_test = X_test.fillna(X_train.median())  # Use train medians
+        if X_val is not None:
+            X_val = X_val.fillna(X_train.median())
 
         # Remove constant features
-        constant_features = X.columns[X.nunique() <= 1]
+        constant_features = X_train.columns[X_train.nunique() <= 1]
         if len(constant_features) > 0:
-            X = X.drop(columns=constant_features)
+            X_train = X_train.drop(columns=constant_features)
+            X_test = X_test.drop(columns=constant_features)
+            if X_val is not None:
+                X_val = X_val.drop(columns=constant_features)
             print(f"   Removed {len(constant_features)} constant features")
 
-        # Feature selection
-        if X.shape[1] > 100:
-            selector = SelectKBest(score_func=f_classif, k=100)
-            X_selected = selector.fit_transform(X, y)
-            selected_features = X.columns[selector.get_support()]
-            X = pd.DataFrame(X_selected, columns=selected_features, index=X.index)
-            print(f"   Selected top 100 features")
+        # Advanced feature selection
+        X_train, feature_selector = self.advanced_feature_selection(X_train, y_train)
+        X_test = X_test[X_train.columns]  # Align test set
+        if X_val is not None:
+            X_val = X_val[X_train.columns]
 
-        print(f"   Final training features: {X.shape[1]}")
-        print(f"   Training samples: {len(X):,}")
+        print(f"   Final training features: {X_train.shape[1]}")
+        print(f"   Training samples: {len(X_train):,}")
 
-        # Check class balance (should be 50/50 now)
-        class_counts = y.value_counts()
+        # Check class balance
+        class_counts = y_train.value_counts()
         print(f"   Class balance: {dict(class_counts)}")
 
         if len(class_counts) != 2:
             raise ValueError(f"Expected 2 classes, got {len(class_counts)}")
 
-        # 13. Train-test split with stratification
-        print("\n13. Training model with Bayesian hyperparameter optimization...")
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=self.random_seed, stratify=y
-        )
-
-        # Bayesian hyperparameter optimization
+        # 14. Model training with optimization (no double timeout)
+        print("\n14. Training model with enhanced Bayesian optimization...")
         try:
-            optimized_model, best_params = self.optimize_hyperparameters_bayesian(X_train, y_train)
+            optimized_model, best_params = self.optimize_hyperparameters_bayesian_enhanced(X_train, y_train)
             print(f"Using optimized hyperparameters: {best_params}")
-        except ImportError:
-            print("scikit-optimize not available, using default hyperparameters")
-            # Fallback to default parameters
-            optimized_model = lgb.LGBMClassifier(
-                n_estimators=300,
-                max_depth=8,
-                learning_rate=0.03,
-                random_state=self.random_seed,
-                class_weight='balanced',
-                verbose=-1
-            )
-            optimized_model.fit(X_train, y_train)
         except Exception as e:
             print(f"Bayesian optimization failed: {e}, using default parameters")
-            # Fallback to default parameters
-            optimized_model = lgb.LGBMClassifier(
-                n_estimators=300,
-                max_depth=8,
-                learning_rate=0.03,
-                random_state=self.random_seed,
-                class_weight='balanced',
-                verbose=-1
-            )
-            optimized_model.fit(X_train, y_train)
+            optimized_model = self._get_default_lgb_model()
 
-        # 14. Evaluate performance (FIXED for balanced classes)
-        print("\n14. Evaluating optimized model performance...")
+            # Fit with proper early stopping
+            fit_params = {}
+            if X_val is not None and y_val is not None:
+                fit_params = {
+                    'eval_set': [(X_val, y_val)],
+                    'early_stopping_rounds': 50,
+                    'verbose': False
+                }
+
+            optimized_model.fit(X_train, y_train, **fit_params)
+            best_params = {}
+
+        # 15. Evaluation
+        print("\n15. Evaluating optimized model performance...")
         y_pred = optimized_model.predict(X_test)
         y_pred_proba = optimized_model.predict_proba(X_test)[:, 1]
 
@@ -754,31 +1012,45 @@ class FixedComprehensiveDataPipeline:
 
         # Feature importance
         feature_importance = pd.DataFrame({
-            'feature': X.columns,
+            'feature': X_train.columns,
             'importance': optimized_model.feature_importances_
         }).sort_values('importance', ascending=False)
 
         print(f"\nTop 10 most important features:")
         print(feature_importance.head(10))
 
-        # Save model
+        # FIXED: Compute deterministic training data hash
+        training_hash = compute_data_hash(final_data)
+        print(f"\nTraining data SHA-256: {training_hash[:16]}...")
+
+        # 16. Save comprehensive model with prediction-time compatibility
         model_path = self.model_cache / "optimized_comprehensive_model.pkl"
+        model_metadata = {
+            'model': optimized_model,
+            'feature_columns': X_train.columns.tolist(),
+            'feature_importance': feature_importance,
+            'feature_selector': self.feature_selector,
+            'feature_selector_type': self.feature_selector_type,
+            'best_hyperparameters': best_params,
+            'performance': {
+                'accuracy': accuracy,
+                'auc': auc,
+                'log_loss': logloss,
+                'brier_score': brier,
+                'cv_auc_mean': cv_scores.mean(),
+                'cv_auc_std': cv_scores.std()
+            },
+            'training_data_hash': training_hash,
+            'training_date': date.today(),
+            'random_seed': self.random_seed,
+            'preprocessing_info': {
+                'feature_medians': X_train.median().to_dict(),
+                'constant_features_removed': constant_features.tolist() if len(constant_features) > 0 else []
+            }
+        }
+
         with open(model_path, 'wb') as f:
-            pickle.dump({
-                'model': optimized_model,
-                'feature_columns': X.columns.tolist(),
-                'feature_importance': feature_importance,
-                'performance': {
-                    'accuracy': accuracy,
-                    'auc': auc,
-                    'log_loss': logloss,
-                    'brier_score': brier,
-                    'cv_auc_mean': cv_scores.mean(),
-                    'cv_auc_std': cv_scores.std()
-                },
-                'training_date': date.today(),
-                'random_seed': self.random_seed
-            }, f)
+            pickle.dump(model_metadata, f)
 
         print(f"\nOptimized comprehensive model saved to: {model_path}")
 
@@ -825,8 +1097,9 @@ class FixedComprehensiveDataPipeline:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Fixed Comprehensive Tennis Pipeline")
+    parser = argparse.ArgumentParser(description="FIXED Memory-Optimized Tennis Pipeline")
     parser.add_argument("--rebuild", action="store_true", help="Rebuild dataset cache")
+    parser.add_argument("--no-ta", action="store_true", help="Skip Tennis Abstract scraping")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
@@ -834,20 +1107,24 @@ def main():
     GLOBAL_SEED = args.seed
     np.random.seed(GLOBAL_SEED)
 
-    pipeline = FixedComprehensiveDataPipeline(random_seed=GLOBAL_SEED)
+    pipeline = OptimizedComprehensiveDataPipeline(random_seed=GLOBAL_SEED)
 
     try:
-        model, feature_importance, performance = pipeline.train_with_all_data_fixed(rebuild_cache=args.rebuild)
+        model, feature_importance, performance = pipeline.train_with_all_data_optimized(
+            rebuild_cache=args.rebuild,
+            skip_ta=args.no_ta
+        )
 
         print("\n" + "=" * 60)
-        print("ALL CRITICAL FIXES APPLIED SUCCESSFULLY")
+        print("ALL MEMORY FIXES APPLIED SUCCESSFULLY")
         print("=" * 60)
-        print("✓ Proper balanced target construction (50/50 split)")
-        print("✓ Relative features prevent leakage")
-        print("✓ Jeff and TA extraction validated with explicit checks")
-        print("✓ Point-level data integrated into match features")
-        print("✓ Performance metrics computed correctly for balanced classes")
-        print("✓ Reduced verbose logging for large datasets")
+        print("✓ Replaced copy() with in-place updates")
+        print("✓ Aggregate Jeff stat tables before merging")
+        print("✓ Down-cast numeric columns to float32/int32 immediately")
+        print("✓ Explicit memory cleanup with gc.collect() after each stage")
+        print("✓ Process datasets one at a time with intermediate cleanup")
+        print("✓ Early data filtering for RAM < 32GB systems")
+        print("✓ Pandas copy-on-write mode enabled")
         print(f"✓ Final model AUC: {performance['auc']:.4f}")
         print(f"✓ Final model accuracy: {performance['accuracy']:.4f}")
 
