@@ -127,16 +127,14 @@ def normalize_name(name):
         return name.replace(' ', '_')
 
 def normalize_jeff_name(name):
-    """Normalize Jeff's player names for matching"""
-    if pd.isna(name):
-        return ""
-    name = str(name).lower()
-    parts = name.split()
-    if len(parts) < 2:
-        return name.replace(' ', '_')
-    last_name = parts[-1]
-    first_initial = parts[0][0] if parts[0] else ''
-    return f"{last_name}_{first_initial}"
+    """
+    Legacy alias kept for backward‑compatibility.
+
+    It now simply forwards to `canonical_player()` so that every code path
+    (Jeff charting, match files, point files, etc.) shares the *same*
+    canonical mapping, e.g. 'djokovic_n', 'alcaraz_c', 'nadal_r'.
+    """
+    return canonical_player(name)
 
 def normalize_name_canonical(name):
     """Canonical name normalization for simulation"""
@@ -160,6 +158,28 @@ def build_composite_id(match_date, tourney_slug, p1_slug, p2_slug):
     ymd = pd.to_datetime(match_date).strftime("%Y%m%d")
     return f"{ymd}-{tourney_slug}-{p1_slug}-{p2_slug}"
 
+def canonical_player(name: str) -> str:
+    """
+    A single, unambiguous mapping used by *both* match-level and
+    point-level code paths.
+
+    Examples
+    --------
+    'Novak Djokovic'   -> 'djokovic_n'
+    'Carlos Alcaraz'   -> 'alcaraz_c'
+    'R. Nadal'         -> 'nadal_r'
+    """
+    if pd.isna(name) or not str(name).strip():
+        return ""
+
+    name = unidecode(str(name)).replace(".", " ").lower().strip()
+    parts = re.split(r"\s+", name)
+
+    # last surname token goes first …
+    last = parts[-1]
+    # … first initial (if any) goes second
+    first_initial = parts[0][0] if parts else ""
+    return f"{last}_{first_initial}"
 # ============================================================================
 # DATA LOADING FUNCTIONS
 # ============================================================================
@@ -2316,8 +2336,8 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
 
     logging.info("Step 4: Processing tennis data...")
     try:
-        tennis_data['winner_canonical'] = tennis_data['Winner'].apply(normalize_name)
-        tennis_data['loser_canonical'] = tennis_data['Loser'].apply(normalize_name)
+        tennis_data['winner_canonical'] = tennis_data['Winner'].apply(canonical_player)
+        tennis_data['loser_canonical'] = tennis_data['Loser'].apply(canonical_player)
         tennis_data['tournament_canonical'] = tennis_data['Tournament'].apply(normalize_tournament_name)
 
         # FIX: Ensure date is properly converted and handled
