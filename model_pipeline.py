@@ -621,7 +621,7 @@ class FixedComprehensiveDataPipeline:
         return feature_cols
 
     def extract_all_jeff_features_without_defaults_fixed(self, match_data, jeff_data, weighted_defaults):
-        """FIXED: Extract Jeff features with enhanced canonicalization and debugging"""
+        """FIXED: Extract Jeff features with debugging based on diagnostic results"""
         logging.info("FIXED: Extracting Jeff features with enhanced canonicalization...")
 
         enhanced_data = match_data.copy()
@@ -630,18 +630,47 @@ class FixedComprehensiveDataPipeline:
         enhanced_data['winner_canonical'] = enhanced_data['Winner'].apply(enhanced_canon_name)
         enhanced_data['loser_canonical'] = enhanced_data['Loser'].apply(enhanced_canon_name)
 
-        # DEBUG: Check gender column
+        # FIXED: Ensure proper gender column based on diagnostic
         if 'gender' in enhanced_data.columns:
             gender_counts = enhanced_data['gender'].value_counts()
-            logging.info(f"DEBUG: Gender distribution: {gender_counts.to_dict()}")
+            logging.info(f"DEBUG: Existing gender distribution: {gender_counts.to_dict()}")
+
+            # Check if gender values are as expected
+            unique_genders = set(enhanced_data['gender'].dropna())
+            logging.info(f"DEBUG: Unique gender values: {unique_genders}")
+
+            # If gender values are not M/W, try to map them
+            if unique_genders and not {'M', 'W'}.intersection(unique_genders):
+                logging.info("DEBUG: Converting gender values to M/W format...")
+                # Try common mappings
+                enhanced_data['gender'] = enhanced_data['gender'].map({
+                    'men': 'M', 'women': 'W', 'Men': 'M', 'Women': 'W',
+                    'male': 'M', 'female': 'W', 'Male': 'M', 'Female': 'W',
+                    1: 'M', 0: 'W', 'ATP': 'M', 'WTA': 'W'
+                }).fillna(enhanced_data['gender'])
+
+                new_gender_counts = enhanced_data['gender'].value_counts()
+                logging.info(f"DEBUG: Mapped gender distribution: {new_gender_counts.to_dict()}")
         else:
-            # Try to infer gender from file path or create it
-            logging.warning("DEBUG: No 'gender' column found, inferring from data...")
+            logging.info("DEBUG: No gender column found, creating based on tournament info...")
+            enhanced_data['gender'] = 'M'  # Default
+
+            # Use WTA column if available
+            if 'WTA' in enhanced_data.columns:
+                wta_mask = enhanced_data['WTA'].notna() | (enhanced_data['WTA'] == 1)
+                enhanced_data.loc[wta_mask, 'gender'] = 'W'
+
+            # Use tournament name patterns
             if 'Tournament' in enhanced_data.columns:
-                # Simple heuristic - could be improved
-                enhanced_data['gender'] = 'M'  # Default to men, will be overridden below
-                # You might need to add logic here to detect women's tournaments
-                logging.info("DEBUG: Created gender column with default 'M'")
+                tournament_lower = enhanced_data['Tournament'].astype(str).str.lower()
+                women_indicators = ['wta', 'women', 'ladies', 'girls']
+
+                for indicator in women_indicators:
+                    women_mask = tournament_lower.str.contains(indicator, na=False)
+                    enhanced_data.loc[women_mask, 'gender'] = 'W'
+
+            final_gender_counts = enhanced_data['gender'].value_counts()
+            logging.info(f"DEBUG: Final gender distribution: {final_gender_counts.to_dict()}")
 
         # Get tennis player sets for overlap analysis
         tennis_canonical_set = set(enhanced_data['winner_canonical'].dropna()) | set(
@@ -668,26 +697,24 @@ class FixedComprehensiveDataPipeline:
             if col_name not in enhanced_data.columns:
                 enhanced_data[col_name] = np.nan
 
-        # Apply aggregated data with overlap diagnostics
+        # Apply aggregated data with fixed gender logic
         total_coverage_before = 0
         total_coverage_after = 0
 
         for gender in ['men', 'women']:
             if gender not in aggregations:
+                logging.info(f"  Skipping {gender}: no aggregation data")
                 continue
 
-            gender_mask = enhanced_data['gender'] == ('M' if gender == 'men' else 'W')
-            if not gender_mask.any():
-                # Try alternative gender detection
-                if gender == 'men':
-                    # For now, assume all data is men's if no specific gender marker
-                    gender_mask = pd.Series([True] * len(enhanced_data), index=enhanced_data.index)
-                    logging.info(
-                        f"DEBUG: No 'M' values found, treating all data as men's ({gender_mask.sum()} matches)")
-                else:
-                    continue
+            # FIXED: Proper gender filtering
+            gender_letter = 'M' if gender == 'men' else 'W'
+            gender_mask = enhanced_data['gender'] == gender_letter
 
-            logging.info(f"  Processing {gender}: {gender_mask.sum():,} matches")
+            logging.info(f"  Processing {gender}: {gender_mask.sum():,} matches (gender='{gender_letter}')")
+
+            if not gender_mask.any():
+                logging.warning(f"  No matches found for gender '{gender_letter}'")
+                continue
 
             # Get Jeff canonical players for this gender
             fuzzy_mappings = {}
@@ -699,40 +726,30 @@ class FixedComprehensiveDataPipeline:
                 logging.info(f"    Tennis ∩ Jeff overlap: {len(overlap)} players")
                 logging.info(f"    Overlap percentage: {len(overlap) / len(tennis_canonical_set) * 100:.1f}%")
 
-                # DEBUG: Show sample overlapping players
-                sample_overlap = list(overlap)[:5]
-                logging.info(f"    DEBUG: Sample overlapping players: {sample_overlap}")
-
                 # Create fuzzy mappings for near-misses if overlap is low
                 if len(overlap) < len(tennis_canonical_set) * 0.3:  # Less than 30% overlap
                     logging.info(f"    Low overlap detected, creating fuzzy mappings...")
                     fuzzy_mappings = create_fuzzy_name_mapping(tennis_canonical_set, jeff_canonical_set, threshold=0.60)
                     logging.info(f"    Created {len(fuzzy_mappings)} fuzzy mappings")
 
-            # Overview stats with fuzzy matching fallback
+            # Overview stats with debugging
             if 'overview' in aggregations[gender]:
                 overview_agg = aggregations[gender]['overview']
+                logging.info(f"    Overview aggregation shape: {overview_agg.shape}")
 
                 for prefix, canonical_col in [('winner_', 'winner_canonical'), ('loser_', 'loser_canonical')]:
                     gender_data = enhanced_data.loc[gender_mask].copy()
 
-                    # DEBUG: Check sample data
-                    sample_players = gender_data[canonical_col].head(5).tolist()
-                    logging.info(f"    DEBUG: Sample {prefix}{gender} canonical names: {sample_players}")
+                    logging.info(f"    Processing {prefix}{gender}: {len(gender_data)} matches")
 
                     # Count coverage before
                     existing_cols = [f'{prefix}{col}' for col in overview_agg.columns]
                     coverage_before = gender_data[existing_cols].count().sum()
                     total_coverage_before += coverage_before
 
-                    # Primary merge - DEBUG version
+                    # Merge with debugging
                     prefixed_agg = overview_agg.add_prefix(prefix)
-
-                    # DEBUG: Check column names before merge
-                    logging.info(f"    DEBUG: Original overview columns: {overview_agg.columns.tolist()[:3]}...")
-                    logging.info(f"    DEBUG: Prefixed columns: {prefixed_agg.columns.tolist()[:3]}...")
-                    logging.info(f"    DEBUG: Gender data shape: {gender_data.shape}")
-                    logging.info(f"    DEBUG: Prefixed agg shape: {prefixed_agg.shape}")
+                    logging.info(f"    Merge: {len(gender_data)} matches × {len(prefixed_agg)} players")
 
                     merge_data = gender_data.merge(
                         prefixed_agg,
@@ -741,46 +758,25 @@ class FixedComprehensiveDataPipeline:
                         how='left'
                     )
 
-                    # DEBUG: Check merge results
-                    logging.info(f"    DEBUG: Merge result shape: {merge_data.shape}")
-                    logging.info(f"    DEBUG: Merge result columns: {merge_data.columns.tolist()}")
-
-                    # Safe way to check for matches
+                    # Check merge success
                     if len(prefixed_agg.columns) > 0:
                         first_jeff_col = prefixed_agg.columns[0]
-                        if first_jeff_col in merge_data.columns:
-                            merge_matches = merge_data[first_jeff_col].notna().sum()
-                            logging.info(f"    DEBUG: Merge found {merge_matches} matches for {prefix}{gender}")
-                        else:
-                            logging.warning(f"    DEBUG: Column {first_jeff_col} not found in merge result")
-                            merge_matches = 0
+                        merge_matches = merge_data[first_jeff_col].notna().sum()
+                        logging.info(
+                            f"    Merge result: {merge_matches}/{len(gender_data)} successful ({merge_matches / len(gender_data) * 100:.1f}%)")
                     else:
-                        logging.warning(f"    DEBUG: No prefixed columns found")
                         merge_matches = 0
 
-                    # Apply primary merge results
-                    for col in overview_agg.columns:
-                        full_col = f'{prefix}{col}'
-                        if full_col in merge_data.columns:
-                            has_jeff_data = merge_data[full_col].notna()
-                            if has_jeff_data.any():
-                                idx_to_update = gender_data.index[has_jeff_data]
-                                enhanced_data.loc[idx_to_update, full_col] = merge_data.loc[
-                                    has_jeff_data, full_col].values
-
-                    # Fuzzy mapping fallback for remaining missing values
-                    if fuzzy_mappings:
+                    # Apply merge results if successful
+                    if merge_matches > 0:
                         for col in overview_agg.columns:
                             full_col = f'{prefix}{col}'
-                            still_missing = enhanced_data.loc[gender_mask, full_col].isna()
-
-                            if still_missing.any():
-                                missing_players = enhanced_data.loc[gender_mask & still_missing, canonical_col]
-                                for idx, player in missing_players.items():
-                                    if player in fuzzy_mappings:
-                                        fuzzy_match = fuzzy_mappings[player]
-                                        if fuzzy_match in overview_agg.index:
-                                            enhanced_data.loc[idx, full_col] = overview_agg.loc[fuzzy_match, col]
+                            if full_col in merge_data.columns:
+                                has_jeff_data = merge_data[full_col].notna()
+                                if has_jeff_data.any():
+                                    idx_to_update = gender_data.index[has_jeff_data]
+                                    enhanced_data.loc[idx_to_update, full_col] = merge_data.loc[
+                                        has_jeff_data, full_col].values
 
                     # Count coverage after
                     coverage_after = enhanced_data.loc[gender_mask, existing_cols].count().sum()
@@ -789,7 +785,7 @@ class FixedComprehensiveDataPipeline:
                     logging.info(
                         f"    {prefix}{gender} coverage: {coverage_before} → {coverage_after} (+{coverage_after - coverage_before})")
 
-            # Apply same logic to other datasets...
+            # Apply same logic to other datasets (simplified for debugging)
             for dataset_name, agg_df in aggregations[gender].items():
                 if dataset_name == 'overview':
                     continue
@@ -818,8 +814,8 @@ class FixedComprehensiveDataPipeline:
         logging.info(f"  Coverage after fixes: {total_coverage_after:,}")
         logging.info(f"  Final coverage: {final_coverage:,}/{total_possible:,} ({coverage_pct:.1f}%)")
 
-        if total_coverage_before > 0:
-            improvement_factor = final_coverage / total_coverage_before
+        if total_coverage_after > 0:
+            improvement_factor = final_coverage / max(total_coverage_before, 1)
             logging.info(f"  Improvement factor: {improvement_factor:.1f}x")
 
         return enhanced_data
