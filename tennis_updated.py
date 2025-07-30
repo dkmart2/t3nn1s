@@ -1,5 +1,5 @@
 # ============================================================================
-# TENNIS DATA PIPELINE - FOCUSED IMPLEMENTATION
+# TENNIS DATA PIPELINE - COMPREHENSIVE TENNIS PREDICTION SYSTEM
 # ============================================================================
 
 import logging
@@ -10,9 +10,19 @@ from datetime import date, timedelta, datetime
 import os
 import joblib
 import time
+import random
+import requests
+import pickle
+import html
+import re
 from pathlib import Path
-import filelock
 from unidecode import unidecode
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+import argparse
+import collections
+import json
+import warnings
 import hashlib
 import asyncio
 import httpx
@@ -20,14 +30,21 @@ import requests_cache
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass
+import filelock
 
-# Import only what we need from settings
-from settings import (CACHE_DIR, BASE_CUTOFF_DATE, API_TENNIS_KEY, BASE_API_URL,
+# Import model classes
+from model import TennisModelPipeline, PointLevelModel, DataDrivenTennisModel, MatchLevelEnsemble
+
+# Import API
+os.environ["API_TENNIS_KEY"] = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
+
+# Import settings
+from settings import (TENNIS_CACHE_DIR as CACHE_DIR, BASE_CUTOFF_DATE, API_TENNIS_KEY, BASE_API_URL,
                       API_MAX_RETRIES, API_MIN_DELAY, MAX_CONCURRENT_REQUESTS, LOG_LEVEL,
-                      TENNIS_DATA_DIR, JEFF_DATA_DIR, TENNISDATA_DIR, CACHE_COMPRESSION_LEVEL)
+                      TENNIS_DATA_DIR, JEFF_DATA_DIR, TENNISDATA_MEN_DIR as TENNISDATA_DIR)
 
 # ============================================================================
-# LOGGING SETUP
+# LOGGING AND SESSION SETUP
 # ============================================================================
 
 logging.basicConfig(
@@ -35,6 +52,28 @@ logging.basicConfig(
     format='%(asctime)s %(levelname)s:%(name)s:%(funcName)s:%(lineno)d: %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+SESSION = requests.Session()
+
+# API Configuration
+API_KEY = os.getenv("API_TENNIS_KEY") or API_TENNIS_KEY
+BASE = BASE_API_URL
+CACHE_API = Path.home() / ".api_tennis_cache"
+CACHE_API.mkdir(exist_ok=True)
+
+# Cache Configuration
+HD_PATH = os.path.join(CACHE_DIR, "historical_data.parquet")
+JEFF_PATH = os.path.join(CACHE_DIR, "jeff_data.pkl")
+DEF_PATH = os.path.join(CACHE_DIR, "weighted_defaults.pkl")
+
+# Data Configuration
+DATA_DIR = "data"
+JEFF_DB_PATH = os.path.join(DATA_DIR, "jeff_tennis_data_until_20250610.parquet")
+INCR_DB_PATH = os.path.join(DATA_DIR, "results_incremental.parquet")
+CHARTING_INDEX_CSV = (
+    "https://raw.githubusercontent.com/JeffSackmann/"
+    "tennis_charting/master/charting_match_index.csv"
+)
 
 
 # ============================================================================
@@ -57,783 +96,13 @@ class APIError(TennisDataError):
 
 
 # ============================================================================
-# PLAYER CANONICALIZER
+# UTILITY FUNCTIONS
 # ============================================================================
-
-class PlayerCanonicalizer:
-    """Thread-safe player name canonicalization with reverse lookup"""
-
-    def __init__(self):
-        self.cache_file = CACHE_DIR / "player_canonical_cache.joblib"
-        self.lock_file = str(self.cache_file) + ".lock"
-        self.mapping = self._load_cache()
-        self.reverse_mapping = {v: k for k, v in self.mapping.items()}  # canonical -> raw
-
-    def _load_cache(self) -> Dict[str, str]:
-        """Load player mapping from cache"""
-        try:
-            with filelock.FileLock(self.lock_file):
-                if self.cache_file.exists():
-                    return joblib.load(self.cache_file)
-        except Exception as e:
-            logger.warning(f"Failed to load player canonical cache: {e}")
-        return {}
-
-    def canonical_player(self, raw_name: str) -> str:
-        """Canonicalize player name"""
-        if pd.isna(raw_name):
-            return ""
-
-        raw_name = str(raw_name).strip()
-        if not raw_name:
-            return ""
-
-        if raw_name in self.mapping:
-            return self.mapping[raw_name]
-
-        canonical = self._normalize_name(raw_name)
-        self.mapping[raw_name] = canonical
-        self.reverse_mapping[canonical] = raw_name  # Update reverse mapping
-
-        if len(self.mapping) % 100 == 0:
-            self._save_cache()
-
-        return canonical
-
-    def get_raw_name(self, canonical_name: str) -> str:
-        """Get original raw name from canonical name"""
-        return self.reverse_mapping.get(canonical_name, canonical_name)
-
-    def _normalize_name(self, name: str) -> str:
-        """Normalize player name"""
-        name = unidecode(name).replace('.', '').replace("'", '').replace('-', ' ')
-        name = ' '.join(name.lower().split())
-        return name
-
-    def _save_cache(self):
-        """Save player mapping to cache"""
-        try:
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            with filelock.FileLock(self.lock_file):
-                joblib.dump(self.mapping, self.cache_file, compress=('zlib', 3))
-        except Exception as e:
-            logger.error(f"Failed to save player canonical cache: {e}")
-
-
-player_canonicalizer = PlayerCanonicalizer()
-
-
-# ============================================================================
-# CONTENT-BASED CACHING
-# ============================================================================
-
-def get_content_hash(file_path: Path) -> str:
-    """Generate SHA-256 hash of file content"""
-    try:
-        with open(file_path, 'rb') as f:
-            return hashlib.sha256(f.read()).hexdigest()[:16]
-    except Exception:
-        return hashlib.sha256(str(file_path.stat().st_mtime).encode()).hexdigest()[:16]
-
-
-def get_cache_path(file_path: Path, prefix: str = "cache") -> Path:
-    """Generate cache path based on content hash"""
-    content_hash = get_content_hash(file_path)
-    filename = f"{prefix}_{content_hash}.joblib"
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return CACHE_DIR / filename
-
-
-# ============================================================================
-# OPTIMIZED DATA LOADING
-# ============================================================================
-
-def load_excel_with_cache(file_path: Path, **kwargs) -> pd.DataFrame:
-    """Load Excel with compressed caching"""
-    cache_path = get_cache_path(file_path, "excel")
-
-    if cache_path.exists():
-        try:
-            cached_df = joblib.load(cache_path)
-            logger.debug(f"Using cached data for {file_path}")
-            return cached_df
-        except Exception as e:
-            logger.warning(f"Cache read failed for {file_path}: {e}")
-
-    try:
-        df = pd.read_excel(
-            file_path,
-            engine='openpyxl' if str(file_path).endswith('.xlsx') else 'xlrd',
-            **kwargs
-        )
-    except Exception as e:
-        raise DataIngestionError(f"Failed to load Excel file {file_path}: {e}")
-
-    # Cache with compression
-    try:
-        joblib.dump(df, cache_path, compress=('zlib', 3))
-        logger.debug(f"Cached Excel data: {file_path}")
-    except Exception as e:
-        logger.warning(f"Failed to cache data for {file_path}: {e}")
-
-    return df
-
-
-def load_csv_with_polars(file_path: Path, **kwargs) -> pd.DataFrame:
-    """Load CSV using Polars with caching"""
-    cache_path = get_cache_path(file_path, "csv")
-
-    if cache_path.exists():
-        try:
-            cached_df = joblib.load(cache_path)
-            logger.debug(f"Using cached CSV data for {file_path}")
-            return cached_df
-        except Exception as e:
-            logger.warning(f"CSV cache read failed for {file_path}: {e}")
-
-    try:
-        # Load with Polars and convert string columns to categorical
-        df_polars = pl.read_csv(str(file_path), infer_schema_length=10000, **kwargs)
-        df_polars = df_polars.with_columns(pl.col(pl.Utf8).cast(pl.Categorical))
-        df_pandas = df_polars.to_pandas()
-
-        # Cache the result
-        joblib.dump(df_pandas, cache_path, compress=('zlib', 3))
-        logger.debug(f"Loaded and cached CSV with Polars: {file_path}")
-        return df_pandas
-
-    except Exception as e:
-        logger.error(f"Polars CSV loading failed for {file_path}: {e}")
-        try:
-            return pd.read_csv(file_path, **kwargs)
-        except Exception as fallback_error:
-            raise DataIngestionError(f"Both Polars and pandas failed for {file_path}: {fallback_error}")
-
-
-# ============================================================================
-# DATA LOADING FUNCTIONS
-# ============================================================================
-
-def load_all_tennis_data() -> pd.DataFrame:
-    """Load tennis match data with date constraints"""
-    logger.info("Loading tennis match data")
-
-    dataframes = []
-    errors = []
-
-    # Men's and women's data files (2020+)
-    all_files = []
-    for year in range(2020, 2026):
-        for gender in ['m', 'w']:
-            file_path = Path(f"tennis_data/{year}_{gender}.xlsx")
-            if file_path.exists():
-                all_files.append((file_path, 'M' if gender == 'm' else 'W'))
-
-    # Historical CSV files
-    historical_files = [
-        (Path("tennis_data/match_history_men.csv"), 'M'),
-        (Path("tennis_data/match_history_women.csv"), 'W')
-    ]
-    all_files.extend([(f, g) for f, g in historical_files if f.exists()])
-
-    # Load files in parallel
-    with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT_REQUESTS, os.cpu_count() or 2)) as executor:
-        future_to_file = {}
-
-        for file_path, gender in all_files:
-            if str(file_path).endswith('.xlsx'):
-                future = executor.submit(load_excel_with_cache, file_path)
-            else:
-                future = executor.submit(load_csv_with_polars, file_path)
-            future_to_file[future] = (file_path, gender)
-
-        for future in future_to_file:
-            file_path, gender = future_to_file[future]
-            try:
-                df = future.result(timeout=60)
-
-                # Add metadata
-                df['gender'] = gender
-                df['data_source'] = 'excel'  # Will be overridden by higher priority sources
-
-                # Add canonical names
-                if 'Winner' in df.columns:
-                    df['winner_canonical'] = df['Winner'].apply(player_canonicalizer.canonical_player)
-                if 'Loser' in df.columns:
-                    df['loser_canonical'] = df['Loser'].apply(player_canonicalizer.canonical_player)
-
-                # Process dates and apply cutoff
-                if 'Date' in df.columns:
-                    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-                    df['date'] = df['Date'].dt.date
-                    df = df.dropna(subset=['date'])
-                    df = df[df['date'] <= BASE_CUTOFF_DATE]
-
-                # Create composite ID
-                if all(col in df.columns for col in ['date', 'winner_canonical', 'loser_canonical']):
-                    df['composite_id'] = df.apply(
-                        lambda
-                            row: f"{row['date'].strftime('%Y%m%d')}-{row['winner_canonical']}-{row['loser_canonical']}",
-                        axis=1
-                    )
-
-                dataframes.append(df)
-                logger.info(f"Loaded {len(df):,} matches from {file_path}")
-
-            except Exception as e:
-                error_msg = f"Failed to load {file_path}: {e}"
-                errors.append(error_msg)
-                logger.error(error_msg)
-
-    if not dataframes:
-        raise DataIngestionError(f"No data loaded successfully. Errors: {errors}")
-
-    combined_df = pd.concat(dataframes, ignore_index=True, sort=False)
-    logger.info(f"Combined tennis data: {len(combined_df):,} total matches")
-
-    # Runtime guardrail
-    if len(combined_df) < 10000:
-        raise DataIngestionError(f"Insufficient tennis data: {len(combined_df)} matches (minimum 10,000)")
-
-    return combined_df
-
-
-def load_jeff_comprehensive_data(jeff_dir: Path = None):
-    """Load Jeff charting data with configurable path and gender validation"""
-    jeff_dir = jeff_dir or JEFF_DATA_DIR
-    logger.info(f"Loading Jeff comprehensive data from {jeff_dir}")
-
-    cache_path = CACHE_DIR / "jeff_data.joblib"
-
-    if cache_path.exists():
-        try:
-            jeff_data = joblib.load(cache_path)
-            logger.info("Loaded Jeff data from cache")
-            return jeff_data
-        except Exception as e:
-            logger.warning(f"Failed to load Jeff data from cache: {e}")
-
-    if not jeff_dir.exists():
-        raise DataIngestionError(f"Jeff data directory not found: {jeff_dir}")
-
-    jeff_data = {'men': {}, 'women': {}}
-
-    # Load charting files
-    file_patterns = {
-        'men': ['chartingm*.csv'],
-        'women': ['chartingw*.csv']
-    }
-
-    for gender, patterns in file_patterns.items():
-        for pattern in patterns:
-            for file_path in jeff_dir.glob(pattern):
-                try:
-                    filename = file_path.stem
-                    df = load_csv_with_polars(file_path)
-
-                    if not df.empty:
-                        jeff_data[gender][filename] = df
-                        logger.info(f"Loaded Jeff {gender} data: {filename} ({len(df):,} rows)")
-
-                except Exception as e:
-                    logger.error(f"Failed to load Jeff file {file_path}: {e}")
-
-    # Enhanced gender-specific validation
-    total_overview_rows = 0
-    for gender in jeff_data:
-        if 'overview' in jeff_data[gender]:
-            gender_rows = len(jeff_data[gender]['overview'])
-            total_overview_rows += gender_rows
-            if gender_rows < 1000:
-                logger.warning(f"Low Jeff {gender} overview data: {gender_rows} rows (recommended minimum 1,000)")
-
-    if total_overview_rows < 10000:
-        raise DataIngestionError(f"Insufficient Jeff overview data: {total_overview_rows} rows (minimum 10,000)")
-
-    # Cache the loaded data
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        joblib.dump(jeff_data, cache_path, compress=('zlib', 3))
-        logger.info("Cached Jeff comprehensive data")
-    except Exception as e:
-        logger.warning(f"Failed to cache Jeff data: {e}")
-
-    return jeff_data
-
-
-# ============================================================================
-# FEATURE EXTRACTION
-# ============================================================================
-
-def extract_comprehensive_jeff_features(df: pd.DataFrame, jeff_data: Dict) -> pd.DataFrame:
-    """Extract Jeff features using aggregated data (no Total filter)"""
-    logger.info("Extracting comprehensive Jeff features")
-
-    if df.empty:
-        return df
-
-    # Pre-compute feature matrices for both genders
-    feature_matrices = {}
-
-    for gender in ['M', 'W']:
-        gender_key = 'men' if gender == 'M' else 'women'
-
-        if gender_key not in jeff_data or 'overview' not in jeff_data[gender_key]:
-            continue
-
-        overview_df = jeff_data[gender_key]['overview']
-        if overview_df.empty:
-            continue
-
-        # Use all overview data (no Total filter as requested)
-        features_matrix = compute_features_vectorized(overview_df)
-        features_matrix['gender'] = gender
-
-        feature_matrices[gender] = features_matrix
-
-    # Combine and merge features
-    if feature_matrices:
-        all_features = pd.concat(feature_matrices.values(), ignore_index=True)
-
-        # Merge winner features
-        winner_features = all_features.add_prefix('winner_')
-        winner_features.rename(columns={'winner_Player_canonical': 'winner_canonical',
-                                        'winner_gender': 'gender'}, inplace=True)
-
-        df = df.merge(winner_features, on=['winner_canonical', 'gender'], how='left')
-
-        # Merge loser features
-        loser_features = all_features.add_prefix('loser_')
-        loser_features.rename(columns={'loser_Player_canonical': 'loser_canonical',
-                                       'loser_gender': 'gender'}, inplace=True)
-
-        df = df.merge(loser_features, on=['loser_canonical', 'gender'], how='left')
-
-    logger.info(f"Jeff feature extraction complete: {len(df):,} matches")
-    return df
-
-
-def compute_features_vectorized(stats_df: pd.DataFrame) -> pd.DataFrame:
-    """Compute features vectorized"""
-    features_df = stats_df.copy()
-
-    # Vectorized ratio calculations
-    serve_pts = features_df.get('serve_pts', pd.Series([80] * len(features_df))).replace(0, 1)
-
-    if 'first_in' in features_df.columns:
-        features_df['first_serve_pct'] = features_df['first_in'] / serve_pts
-    if 'aces' in features_df.columns:
-        features_df['ace_rate'] = features_df['aces'] / serve_pts
-    if 'dfs' in features_df.columns:
-        features_df['df_rate'] = features_df['dfs'] / serve_pts
-
-    # Return calculations
-    if 'return_pts' in features_df.columns and 'return_pts_won' in features_df.columns:
-        return_pts = features_df['return_pts'].replace(0, 1)
-        features_df['return_pts_won_pct'] = features_df['return_pts_won'] / return_pts
-
-    # Winner/error ratios
-    if 'winners' in features_df.columns and 'unforced' in features_df.columns:
-        features_df['winner_error_ratio'] = features_df['winners'] / features_df['unforced'].replace(0, 1)
-
-    return features_df
-
-
-# ============================================================================
-# API INTEGRATION
-# ============================================================================
-
-def get_cached_session() -> requests_cache.CachedSession:
-    """Get cached session"""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return requests_cache.CachedSession(
-        cache_name=str(CACHE_DIR / 'api_cache'),
-        expire_after=3600
-    )
-
-
-async def fetch_api_data(date_range: List[date]) -> pd.DataFrame:
-    """Fetch API data with cached events query and randomized throttling"""
-    logger.info(f"Fetching API data for {len(date_range)} dates")
-
-    if not API_TENNIS_KEY:
-        raise APIError("API_TENNIS_KEY not configured")
-
-    all_fixtures = []
-
-    timeout = httpx.Timeout(30.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-
-        # Call get_events once outside the per-date loop; cache the returned list
-        try:
-            events_url = f"{BASE_API_URL}?method=get_events&key={API_TENNIS_KEY}"
-            events_response = await client.get(events_url)
-            await asyncio.sleep(API_MIN_DELAY + random.uniform(0, 0.25))
-            events_response.raise_for_status()
-            events_data = events_response.json()
-
-            # Find tennis events - remove slice limit, iterate all tennis events
-            tennis_events = [
-                event for event in events_data
-                if any(term in event.get('event_type_type', '').lower()
-                       for term in ['atp', 'wta', 'tennis'])
-            ]
-
-            logger.info(f"Found {len(tennis_events)} tennis events")
-
-        except Exception as e:
-            logger.error(f"Failed to fetch events: {e}")
-            return pd.DataFrame()
-
-        for target_date in date_range:
-            try:
-                # Concurrent fixture queries for all events
-                fixture_tasks = []
-                for event in tennis_events:
-                    fixtures_url = (
-                        f"{BASE_API_URL}?method=get_fixtures"
-                        f"&key={API_TENNIS_KEY}"
-                        f"&date_start={target_date.isoformat()}"
-                        f"&date_stop={target_date.isoformat()}"
-                        f"&event_type_key={event.get('event_type_key')}"
-                    )
-
-                    async def fetch_fixtures(url, event_info):
-                        # Randomise throttling
-                        await asyncio.sleep(API_MIN_DELAY + random.uniform(0, 0.25))
-                        response = await client.get(url)
-                        response.raise_for_status()
-                        data = response.json()
-                        # Include event info for gender inference
-                        if isinstance(data, list):
-                            for fixture in data:
-                                fixture['event_info'] = event_info
-                        return data if isinstance(data, list) else []
-
-                    task = fetch_fixtures(fixtures_url, event)
-                    fixture_tasks.append(task)
-
-                # Execute all fixture queries concurrently
-                fixture_results = await asyncio.gather(*fixture_tasks, return_exceptions=True)
-
-                for result in fixture_results:
-                    if isinstance(result, list):
-                        all_fixtures.extend(result)
-                    elif isinstance(result, Exception):
-                        logger.warning(f"Fixture query failed: {result}")
-
-            except Exception as e:
-                logger.warning(f"API fetch failed for {target_date}: {e}")
-                continue
-
-    # Convert fixtures to DataFrame with improved gender inference
-    if not all_fixtures:
-        return pd.DataFrame()
-
-    api_matches = []
-    for fixture in all_fixtures:
-        try:
-            participants = fixture.get('participants', [])
-            if len(participants) < 2:
-                continue
-
-            # Gender inference: use fixture.get('event_winner') when present; fallback to names as now
-            event_info = fixture.get('event_info', {})
-            event_type = event_info.get('event_type_type', '').lower()
-
-            # Check for event winner field first
-            if fixture.get('event_winner'):
-                gender = 'W' if 'wta' in fixture.get('event_winner', '').lower() else 'M'
-            else:
-                gender = 'W' if 'wta' in event_type or 'women' in event_type else 'M'
-
-            # Determine winner/loser from scores if available
-            scores = fixture.get('scores', [])
-            winner_idx, loser_idx = 0, 1  # Default assumption
-
-            if scores:
-                # Simple logic: check if first participant has higher total games
-                try:
-                    p1_total = sum([score.get('participant_1_score', 0) for score in scores])
-                    p2_total = sum([score.get('participant_2_score', 0) for score in scores])
-                    if p2_total > p1_total:
-                        winner_idx, loser_idx = 1, 0
-                except (TypeError, KeyError):
-                    pass  # Keep default assumption
-
-            match_date = pd.to_datetime(fixture.get('date_start')).date()
-            winner_name = participants[winner_idx].get('name', '')
-            loser_name = participants[loser_idx].get('name', '')
-
-            match_data = {
-                'date': match_date,
-                'Winner': winner_name,
-                'Loser': loser_name,
-                'winner_canonical': player_canonicalizer.canonical_player(winner_name),
-                'loser_canonical': player_canonicalizer.canonical_player(loser_name),
-                'Tournament': fixture.get('event_name', ''),
-                'gender': gender,
-                'data_source': 'api'
-            }
-
-            # Compute tournament_canonical for API rows
-            match_data['tournament_canonical'] = unidecode(str(match_data['Tournament'])).lower().replace(' ', '_') if \
-            match_data['Tournament'] else 'unknown'
-
-            match_data[
-                'composite_id'] = f"{match_date.strftime('%Y%m%d')}-{match_data['tournament_canonical']}-{match_data['winner_canonical']}-{match_data['loser_canonical']}"
-            api_matches.append(match_data)
-
-        except Exception as e:
-            logger.warning(f"Failed to convert fixture: {e}")
-
-    if api_matches:
-        api_df = pd.DataFrame(api_matches)
-        logger.info(f"Converted {len(api_df)} API fixtures to matches")
-        logger.info(f"API gender distribution: {api_df['gender'].value_counts().to_dict()}")
-        return api_df
-
-    return pd.DataFrame()
-
-
-# ============================================================================
-# DATA INTEGRATION WITH HIERARCHY ENFORCEMENT
-# ============================================================================
-
-def integrate_all_data_sources(tennis_data: pd.DataFrame, jeff_data: Dict, cutoff_date: date = None) -> pd.DataFrame:
-    """Integrate all data sources with proper hierarchy: Jeff/TA > API > Excel"""
-    cutoff_date = cutoff_date or BASE_CUTOFF_DATE
-    logger.info("Integrating all data sources")
-
-    # Step 1: Extract Jeff features (highest priority data enhancement)
-    tennis_data = extract_comprehensive_jeff_features(tennis_data, jeff_data)
-
-    # Step 2: Fetch API data for dates after cutoff
-    recent_dates = []
-    end_date = date.today()
-    current_date = cutoff_date + timedelta(days=1)
-
-    while current_date <= end_date and len(recent_dates) < 30:  # Limit to 30 days
-        recent_dates.append(current_date)
-        current_date += timedelta(days=1)
-
-    if recent_dates:
-        try:
-            api_data = asyncio.run(fetch_api_data(recent_dates))
-            if not api_data.empty:
-                # Add API data to tennis_data
-                tennis_data = pd.concat([tennis_data, api_data], ignore_index=True, sort=False)
-
-                # After concat, ensure date is datetime.date everywhere
-                if 'date' in tennis_data.columns:
-                    tennis_data['date'] = pd.to_datetime(tennis_data['date'], errors='coerce').dt.date
-
-                logger.info(f"Added {len(api_data)} API matches")
-        except Exception as e:
-            logger.warning(f"API integration failed: {e}")
-
-    # Step 3: Enforce data hierarchy with corrected priority logic
-    if 'composite_id' in tennis_data.columns:
-        # Define source priority (lower number = higher priority)
-        source_priority = {'jeff': 1, 'ta': 1, 'api': 2, 'excel': 3}
-
-        # Handle missing data_source values
-        tennis_data['data_source'] = tennis_data['data_source'].fillna('excel')
-        tennis_data['source_priority'] = tennis_data['data_source'].map(source_priority).fillna(3)
-
-        # Sort by composite_id first, then by priority (ascending = higher priority first)
-        tennis_data = tennis_data.sort_values(['composite_id', 'source_priority', 'date'], na_position='last')
-
-        # Keep first occurrence of each composite_id (highest priority)
-        original_count = len(tennis_data)
-        tennis_data = tennis_data.drop_duplicates(subset=['composite_id'], keep='first')
-        deduped_count = len(tennis_data)
-
-        # Clean up temporary column
-        tennis_data = tennis_data.drop(columns=['source_priority'])
-
-        logger.info(f"Hierarchy enforcement: {original_count} -> {deduped_count} matches")
-        logger.info(f"Final data source distribution: {tennis_data['data_source'].value_counts().to_dict()}")
-
-    return tennis_data
-
-
-# ============================================================================
-# POINT DATA PREPARATION
-# ============================================================================
-
-def prepare_training_data_for_ml_model(tennis_data: pd.DataFrame, jeff_data: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Prepare training data with surface one-hot encoding and rally length"""
-    logger.info("Preparing training data for ML model")
-
-    # Load point-by-point data
-    point_files = []
-    jeff_data_dir = Path("tennis_data/jeff")
-
-    for pattern in ['chartingmpoints*.csv', 'chartingwpoints*.csv']:
-        point_files.extend(jeff_data_dir.glob(pattern))
-
-    if not point_files:
-        raise DataIngestionError("No point data files found")
-
-    point_dataframes = []
-    for file_path in point_files:
-        try:
-            df = load_csv_with_polars(file_path)
-            if not df.empty:
-                point_dataframes.append(df)
-                logger.info(f"Loaded point data: {file_path.name} ({len(df):,} points)")
-        except Exception as e:
-            logger.warning(f"Failed to load point file {file_path}: {e}")
-
-    if not point_dataframes:
-        raise DataIngestionError("No point data loaded")
-
-    point_df = pd.concat(point_dataframes, ignore_index=True)
-
-    # Runtime guardrail
-    if len(point_df) < 100000:
-        raise DataIngestionError(f"Insufficient point data: {len(point_df)} points (minimum 100,000)")
-
-    # Add rally length and other features
-    if 'rallyCount' in point_df.columns:
-        point_df['rally_length'] = point_df['rallyCount']
-    else:
-        point_df['rally_length'] = 1  # Default if not available
-
-    logger.info(f"Point data prepared: {len(point_df):,} points")
-
-    # Add surface one-hot encoding to tennis_data with unseen category handling
-    if 'Surface' in tennis_data.columns:
-        try:
-            surface_dummies = pd.get_dummies(tennis_data['Surface'], prefix='surface', dummy_na=True)
-            tennis_data = pd.concat([tennis_data, surface_dummies], axis=1)
-        except KeyError:
-            # If Surface has unseen categories, default to zeros rather than raising KeyError
-            logger.warning("Surface column has unseen categories, creating default surface features")
-            tennis_data['surface_Hard'] = 1
-            tennis_data['surface_Clay'] = 0
-            tennis_data['surface_Grass'] = 0
-
-    # Drop duplicate composite_id rows after one-hot expansion to prevent label leakage
-    if 'composite_id' in tennis_data.columns:
-        original_count = len(tennis_data)
-        tennis_data = tennis_data.drop_duplicates(subset=['composite_id'], keep='first')
-        deduped_count = len(tennis_data)
-        if original_count != deduped_count:
-            logger.info(f"Removed {original_count - deduped_count} duplicate composite_id rows after one-hot expansion")
-
-    return tennis_data, point_df
-
-
-# ============================================================================
-# MAIN PIPELINE
-# ============================================================================
-
-def main_pipeline() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Main pipeline execution"""
-    logger.info("Starting tennis data pipeline")
-
-    try:
-        # Load base tennis data
-        tennis_data = load_all_tennis_data()
-
-        # Load Jeff data
-        jeff_data = load_jeff_comprehensive_data()
-
-        # Integrate all data sources with hierarchy
-        tennis_data = integrate_all_data_sources(tennis_data, jeff_data)
-
-        # Prepare training data
-        tennis_data, point_df = prepare_training_data_for_ml_model(tennis_data, jeff_data)
-
-        # Save processed data
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        tennis_output = CACHE_DIR / "processed_tennis_data.joblib"
-        point_output = CACHE_DIR / "processed_point_data.joblib"
-
-        joblib.dump(tennis_data, tennis_output, compress=('zlib', 3))
-        joblib.dump(point_df, point_output, compress=('zlib', 3))
-
-        logger.info(f"Pipeline complete: {len(tennis_data):,} matches, {len(point_df):,} points")
-        return tennis_data, point_df
-
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}")
-        raise
-
-
-if __name__ == "__main__":
-    main_pipeline()
-
-
-  "  ________________________________________ "
-
- ============================================================================
-# TENNIS DATA PIPELINE - COMPREHENSIVE TENNIS PREDICTION SYSTEM
-# ============================================================================
-
-# ============================================================================
-# 1. IMPORTS AND CONSTANTS
-# ============================================================================
-import logging
-import numpy as np
-import pandas as pd
-import random
-from datetime import date, timedelta, datetime
-import os
-import requests
-import pickle
-import html
-import re
-import time
-from pathlib import Path
-from unidecode import unidecode
-from bs4 import BeautifulSoup, FeatureNotFound
-from urllib.parse import urljoin, urlparse
-import argparse
-import collections
-import json
-import warnings
-from model import TennisModelPipeline, PointLevelModel, DataDrivenTennisModel, MatchLevelEnsemble
-os.environ["API_TENNIS_KEY"] = "adfc70491c47895e5fffdc6428bbf36a561989d4bffcfa9ecfba8d91e947b4fb"
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
-
-SESSION = requests.Session()
-
-# ============================================================================
-# API CONFIGURATION AND CORE FUNCTIONS
-# ============================================================================
-
-# API-Tennis configuration
-API_KEY = os.getenv("API_TENNIS_KEY")
-if not API_KEY:
-    logging.warning("Environment variable API_TENNIS_KEY is not set; API-Tennis calls will fail")
-BASE = "https://api.api-tennis.com/tennis/"
-CACHE_API = Path.home() / ".api_tennis_cache"
-CACHE_API.mkdir(exist_ok=True)
-
-# Cache Configuration
-CACHE_DIR = os.path.expanduser("~/Desktop/data/cache")
-HD_PATH = os.path.join(CACHE_DIR, "historical_data.parquet")
-JEFF_PATH = os.path.join(CACHE_DIR, "jeff_data.pkl")
-DEF_PATH = os.path.join(CACHE_DIR, "weighted_defaults.pkl")
-
-# Data Configuration
-DATA_DIR = "data"
-BASE_CUTOFF_DATE = date(2025, 6, 10)
-JEFF_DB_PATH = os.path.join(DATA_DIR, "jeff_tennis_data_until_20250610.parquet")
-INCR_DB_PATH = os.path.join(DATA_DIR, "results_incremental.parquet")
-CHARTING_INDEX_CSV = (
-    "https://raw.githubusercontent.com/JeffSackmann/"
-    "tennis_charting/master/charting_match_index.csv"
-)
 
 def flatten_fixtures(fixtures: list[dict]) -> pd.DataFrame:
     """Utility to flatten a list of fixture dicts into a DataFrame."""
     return pd.json_normalize(fixtures)
+
 
 def api_call(method: str, **params):
     """Wrapper for API-Tennis endpoints. Uses query param "method" rather than path."""
@@ -864,6 +133,7 @@ def api_call(method: str, **params):
         logging.error(f"API call error for method {method} with params {params}: {e}")
         return []
 
+
 def safe_int_convert(value):
     """Safely convert a value to int. Returns None if conversion fails."""
     try:
@@ -871,8 +141,9 @@ def safe_int_convert(value):
     except (TypeError, ValueError):
         return None
 
+
 # ============================================================================
-# 2. DATA INTEGRATION - NAME NORMALIZATION FUNCTIONS
+# NAME NORMALIZATION FUNCTIONS
 # ============================================================================
 
 def normalize_name(name):
@@ -881,31 +152,21 @@ def normalize_name(name):
         return ""
 
     name = str(name).replace('.', '').lower().strip()
-
-    # Handle "A. Barrena" -> "a_barrena"
-    # Handle "J. M. La Serna" -> "j_m_la_serna"
     parts = name.split()
 
     if len(parts) >= 2:
-        # Take everything except the last part as first name(s)
         first_parts = parts[:-1]
         last_part = parts[-1]
-
-        # Join first parts with underscores, then add last name
         first_combined = '_'.join(first_parts)
         return f"{first_combined}_{last_part}"
     else:
         return name.replace(' ', '_')
 
-def normalize_jeff_name(name):
-    """
-    Legacy alias kept for backward‑compatibility.
 
-    It now simply forwards to `canonical_player()` so that every code path
-    (Jeff charting, match files, point files, etc.) shares the *same*
-    canonical mapping, e.g. 'djokovic_n', 'alcaraz_c', 'nadal_r'.
-    """
+def normalize_jeff_name(name):
+    """Legacy alias kept for backward compatibility."""
     return canonical_player(name)
+
 
 def normalize_name_canonical(name):
     """Canonical name normalization for simulation"""
@@ -915,12 +176,14 @@ def normalize_name_canonical(name):
     name = name.replace('.', '').replace("'", '').replace('-', ' ')
     return ' '.join(name.lower().split())
 
+
 def normalize_tournament_name(name, gender=None):
     """Normalize tournament names with gender awareness"""
     if pd.isna(name):
         return ""
     name = str(name).lower().strip()
     return name.replace(' ', '_')
+
 
 def build_composite_id(match_date, tourney_slug, p1_slug, p2_slug):
     """YYYYMMDD-tournament-player1-player2 (all lower-snake)"""
@@ -929,16 +192,11 @@ def build_composite_id(match_date, tourney_slug, p1_slug, p2_slug):
     ymd = pd.to_datetime(match_date).strftime("%Y%m%d")
     return f"{ymd}-{tourney_slug}-{p1_slug}-{p2_slug}"
 
+
 def canonical_player(name: str) -> str:
     """
-    A single, unambiguous mapping used by *both* match-level and
-    point-level code paths.
-
-    Examples
-    --------
-    'Novak Djokovic'   -> 'djokovic_n'
-    'Carlos Alcaraz'   -> 'alcaraz_c'
-    'R. Nadal'         -> 'nadal_r'
+    A single, unambiguous mapping used by both match-level and point-level code paths.
+    Examples: 'Novak Djokovic' -> 'djokovic_n', 'Carlos Alcaraz' -> 'alcaraz_c'
     """
     if pd.isna(name) or not str(name).strip():
         return ""
@@ -946,14 +204,161 @@ def canonical_player(name: str) -> str:
     name = unidecode(str(name)).replace(".", " ").lower().strip()
     parts = re.split(r"\s+", name)
 
-    # last surname token goes first …
     last = parts[-1]
-    # … first initial (if any) goes second
     first_initial = parts[0][0] if parts else ""
     return f"{last}_{first_initial}"
+
+
 # ============================================================================
-# DATA LOADING FUNCTIONS
+# PLAYER CANONICALIZER
 # ============================================================================
+
+class PlayerCanonicalizer:
+    """Thread-safe player name canonicalization with reverse lookup"""
+
+    def __init__(self):
+        self.cache_file = Path(CACHE_DIR) / "player_canonical_cache.joblib"
+        self.lock_file = str(self.cache_file) + ".lock"
+        self.mapping = self._load_cache()
+        self.reverse_mapping = {v: k for k, v in self.mapping.items()}
+
+    def _load_cache(self) -> Dict[str, str]:
+        """Load player mapping from cache"""
+        try:
+            with filelock.FileLock(self.lock_file):
+                if self.cache_file.exists():
+                    return joblib.load(self.cache_file)
+        except Exception as e:
+            logger.warning(f"Failed to load player canonical cache: {e}")
+        return {}
+
+    def canonical_player(self, raw_name: str) -> str:
+        """Canonicalize player name"""
+        if pd.isna(raw_name):
+            return ""
+
+        raw_name = str(raw_name).strip()
+        if not raw_name:
+            return ""
+
+        if raw_name in self.mapping:
+            return self.mapping[raw_name]
+
+        canonical = self._normalize_name(raw_name)
+        self.mapping[raw_name] = canonical
+        self.reverse_mapping[canonical] = raw_name
+
+        if len(self.mapping) % 100 == 0:
+            self._save_cache()
+
+        return canonical
+
+    def get_raw_name(self, canonical_name: str) -> str:
+        """Get original raw name from canonical name"""
+        return self.reverse_mapping.get(canonical_name, canonical_name)
+
+    def _normalize_name(self, name: str) -> str:
+        """Normalize player name"""
+        name = unidecode(name).replace('.', '').replace("'", '').replace('-', ' ')
+        name = ' '.join(name.lower().split())
+        return name
+
+    def _save_cache(self):
+        """Save player mapping to cache"""
+        try:
+            Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+            with filelock.FileLock(self.lock_file):
+                joblib.dump(self.mapping, self.cache_file, compress=('zlib', 3))
+        except Exception as e:
+            logger.error(f"Failed to save player canonical cache: {e}")
+
+
+player_canonicalizer = PlayerCanonicalizer()
+
+
+# ============================================================================
+# CONTENT-BASED CACHING
+# ============================================================================
+
+def get_content_hash(file_path: Path) -> str:
+    """Generate SHA-256 hash of file content"""
+    try:
+        with open(file_path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except Exception:
+        return hashlib.sha256(str(file_path.stat().st_mtime).encode()).hexdigest()[:16]
+
+
+def get_cache_path(file_path: Path, prefix: str = "cache") -> Path:
+    """Generate cache path based on content hash"""
+    content_hash = get_content_hash(file_path)
+    filename = f"{prefix}_{content_hash}.joblib"
+    Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+    return Path(CACHE_DIR) / filename
+
+
+# ============================================================================
+# OPTIMIZED DATA LOADING
+# ============================================================================
+
+def load_excel_with_cache(file_path: Path, **kwargs) -> pd.DataFrame:
+    """Load Excel with compressed caching"""
+    cache_path = get_cache_path(file_path, "excel")
+
+    if cache_path.exists():
+        try:
+            cached_df = joblib.load(cache_path)
+            logger.debug(f"Using cached data for {file_path}")
+            return cached_df
+        except Exception as e:
+            logger.warning(f"Cache read failed for {file_path}: {e}")
+
+    try:
+        df = pd.read_excel(
+            file_path,
+            engine='openpyxl' if str(file_path).endswith('.xlsx') else 'xlrd',
+            **kwargs
+        )
+    except Exception as e:
+        raise DataIngestionError(f"Failed to load Excel file {file_path}: {e}")
+
+    try:
+        joblib.dump(df, cache_path, compress=('zlib', 3))
+        logger.debug(f"Cached Excel data: {file_path}")
+    except Exception as e:
+        logger.warning(f"Failed to cache data for {file_path}: {e}")
+
+    return df
+
+
+def load_csv_with_polars(file_path: Path, **kwargs) -> pd.DataFrame:
+    """Load CSV using Polars with caching"""
+    cache_path = get_cache_path(file_path, "csv")
+
+    if cache_path.exists():
+        try:
+            cached_df = joblib.load(cache_path)
+            logger.debug(f"Using cached CSV data for {file_path}")
+            return cached_df
+        except Exception as e:
+            logger.warning(f"CSV cache read failed for {file_path}: {e}")
+
+    try:
+        df_polars = pl.read_csv(str(file_path), infer_schema_length=10000, **kwargs)
+        df_polars = df_polars.with_columns(pl.col(pl.Utf8).cast(pl.Categorical))
+        df_pandas = df_polars.to_pandas()
+
+        joblib.dump(df_pandas, cache_path, compress=('zlib', 3))
+        logger.debug(f"Loaded and cached CSV with Polars: {file_path}")
+        return df_pandas
+
+    except Exception as e:
+        logger.error(f"Polars CSV loading failed for {file_path}: {e}")
+        try:
+            return pd.read_csv(file_path, **kwargs)
+        except Exception as fallback_error:
+            raise DataIngestionError(f"Both Polars and pandas failed for {file_path}: {fallback_error}")
+
 
 def load_excel_data(file_path):
     """Load data from Excel file"""
@@ -967,6 +372,11 @@ def load_excel_data(file_path):
     except Exception as e:
         logging.error(f"Error loading {file_path}: {e}")
         return pd.DataFrame()
+
+
+# ============================================================================
+# DATA LOADING FUNCTIONS
+# ============================================================================
 
 def load_jeff_comprehensive_data():
     """Load all of Jeff's comprehensive tennis data"""
@@ -1007,6 +417,7 @@ def load_jeff_comprehensive_data():
                     logging.info(f"Loaded {gender}/{filename}: {len(df)} records")
     return data
 
+
 def load_all_tennis_data():
     """Load tennis data from all years"""
     base_path = os.path.expanduser("~/Desktop/data")
@@ -1029,6 +440,7 @@ def load_all_tennis_data():
         return pd.concat(all_data, ignore_index=True)
     else:
         return pd.DataFrame()
+
 
 # ============================================================================
 # FEATURE EXTRACTION AND DEFAULTS
@@ -1063,6 +475,7 @@ def get_fallback_defaults(gender_key):
 
     return base_defaults
 
+
 def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
     defaults = {"men": {}, "women": {}}
     skip = {"matches", "points_2020s"}
@@ -1085,6 +498,7 @@ def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
 
     return defaults
 
+
 def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, weighted_defaults=None):
     """Enhanced feature extraction with actual Jeff data processing"""
     gender_key = 'men' if gender == 'M' else 'women'
@@ -1097,14 +511,13 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
     else:
         features = get_fallback_defaults(gender_key)
 
-    # Overview stats - actual match-level aggregates
     if 'overview' in jeff_data[gender_key]:
         overview_df = jeff_data[gender_key]['overview']
         if 'Player_canonical' in overview_df.columns:
             player_overview = overview_df[
                 (overview_df['Player_canonical'] == player_canonical) &
                 (overview_df['set'] == 'Total')
-            ]
+                ]
 
             if len(player_overview) > 0:
                 latest = player_overview.iloc[-1]
@@ -1127,23 +540,24 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
                         'unforced_bh': float(latest.get('unforced_bh', 0))
                     })
 
-    # Calculate composite performance indices
     features['aggression_index'] = (
-        features.get('winners_total', 20) / (
+            features.get('winners_total', 20) / (
             features.get('winners_total', 20) + features.get('unforced_errors', 20))
     )
 
     features['consistency_index'] = 1 - (
-        features.get('unforced_errors', 20) / (features.get('serve_pts', 80) + features.get('return_pts_won', 30))
+            features.get('unforced_errors', 20) / (features.get('serve_pts', 80) + features.get('return_pts_won', 30))
     )
 
     features['pressure_performance'] = (
-        features.get('key_points_serve_won_pct', 0.5) + features.get('key_points_return_won_pct', 0.5)
-    ) / 2
+                                               features.get('key_points_serve_won_pct', 0.5) + features.get(
+                                           'key_points_return_won_pct', 0.5)
+                                       ) / 2
 
     features['net_game_strength'] = features.get('net_points_won_pct', 0.5)
 
     return features
+
 
 def calculate_feature_importance_weights(historical_data, jeff_data):
     """Calculate dynamic feature importance weights based on data availability"""
@@ -1172,6 +586,7 @@ def calculate_feature_importance_weights(historical_data, jeff_data):
     print(f"Feature importance weights: {weights}")
     return weights
 
+
 def extract_jeff_features(player_canonical, gender, jeff_data):
     """Extract actual features from Jeff Sackmann data - simplified version for simulation"""
     gender_key = 'men' if gender == 'M' else 'women'
@@ -1192,7 +607,7 @@ def extract_jeff_features(player_canonical, gender, jeff_data):
     double_faults = player_data.get('df', 0)
 
     total_serve_pts = first_in + double_faults + (
-        first_won - first_in) if first_won >= first_in else first_in + second_won + double_faults
+            first_won - first_in) if first_won >= first_in else first_in + second_won + double_faults
 
     break_points_saved = player_data.get('bpSaved', 0)
     break_points_faced = player_data.get('bpFaced', 0)
@@ -1205,11 +620,11 @@ def extract_jeff_features(player_canonical, gender, jeff_data):
         'return_pts_won': max(0, return_pts_won)
     }
 
+
 def extract_unified_features_fixed(match_data, player_prefix):
     """Enhanced version that prioritizes TA data, falls back to API, then defaults"""
     features = {}
 
-    # 1. Serve effectiveness - prioritize TA data
     if f'{player_prefix}_ta_serve_won_pct' in match_data:
         serve_won_pct = match_data[f'{player_prefix}_ta_serve_won_pct']
         features['serve_effectiveness'] = serve_won_pct / 100 if serve_won_pct > 1 else serve_won_pct
@@ -1220,75 +635,85 @@ def extract_unified_features_fixed(match_data, player_prefix):
     else:
         features['serve_effectiveness'] = 0.65
 
-    # 2. Return effectiveness - from TA data
     if f'{player_prefix}_ta_return1_points_won_pct' in match_data:
         return_won_pct = match_data[f'{player_prefix}_ta_return1_points_won_pct']
         features['return_effectiveness'] = return_won_pct / 100 if return_won_pct > 1 else return_won_pct
     else:
         features['return_effectiveness'] = 0.35
 
-    # 3. Winners rate - from TA aces data
     if f'{player_prefix}_ta_serve_aces_pct' in match_data:
         ace_pct = match_data[f'{player_prefix}_ta_serve_aces_pct']
-        features['winners_rate'] = (ace_pct / 100) * 3 if ace_pct > 1 else ace_pct * 3  # Scale up
-        features['winners_rate'] = min(features['winners_rate'], 0.5)  # Cap at 50%
+        features['winners_rate'] = (ace_pct / 100) * 3 if ace_pct > 1 else ace_pct * 3
+        features['winners_rate'] = min(features['winners_rate'], 0.5)
     else:
         features['winners_rate'] = 0.20
 
-    # 4. Unforced rate - estimate from serve data
     if f'{player_prefix}_ta_serve_forced_errors_pct' in match_data:
         forced_err_pct = match_data[f'{player_prefix}_ta_serve_forced_errors_pct']
         features['unforced_rate'] = (forced_err_pct / 100) * 2 if forced_err_pct > 1 else forced_err_pct * 2
     else:
         features['unforced_rate'] = 0.18
 
-    # 5. Pressure performance - from key points
     if f'{player_prefix}_ta_keypoints_points_won_pct' in match_data:
         kp_won_pct = match_data[f'{player_prefix}_ta_keypoints_points_won_pct']
         features['pressure_performance'] = kp_won_pct / 100 if kp_won_pct > 1 else kp_won_pct
     else:
         features['pressure_performance'] = 0.50
 
-    # 6. Net effectiveness
-    features['net_effectiveness'] = 0.65  # Default for now
+    features['net_effectiveness'] = 0.65
 
     return features
 
 
-def generate_synthetic_point_data(n_matches=500, points_per_match=150):
-    """
-    Generate synthetic point-by-point tennis data for momentum learning
-    Returns DataFrame with columns: match_id, Svr, PtWinner, surface, score_state, etc.
-    """
+def load_cached_scraped_data():
+    """Load existing Tennis Abstract scraped data from cache"""
+    from tennis_updated import AutomatedTennisAbstractScraper
+    import pickle
+    from pathlib import Path
 
+    cache_dir = Path("cache/tennis_abstract_cache")
+    scraped_data = []
+
+    # Load from all cached scraped files
+    for cache_file in cache_dir.glob("*.pkl"):
+        try:
+            with open(cache_file, 'rb') as f:
+                data = pickle.load(f)
+                if isinstance(data, dict) and 'comprehensive_data' in data:
+                    scraped_data.extend(data['comprehensive_data'])
+        except Exception as e:
+            continue
+
+    print(f"Loaded {len(scraped_data)} cached Tennis Abstract records")
+    return scraped_data
+
+# ============================================================================
+# SYNTHETIC DATA GENERATION
+# ============================================================================
+
+def generate_synthetic_point_data(n_matches=500, points_per_match=150):
+    """Generate synthetic point-by-point tennis data for momentum learning"""
     point_data = []
     surfaces = ['Hard', 'Clay', 'Grass']
 
     for match_id in range(n_matches):
         surface = random.choice(surfaces)
 
-        # Surface-specific serving advantages
         if surface == 'Grass':
             base_serve_prob = 0.68
         elif surface == 'Clay':
             base_serve_prob = 0.62
-        else:  # Hard
+        else:
             base_serve_prob = 0.65
 
-        # Player skill differential (-0.1 to 0.1)
         skill_diff = random.uniform(-0.1, 0.1)
-
-        # Match state tracking
         p1_games = p2_games = 0
         p1_sets = p2_sets = 0
         current_server = 1
-
-        # Momentum tracking
         recent_points = []
         momentum_decay = 0.85
 
         for point_num in range(points_per_match):
-            # Calculate current momentum
             if len(recent_points) > 0:
                 weights = np.array([momentum_decay ** i for i in range(len(recent_points))])
                 server_wins = np.array([1 if p == current_server else -1 for p in recent_points])
@@ -1296,19 +721,16 @@ def generate_synthetic_point_data(n_matches=500, points_per_match=150):
             else:
                 momentum = 0
 
-            # Score-dependent pressure
             is_break_point = (p1_games == 6 and p2_games == 5) or (p1_games == 5 and p2_games == 6)
             is_set_point = (p1_games >= 5 and p1_games - p2_games >= 1) or (p2_games >= 5 and p2_games - p1_games >= 1)
             is_match_point = ((p1_sets == 2 and p2_sets <= 1) or (p2_sets == 2 and p1_sets <= 1)) and is_set_point
 
-            # Pressure modifiers
             pressure_mod = 1.0
             if is_match_point:
                 pressure_mod = 0.95 if current_server == 1 else 1.05
             elif is_break_point:
                 pressure_mod = 0.97 if current_server == 1 else 1.03
 
-            # Final serve probability with momentum and pressure
             serve_prob = base_serve_prob
             if current_server == 1:
                 serve_prob += skill_diff + momentum * 0.03
@@ -1317,15 +739,12 @@ def generate_synthetic_point_data(n_matches=500, points_per_match=150):
             serve_prob *= pressure_mod
             serve_prob = np.clip(serve_prob, 0.1, 0.9)
 
-            # Determine point winner
             point_winner = current_server if random.random() < serve_prob else (3 - current_server)
             recent_points.append(point_winner)
 
-            # Keep only last 10 points for momentum
             if len(recent_points) > 10:
                 recent_points.pop(0)
 
-            # Record point data
             point_data.append({
                 'match_id': f"synthetic_match_{match_id}",
                 'Pt': point_num + 1,
@@ -1344,8 +763,7 @@ def generate_synthetic_point_data(n_matches=500, points_per_match=150):
                 'skill_differential': skill_diff
             })
 
-            # Update game/set scores (simplified)
-            if point_num % 4 == 3:  # End of game
+            if point_num % 4 == 3:
                 if point_winner == current_server:
                     if current_server == 1:
                         p1_games += 1
@@ -1357,9 +775,8 @@ def generate_synthetic_point_data(n_matches=500, points_per_match=150):
                     else:
                         p1_games += 1
 
-                current_server = 3 - current_server  # Switch server
+                current_server = 3 - current_server
 
-                # Check set completion
                 if p1_games >= 6 and p1_games - p2_games >= 2:
                     p1_sets += 1
                     p1_games = p2_games = 0
@@ -1367,7 +784,6 @@ def generate_synthetic_point_data(n_matches=500, points_per_match=150):
                     p2_sets += 1
                     p1_games = p2_games = 0
 
-                # Match completion
                 if p1_sets == 3 or p2_sets == 3:
                     break
 
@@ -1375,18 +791,14 @@ def generate_synthetic_point_data(n_matches=500, points_per_match=150):
 
 
 def generate_synthetic_match_data(n_matches=1000):
-    """
-    Generate synthetic match-level data with comprehensive statistics
-    """
-
+    """Generate synthetic match-level data with comprehensive statistics"""
     matches = []
     surfaces = ['Hard', 'Clay', 'Grass']
     tournaments = ['ATP Masters', 'Grand Slam', 'ATP 250', 'ATP 500', 'WTA Premier']
 
-    # Player pool with varying skill levels
     player_pool = []
     for i in range(200):
-        skill_level = np.random.beta(2, 5)  # Skewed toward lower skills
+        skill_level = np.random.beta(2, 5)
         player_pool.append({
             'player_id': f"player_{i:03d}",
             'skill_level': skill_level,
@@ -1400,13 +812,11 @@ def generate_synthetic_match_data(n_matches=1000):
     start_date = date(2023, 1, 1)
 
     for match_id in range(n_matches):
-        # Select players and surface
         p1, p2 = random.sample(player_pool, 2)
         surface = random.choice(surfaces)
         tournament = random.choice(tournaments)
         match_date = start_date + timedelta(days=random.randint(0, 730))
 
-        # Apply surface modifiers
         p1_effective_skill = p1['skill_level']
         p2_effective_skill = p2['skill_level']
 
@@ -1417,14 +827,12 @@ def generate_synthetic_match_data(n_matches=1000):
             p1_effective_skill += p1['grass_modifier']
             p2_effective_skill += p2['grass_modifier']
 
-        # Determine winner based on skill differential
         skill_diff = p1_effective_skill - p2_effective_skill
-        p1_win_prob = 0.5 + skill_diff * 2  # Convert to probability
+        p1_win_prob = 0.5 + skill_diff * 2
         p1_win_prob = np.clip(p1_win_prob, 0.1, 0.9)
 
         winner_is_p1 = random.random() < p1_win_prob
 
-        # Generate match statistics based on skills and surface
         if winner_is_p1:
             winner_skill = p1_effective_skill
             loser_skill = p2_effective_skill
@@ -1436,7 +844,6 @@ def generate_synthetic_match_data(n_matches=1000):
             winner_name = p2['player_id']
             loser_name = p1['player_id']
 
-        # Surface-specific base statistics
         if surface == 'Grass':
             base_aces = 12
             base_serve_pct = 0.68
@@ -1445,12 +852,11 @@ def generate_synthetic_match_data(n_matches=1000):
             base_aces = 4
             base_serve_pct = 0.62
             base_return_won = 0.38
-        else:  # Hard
+        else:
             base_aces = 8
             base_serve_pct = 0.65
             base_return_won = 0.35
 
-        # Winner statistics (higher than base)
         winner_aces = int(base_aces * (1 + winner_skill * 0.5) + np.random.poisson(2))
         winner_serve_pts = random.randint(70, 90)
         winner_first_serve_pct = base_serve_pct + winner_skill * 0.1 + np.random.normal(0, 0.05)
@@ -1463,7 +869,6 @@ def generate_synthetic_match_data(n_matches=1000):
         winner_winners = random.randint(20, 45)
         winner_unforced = random.randint(15, 35)
 
-        # Loser statistics (lower than base)
         loser_aces = int(base_aces * (0.8 + loser_skill * 0.4) + np.random.poisson(1))
         loser_serve_pts = random.randint(75, 95)
         loser_first_serve_pct = base_serve_pct + loser_skill * 0.08 + np.random.normal(0, 0.05)
@@ -1486,9 +891,8 @@ def generate_synthetic_match_data(n_matches=1000):
             'Winner': winner_name.replace('_', ' ').title(),
             'Loser': loser_name.replace('_', ' ').title(),
             'gender': random.choice(['M', 'W']),
-            'source_rank': 3,  # Synthetic data rank
+            'source_rank': 3,
 
-            # Winner statistics
             'winner_aces': winner_aces,
             'winner_serve_pts': winner_serve_pts,
             'winner_first_in': int(winner_serve_pts * winner_first_serve_pct),
@@ -1499,7 +903,6 @@ def generate_synthetic_match_data(n_matches=1000):
             'winner_winners': winner_winners,
             'winner_unforced': winner_unforced,
 
-            # Loser statistics
             'loser_aces': loser_aces,
             'loser_serve_pts': loser_serve_pts,
             'loser_first_in': int(loser_serve_pts * loser_first_serve_pct),
@@ -1510,24 +913,18 @@ def generate_synthetic_match_data(n_matches=1000):
             'loser_winners': loser_winners,
             'loser_unforced': loser_unforced,
 
-            # Match metadata
             'p1_win_probability': p1_win_prob,
             'skill_differential': skill_diff,
-            'data_quality_score': 0.8  # Synthetic data quality
+            'data_quality_score': 0.8
         })
 
     return pd.DataFrame(matches)
 
 
 def generate_comprehensive_player_features(player_canonical, gender='M', surface='Hard'):
-    """
-    Generate comprehensive player features that match the system's expected format
-    """
+    """Generate comprehensive player features that match the system's expected format"""
+    base_skill = np.random.beta(2, 3)
 
-    # Base skill level for this player
-    base_skill = np.random.beta(2, 3)  # 0 to 1 scale
-
-    # Surface adjustments
     surface_mod = 0
     if surface == 'Clay':
         surface_mod = np.random.normal(0, 0.1)
@@ -1536,7 +933,6 @@ def generate_comprehensive_player_features(player_canonical, gender='M', surface
 
     effective_skill = base_skill + surface_mod
 
-    # Gender-specific baselines
     if gender == 'W':
         base_serve_pts = 65
         base_aces = 3
@@ -1562,7 +958,6 @@ def generate_comprehensive_player_features(player_canonical, gender='M', surface
         'unforced_fh': int(15 * (1 - effective_skill * 0.2)),
         'unforced_bh': int(10 * (1 - effective_skill * 0.4)),
 
-        # Tactical features
         'serve_wide_pct': 0.25 + np.random.normal(0, 0.05),
         'serve_t_pct': 0.45 + np.random.normal(0, 0.05),
         'serve_body_pct': 0.30 + np.random.normal(0, 0.05),
@@ -1570,7 +965,6 @@ def generate_comprehensive_player_features(player_canonical, gender='M', surface
         'return_shallow_pct': 0.35 - effective_skill * 0.1,
         'return_very_deep_pct': 0.3 + effective_skill * 0.15,
 
-        # Performance indices
         'aggression_index': 0.4 + effective_skill * 0.3,
         'consistency_index': 0.5 + effective_skill * 0.4,
         'pressure_performance': 0.45 + effective_skill * 0.3,
@@ -1579,29 +973,6 @@ def generate_comprehensive_player_features(player_canonical, gender='M', surface
 
     return features
 
-
-# Usage examples
-if __name__ == "__main__":
-    # Generate point-level data for momentum learning
-    print("Generating synthetic point data...")
-    point_df = generate_synthetic_point_data(n_matches=100, points_per_match=120)
-    print(f"Generated {len(point_df)} point records")
-
-    # Generate match-level data
-    print("Generating synthetic match data...")
-    match_df = generate_synthetic_match_data(n_matches=500)
-    print(f"Generated {len(match_df)} match records")
-
-    # Generate player features
-    print("Generating player features...")
-    player_features = generate_comprehensive_player_features("synthetic_player_001", "M", "Hard")
-    print(f"Generated {len(player_features)} feature dimensions")
-
-    # Save to files
-    point_df.to_csv('synthetic_point_data.csv', index=False)
-    match_df.to_csv('synthetic_match_data.csv', index=False)
-
-    print("Synthetic data generation complete.")
 
 # ============================================================================
 # TENNIS ABSTRACT SCRAPER
@@ -1612,27 +983,21 @@ class TennisAbstractScraper:
         self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
     def get_raw_pointlog(self, url: str) -> pd.DataFrame:
-        """
-        Fetch the raw HTML 'pointlog' table from Tennis Abstract for momentum fitting.
-        Returns DataFrame with columns: match_id, Pt, Svr, PtWinner
-        """
+        """Fetch the raw HTML 'pointlog' table from Tennis Abstract for momentum fitting"""
         try:
-            # Fetch and parse page
             resp = SESSION.get(url, headers=self.headers, timeout=30)
             resp.raise_for_status()
             html = resp.text
 
-            # Extract the raw HTML table for pointlog
             js_tables = self._extract_all_js_tables(html)
             if 'pointlog' not in js_tables:
                 print("Warning: pointlog HTML table not found, trying alternative extraction")
                 return self._extract_pointlog_alternative(html, url)
 
             raw_html = js_tables['pointlog']
-
-            # Parse the HTML table
             soup = BeautifulSoup(raw_html, 'html.parser')
             table = soup.find('table')
+
             if table is None:
                 print("Warning: No <table> tag found in pointlog HTML")
                 return self._extract_pointlog_alternative(html, url)
@@ -1642,11 +1007,9 @@ class TennisAbstractScraper:
                 print("Warning: Not enough rows in pointlog table")
                 return self._extract_pointlog_alternative(html, url)
 
-            # Extract headers
             header_cells = rows[0].find_all(['th', 'td'])
             headers = [cell.get_text(strip=True) for cell in header_cells]
 
-            # Find server and point winner columns
             server_col_idx = None
             winner_col_idx = None
 
@@ -1660,21 +1023,16 @@ class TennisAbstractScraper:
                 print(f"Warning: Could not find server/winner columns in headers: {headers}")
                 return self._extract_pointlog_alternative(html, url)
 
-            # Extract row data
             data = []
             for row_idx, tr in enumerate(rows[1:], 1):
                 cells = tr.find_all('td')
                 if len(cells) < max(server_col_idx, winner_col_idx) + 1:
                     continue
 
-                # Extract server name
                 server_name = cells[server_col_idx].get_text(strip=True)
-
-                # Extract point winner indicator (checkmark, ✓, or similar)
                 winner_cell = cells[winner_col_idx]
                 winner_text = winner_cell.get_text(strip=True)
 
-                # Check for checkmark indicators
                 has_checkmark = bool(
                     winner_text in ['✓', '√', '✔', '●', '•'] or
                     '✓' in winner_text or '√' in winner_text or '✔' in winner_text or
@@ -1693,30 +1051,21 @@ class TennisAbstractScraper:
                 return self._extract_pointlog_alternative(html, url)
 
             df = pd.DataFrame(data)
-
-            # Create player name mapping
             unique_servers = df['server_name'].unique()
             if len(unique_servers) != 2:
                 print(f"Warning: Expected 2 players, found {len(unique_servers)}: {unique_servers}")
 
             player_map = {name: idx + 1 for idx, name in enumerate(unique_servers)}
-
-            # Map to numeric codes
             df['Svr'] = df['server_name'].map(player_map)
-
-            # Determine point winner based on server and checkmark
             df['PtWinner'] = df.apply(lambda row:
                                       row['Svr'] if row['point_winner_checkmark'] else
                                       (2 if row['Svr'] == 1 else 1), axis=1)
 
-            # Add match ID and point number
             match_id = self._extract_match_id_from_url(url)
             df['match_id'] = match_id
             df['Pt'] = df['point_num']
 
-            # Return required columns
             result = df[['match_id', 'Pt', 'Svr', 'PtWinner']].copy()
-
             print(f"Successfully extracted {len(result)} points from {url}")
             return result
 
@@ -1727,20 +1076,15 @@ class TennisAbstractScraper:
     def _extract_pointlog_alternative(self, html: str, url: str) -> pd.DataFrame:
         """Alternative pointlog extraction when main method fails"""
         try:
-            # Extract match ID
             match_id = self._extract_match_id_from_url(url)
-
-            # Create minimal fallback data
             fallback_data = {
                 'match_id': [match_id] * 10,
                 'Pt': list(range(1, 11)),
-                'Svr': [1, 2] * 5,  # Alternating server
-                'PtWinner': [1, 1, 2, 1, 2, 1, 2, 2, 1, 2]  # Random outcomes
+                'Svr': [1, 2] * 5,
+                'PtWinner': [1, 1, 2, 1, 2, 1, 2, 2, 1, 2]
             }
-
             print(f"Using fallback pointlog data for {url}")
             return pd.DataFrame(fallback_data)
-
         except Exception as e:
             print(f"Fallback extraction also failed: {e}")
             return pd.DataFrame(columns=['match_id', 'Pt', 'Svr', 'PtWinner'])
@@ -1750,35 +1094,10 @@ class TennisAbstractScraper:
         try:
             filename = os.path.basename(url)
             if filename.endswith('.html'):
-                return filename[:-5]  # Remove .html extension
+                return filename[:-5]
             return filename
         except:
             return f"match_{hash(url) % 100000}"
-
-    def _normalize_player_name(self, name: str) -> str:
-        import unicodedata
-        name = unicodedata.normalize("NFKD", name).strip()
-        name = re.sub(r"[\s\-]+", "_", name)
-        return name.lower()
-
-    def _parse_match_url(self, url: str) -> dict:
-        """Parse Tennis Abstract charting URL for metadata"""
-        fname = os.path.basename(urlparse(url).path)
-        if not fname.endswith(".html"):
-            return {}
-
-        parts = fname[:-5].split("-")
-        if len(parts) < 6 or not parts[0].isdigit():
-            return {}
-
-        return {
-            "Date": parts[0],
-            "gender": parts[1],
-            "tournament": "-".join(parts[2:-3]).replace("_", " "),
-            "round": parts[-3],
-            "player1": parts[-2].replace("_", " "),
-            "player2": parts[-1].replace("_", " "),
-        }
 
     def _extract_all_js_tables(self, html_content: str) -> dict:
         """Extract all JavaScript table variables from Tennis Abstract page"""
@@ -1797,11 +1116,11 @@ class TennisAbstractScraper:
             if matches:
                 content = matches[0]
                 clean_content = (content
-                               .replace('\\n', '\n')
-                               .replace('\\t', '\t')
-                               .replace('\\"', '"')
-                               .replace("\\'", "'")
-                               .replace('\\\\', '\\'))
+                                 .replace('\\n', '\n')
+                                 .replace('\\t', '\t')
+                                 .replace('\\"', '"')
+                                 .replace("\\'", "'")
+                                 .replace('\\\\', '\\'))
 
                 if '<table' in clean_content:
                     extracted_tables[var_name] = clean_content
@@ -1822,7 +1141,6 @@ class TennisAbstractScraper:
                 print(f"Could not parse match metadata from URL: {url}")
                 return []
 
-            # Extract player names from the page title
             title_match = re.search(r"<title>.*?:\s(.+?) vs (.+?)\s+Detailed Stats", html, re.S)
             if title_match:
                 name1, name2 = title_match.groups()
@@ -1830,7 +1148,6 @@ class TennisAbstractScraper:
             else:
                 raise ValueError("Cannot extract player names from title")
 
-            # Build mapping from row prefix to canonical code
             prefix_map = {}
             for code in codes:
                 parts = code.split('_')
@@ -1863,6 +1180,31 @@ class TennisAbstractScraper:
             print(f"Error scraping {url}: {e}")
             return []
 
+    def _parse_match_url(self, url: str) -> dict:
+        """Parse Tennis Abstract charting URL for metadata"""
+        fname = os.path.basename(urlparse(url).path)
+        if not fname.endswith(".html"):
+            return {}
+
+        parts = fname[:-5].split("-")
+        if len(parts) < 6 or not parts[0].isdigit():
+            return {}
+
+        return {
+            "Date": parts[0],
+            "gender": parts[1],
+            "tournament": "-".join(parts[2:-3]).replace("_", " "),
+            "round": parts[-3],
+            "player1": parts[-2].replace("_", " "),
+            "player2": parts[-1].replace("_", " "),
+        }
+
+    def _normalize_player_name(self, name: str) -> str:
+        import unicodedata
+        name = unicodedata.normalize("NFKD", name).strip()
+        name = re.sub(r"[\s\-]+", "_", name)
+        return name.lower()
+
     def _parse_tennis_abstract_table(self, table_html: str, table_type: str, match_meta: dict) -> list:
         """Parse a Tennis Abstract table into structured records"""
         try:
@@ -1894,7 +1236,6 @@ class TennisAbstractScraper:
                 player_code, stat_context = self._parse_row_identifier(identifier)
                 if not player_code:
                     continue
-                # Skip rows not matching known player prefixes
                 if player_code not in player_map:
                     continue
 
@@ -1930,8 +1271,9 @@ class TennisAbstractScraper:
             print(f"Error parsing {table_type} table: {e}")
             return []
 
-    def _parse_single_player_table(self, table_html: str, table_type: str, match_meta: dict, player_canonical: str) -> list:
-        """Parse tables ending in ‘1’ or ‘2’ (only one player per table)"""
+    def _parse_single_player_table(self, table_html: str, table_type: str, match_meta: dict,
+                                   player_canonical: str) -> list:
+        """Parse tables ending in '1' or '2' (only one player per table)"""
         soup = BeautifulSoup(table_html, 'html.parser')
         table = soup.find('table')
         if not table:
@@ -1939,10 +1281,10 @@ class TennisAbstractScraper:
         rows = table.find_all('tr')
         if len(rows) < 2:
             return []
-        headers = [th.get_text(strip=True) for th in rows[0].find_all(['th','td'])]
+        headers = [th.get_text(strip=True) for th in rows[0].find_all(['th', 'td'])]
         records = []
         for row in rows[1:]:
-            cells = row.find_all(['td','th'])
+            cells = row.find_all(['td', 'th'])
             if len(cells) < 2:
                 continue
             stat_context = cells[0].get_text(strip=True)
@@ -1963,7 +1305,7 @@ class TennisAbstractScraper:
                     'Player_canonical': player_canonical,
                     'stat_context': stat_context,
                     'stat_name': self._normalize_header(header),
-                    'stat_value': pv.get('value', pv.get('count',0)),
+                    'stat_value': pv.get('value', pv.get('count', 0)),
                     'stat_percentage': pv.get('percentage'),
                     'raw_value': text,
                     'data_type': table_type,
@@ -1976,7 +1318,6 @@ class TennisAbstractScraper:
         parts = identifier.split()
         stat_context = ' '.join(parts[1:]).strip() or 'Total'
         prefix = parts[0]
-        # Normalize prefix to match initials if full name used
         if prefix not in getattr(self, 'prefix_map', {}):
             low = identifier.lower()
             for init, code in getattr(self, 'prefix_map', {}).items():
@@ -2064,6 +1405,7 @@ class TennisAbstractScraper:
         except:
             return f"unknown-{match_meta.get('Date', '')}"
 
+
 class AutomatedTennisAbstractScraper(TennisAbstractScraper):
     def __init__(self, cache_dir=None):
         super().__init__()
@@ -2083,6 +1425,7 @@ class AutomatedTennisAbstractScraper(TennisAbstractScraper):
             self.scraped_urls.clear()
             if self.scraped_urls_file.exists():
                 self.scraped_urls_file.unlink()
+
         start_date = date(2025, 6, 10)
         end_date = date.today()
 
@@ -2225,6 +1568,7 @@ class AutomatedTennisAbstractScraper(TennisAbstractScraper):
 
         return records
 
+
 def integrate_scraped_data_hybrid(historical_data, scraped_records):
     """Hybrid: enhance existing matches, add new TA matches if not in API"""
     if not scraped_records:
@@ -2274,14 +1618,10 @@ def integrate_scraped_data_hybrid(historical_data, scraped_records):
                 if match_records:
                     sample_record = match_records[0]
 
-                    # Map Player_canonical codes back to actual names
-                    sample_record = match_records[0]
                     actual_player1 = sample_record.get('player1', '')
                     actual_player2 = sample_record.get('player2', '')
 
-                    # Correct winner for known matches (Sinner won Wimbledon 2025)
                     if '20250713-wimbledon' in comp_id and 'sinner' in comp_id.lower() and 'alcaraz' in comp_id.lower():
-                        # Sinner won, Alcaraz lost
                         if 'sinner' in actual_player2.lower():
                             winner_name = actual_player2
                             loser_name = actual_player1
@@ -2289,14 +1629,12 @@ def integrate_scraped_data_hybrid(historical_data, scraped_records):
                             winner_name = actual_player1
                             loser_name = actual_player2
                     else:
-                        # Default assumption
                         winner_name = actual_player1
                         loser_name = actual_player2
 
                     new_record = {
                         'composite_id': comp_id,
                         'source_rank': 1,
-                        # ...
                         'winner_canonical': normalize_name(winner_name),
                         'loser_canonical': normalize_name(loser_name),
                         'Winner': winner_name,
@@ -2317,6 +1655,7 @@ def integrate_scraped_data_hybrid(historical_data, scraped_records):
     print(f"Added {new_matches_added} new Tennis Abstract matches")
 
     return enhanced_data
+
 
 def process_tennis_abstract_scraped_data(scraped_records):
     """Convert scraped records into per-match player features"""
@@ -2344,12 +1683,13 @@ def process_tennis_abstract_scraped_data(scraped_records):
 
     return matches
 
+
 def run_automated_tennis_abstract_integration(historical_data, days_back=None):
     """Main function to run automated Tennis Abstract scraping and integration"""
     print("=== AUTOMATED TENNIS ABSTRACT INTEGRATION ===")
 
     scraper = AutomatedTennisAbstractScraper()
-    scraped_records = scraper.automated_scraping_session(days_back=days_back)
+    fresh_scraped = scraper.automated_scraping_session(days_back=30, max_matches=50)
 
     if not scraped_records:
         print("No new Tennis Abstract data scraped")
@@ -2360,148 +1700,6 @@ def run_automated_tennis_abstract_integration(historical_data, days_back=None):
     print(f"Tennis Abstract integration complete. Enhanced dataset with detailed charting features.")
     return enhanced_data
 
-
-def prepare_training_data_for_ml_model(historical_data: pd.DataFrame, scraped_records: list) -> tuple:
-    """Prepare point-level and match-level data for ML training"""
-
-    # Prepare match-level data
-    match_data = historical_data.copy()
-
-    # Add actual winner column (1 for first player wins)
-    match_data['actual_winner'] = 1  # Assume first player is winner in our data structure
-
-    # Add missing features with defaults
-    feature_columns = [
-        'winner_elo', 'loser_elo', 'p1_h2h_win_pct', 'winner_aces', 'loser_aces',
-        'winner_serve_pts', 'loser_serve_pts', 'winner_last10_wins', 'loser_last10_wins',
-        'p1_surface_h2h_wins', 'p2_surface_h2h_wins'
-    ]
-
-    for col in feature_columns:
-        if col not in match_data.columns:
-            if 'elo' in col:
-                match_data[col] = 1500  # Default ELO
-            elif 'h2h' in col:
-                match_data[col] = 0.5 if 'pct' in col else 0
-            elif 'last10' in col:
-                match_data[col] = 5  # Default recent wins
-            else:
-                match_data[col] = 5  # Default for aces, serve points
-
-    # Prepare point-level data from scraped records
-    point_data_list = []
-
-    for record in scraped_records:
-        if record.get('data_type') == 'pointlog':
-            # This would be actual point-by-point data
-            point_data_list.append({
-                'match_id': record.get('composite_id', 'unknown'),
-                'Pt': record.get('point_number', 1),
-                'Svr': record.get('server', 1),
-                'PtWinner': record.get('point_winner', 1),
-                'Gm1': record.get('games_p1', 0),
-                'Gm2': record.get('games_p2', 0),
-                'Set1': record.get('sets_p1', 0),
-                'Set2': record.get('sets_p2', 0),
-                'Pts': record.get('score', '0-0'),
-                'surface': record.get('surface', 'Hard'),
-                'tournament': record.get('tournament', ''),
-                'round': record.get('round', 'R32')
-            })
-
-    # If no point data from scraping, create synthetic point data
-    if not point_data_list:
-        print("No point-level data found, creating synthetic data for training...")
-        for _, match in match_data.head(100).iterrows():  # Use first 100 matches
-            match_id = match.get('composite_id', f'match_{hash(str(match)) % 10000}')
-            surface = match.get('surface', 'Hard')
-
-            # Generate synthetic points for this match
-            for pt in range(1, 51):  # 50 points per match
-                point_data_list.append({
-                    'match_id': match_id,
-                    'Pt': pt,
-                    'Svr': (pt % 4 < 2) + 1,  # Alternating server every 2 points (simplified)
-                    'PtWinner': np.random.choice([1, 2], p=[0.6, 0.4]),
-                    'Gm1': pt // 10,
-                    'Gm2': (pt - 1) // 12,
-                    'Set1': 0,
-                    'Set2': 0,
-                    'Pts': f"{(pt % 4) * 15}-{((pt + 1) % 4) * 15}",
-                    'surface': surface,
-                    'tournament': match.get('Tournament', ''),
-                    'round': 'R32'
-                })
-
-    point_data = pd.DataFrame(point_data_list)
-
-    print(f"Prepared {len(match_data)} matches and {len(point_data)} points for ML training")
-    return point_data, match_data
-
-
-def train_ml_model(historical_data: pd.DataFrame, scraped_records: list = None, fast_mode: bool = True):
-    """Train the ML model pipeline"""
-
-    if scraped_records is None:
-        scraped_records = []
-
-    # Prepare training data
-    point_data, match_data = prepare_training_data_for_ml_model(historical_data, scraped_records)
-
-    # Initialize pipeline
-    pipeline = TennisModelPipeline(fast_mode=fast_mode)
-
-    # Train the model
-    print("Training ML model pipeline...")
-    feature_importance = pipeline.train(point_data, match_data)
-
-    # Save the trained model
-    model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
-    pipeline.save(model_path)
-
-    print(f"Model training complete. Saved to {model_path}")
-    return pipeline, feature_importance
-
-
-def predict_match_ml(player1: str, player2: str, tournament: str, surface: str = "Hard",
-                     best_of: int = 3, model_path: str = None) -> dict:
-    """Make ML-based match prediction"""
-
-    if model_path is None:
-        model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
-
-    # Load trained model
-    pipeline = TennisModelPipeline()
-
-    if os.path.exists(model_path):
-        pipeline.load(model_path)
-    else:
-        print(f"No trained model found at {model_path}. Train model first.")
-        return {'win_probability': 0.5, 'confidence': 'LOW', 'error': 'No trained model'}
-
-    # Create match context
-    match_context = {
-        'surface': surface,
-        'best_of': best_of,
-        'is_grand_slam': tournament.lower() in ['wimbledon', 'french open', 'australian open', 'us open'],
-        'is_masters': 'masters' in tournament.lower() or 'atp 1000' in tournament.lower(),
-        'round_level': 4,  # Default to R16
-        'elo_diff': 0,  # Would need to look up actual ELO ratings
-        'h2h_advantage': 0,  # Would need H2H data
-        'data_quality_score': 0.7
-    }
-
-    # Make prediction
-    prediction = pipeline.predict(match_context, best_of=best_of)
-
-    print(f"\nML-Based Prediction:")
-    print(f"P({player1} wins) = {prediction['win_probability']:.3f}")
-    print(f"P({player2} wins) = {1 - prediction['win_probability']:.3f}")
-    print(f"Confidence: {prediction['confidence']}")
-    print(f"Simulation component: {prediction['simulation_component']:.3f}")
-    print(f"Direct ML component: {prediction['direct_component']:.3f}")
-
-    return prediction
 
 # ============================================================================
 # API INTEGRATION FUNCTIONS
@@ -2528,6 +1726,7 @@ def get_fixtures_for_date(target_date, event_type_key=None):
         logging.error(f"Error getting fixtures for {target_date}: {e}")
         return []
 
+
 def extract_embedded_statistics(fixture):
     """Extract statistics from fixture data"""
     stats = {}
@@ -2552,6 +1751,7 @@ def extract_embedded_statistics(fixture):
             pass
 
     return stats
+
 
 def parse_api_tennis_statistics(fixture: dict) -> dict[int, dict]:
     try:
@@ -2612,6 +1812,7 @@ def parse_api_tennis_statistics(fixture: dict) -> dict[int, dict]:
         logging.error(f"Error parsing API tennis statistics: {e}")
         return {}
 
+
 def parse_match_statistics(fixture: dict) -> dict[int, dict]:
     """Parse match statistics from API-Tennis fixture format"""
     api_stats = parse_api_tennis_statistics(fixture)
@@ -2635,6 +1836,7 @@ def parse_match_statistics(fixture: dict) -> dict[int, dict]:
         return stats
     except Exception:
         return {}
+
 
 def get_match_odds(match_key, date_check=None):
     """Get odds with proper error handling - only for dates >= 2025-06-23"""
@@ -2667,6 +1869,7 @@ def get_match_odds(match_key, date_check=None):
     except Exception as e:
         logging.error(f"Error getting odds for match {match_key}: {e}")
         return (None, None)
+
 
 def get_player_rankings(day, league="ATP"):
     """Get standings with proper caching and error handling"""
@@ -2702,6 +1905,7 @@ def get_player_rankings(day, league="ATP"):
             rankings[player_key] = place
 
     return rankings
+
 
 def get_h2h_data(p1_key, p2_key):
     """Get head-to-head data with caching"""
@@ -2741,6 +1945,7 @@ def get_h2h_data(p1_key, p2_key):
         cache_file.write_bytes(pickle.dumps(result, 4))
         return result
 
+
 def get_tournaments_metadata():
     """Get tournament metadata from fixtures since API endpoint is restricted"""
     cache_file = CACHE_API / "tournaments.pkl"
@@ -2778,6 +1983,7 @@ def get_tournaments_metadata():
         logging.error(f"Error extracting tournament data from fixtures: {e}")
         return {}
 
+
 def get_event_types():
     """Get event types metadata - cached statically"""
     cache_file = CACHE_API / "event_types.pkl"
@@ -2800,6 +2006,7 @@ def get_event_types():
     except Exception as e:
         logging.error(f"Error getting event types: {e}")
         return {}
+
 
 def get_player_profile(player_key):
     """Get player profile with career stats"""
@@ -2829,7 +2036,6 @@ def integrate_api_tennis_data_incremental(historical_data):
     else:
         df["source_rank"] = df["source_rank"].fillna(3)
 
-    # FIX: Ensure date column is properly typed
     if 'date' in df.columns:
         df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
         existing_api_dates = set(df[df["source_rank"] == 2]["date"].dropna())
@@ -2920,7 +2126,7 @@ def integrate_api_tennis_data_incremental(historical_data):
             record = {
                 "composite_id": comp_id,
                 "source_rank": 2,
-                "date": day,  # This is already a date object
+                "date": day,
                 "gender": gender,
                 "surface": surface,
                 "tournament_tier": fixture.get("event_type_type", "Unknown"),
@@ -2989,6 +2195,7 @@ def integrate_api_tennis_data_incremental(historical_data):
     print(f"Added {len(dates_to_fetch)} days of API data to cache.")
     return df
 
+
 # ============================================================================
 # MAIN DATA GENERATION FUNCTION
 # ============================================================================
@@ -3001,7 +2208,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
         logging.info("=== SYNTHETIC DATA MODE ===")
 
         logging.info("Step 1: Generating synthetic Jeff data...")
-        # Create minimal jeff_data structure for compatibility
         jeff_data = {
             'men': {'overview': pd.DataFrame()},
             'women': {'overview': pd.DataFrame()}
@@ -3018,7 +2224,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
         logging.info(f"✓ Generated {len(tennis_data)} synthetic matches")
 
         logging.info("Step 4: Adding synthetic player features...")
-        # Add comprehensive features for each player in each match
         for idx, row in tennis_data.iterrows():
             if idx % 100 == 0:
                 logging.info(f"  Processing synthetic match {idx}/{len(tennis_data)}")
@@ -3026,7 +2231,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
             gender = row['gender']
             surface = row['surface']
 
-            # Generate features for winner and loser
             winner_features = generate_comprehensive_player_features(
                 row['winner_canonical'], gender, surface
             )
@@ -3034,7 +2238,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
                 row['loser_canonical'], gender, surface
             )
 
-            # Apply features to DataFrame
             for feature_name, feature_value in winner_features.items():
                 col_name = f'winner_{feature_name}'
                 tennis_data.at[idx, col_name] = feature_value
@@ -3045,7 +2248,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
 
         logging.info("✓ Synthetic player features added")
 
-        # Skip API/TA integration for synthetic data
         logging.info("Step 5: Skipping API/TA integration for synthetic data")
 
         logging.info(f"=== SYNTHETIC DATA GENERATION COMPLETE ===")
@@ -3111,7 +2313,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
         tennis_data['loser_canonical'] = tennis_data['Loser'].apply(canonical_player)
         tennis_data['tournament_canonical'] = tennis_data['Tournament'].apply(normalize_tournament_name)
 
-        # FIX: Ensure date is properly converted and handled
         tennis_data['Date'] = pd.to_datetime(tennis_data['Date'], errors='coerce')
         tennis_data['date'] = tennis_data['Date'].dt.date
 
@@ -3125,7 +2326,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
             axis=1
         )
 
-        # Remove rows with invalid dates/composite_ids
         tennis_data = tennis_data.dropna(subset=['date', 'composite_id'])
 
         tennis_data['tennis_data_odds1'] = pd.to_numeric(tennis_data.get('PSW', 0), errors='coerce')
@@ -3185,7 +2385,6 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
             try:
                 gender = row['gender']
 
-                # FIX: Handle date comparison properly
                 match_date = row['date']
                 if pd.isna(match_date) or not isinstance(match_date, date):
                     continue
@@ -3232,16 +2431,11 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
 
 
 def generate_synthetic_training_data_for_model():
-    """
-    Generate synthetic data specifically formatted for model training
-    Returns both point-level and match-level data
-    """
+    """Generate synthetic data specifically formatted for model training"""
     logging.info("Generating synthetic training data for ML models...")
 
-    # Generate point-level data for momentum learning
     point_data = generate_synthetic_point_data(n_matches=200, points_per_match=120)
 
-    # Generate comprehensive match data
     match_data, jeff_data, defaults = generate_comprehensive_historical_data(
         fast=False,
         n_sample=1000,
@@ -3251,6 +2445,35 @@ def generate_synthetic_training_data_for_model():
     logging.info(f"Generated {len(point_data)} point records and {len(match_data)} match records")
 
     return point_data, match_data, jeff_data, defaults
+
+def extract_ta_data_from_historical(historical_data):
+    """Extract Tennis Abstract data already integrated in historical dataset"""
+    ta_matches = historical_data[historical_data['source_rank'] == 1]  # TA has rank 1
+    print(f"Found {len(ta_matches)} Tennis Abstract matches in historical data")
+
+    # Convert to scraped_records format
+    scraped_records = []
+    for _, match in ta_matches.iterrows():
+        # Extract TA features from match row
+        for col in match.index:
+            if col.startswith(('winner_ta_', 'loser_ta_')):
+                scraped_records.append({
+                    'composite_id': match['composite_id'],
+                    'Player_canonical': match['winner_canonical'] if 'winner_' in col else match['loser_canonical'],
+                    'stat_name': col.replace('winner_ta_', '').replace('loser_ta_', ''),
+                    'stat_value': match[col],
+                    'data_type': 'overview'  # Not pointlog, but detailed stats
+                })
+
+    return scraped_records
+
+
+# Replace the cache loading with:
+if not fresh_scraped:
+    print("No fresh scrapes, extracting Tennis Abstract data from historical dataset...")
+    scraped_records = extract_ta_data_from_historical(hist)
+else:
+    scraped_records = fresh_scraped
 
 # ============================================================================
 # CACHE FUNCTIONS
@@ -3282,6 +2505,7 @@ def save_to_cache(historical_data, jeff_data, weighted_defaults):
         logging.error(f"ERROR saving cache: {e}")
         return False
 
+
 def load_from_cache():
     """Load data from cache if available, with graceful fallback."""
     if (os.path.exists(HD_PATH) and
@@ -3312,12 +2536,10 @@ def load_from_cache_with_scraping():
             hist = run_automated_tennis_abstract_integration(hist)
             save_to_cache(hist, jeff_data, defaults)
         else:
-            # FIX: Handle NaN dates properly
             if 'date' in hist.columns:
                 valid_dates = hist['date'].dropna()
                 if len(valid_dates) > 0:
                     latest_date = valid_dates.max()
-                    # Ensure latest_date is actually a date object
                     if pd.isna(latest_date) or not isinstance(latest_date, (date, pd.Timestamp)):
                         latest_date = date(2025, 6, 10)
                     elif isinstance(latest_date, pd.Timestamp):
@@ -3338,6 +2560,7 @@ def load_from_cache_with_scraping():
 
     return hist, jeff_data, defaults
 
+
 def load_from_cache_direct():
     """Direct cache loading for testing"""
     try:
@@ -3347,12 +2570,14 @@ def load_from_cache_direct():
         print(f"Error loading cache: {e}")
     return None
 
-#%%
-# Override the broken feature extraction function
+
+# ============================================================================
+# FEATURE EXTRACTION HELPERS
+# ============================================================================
+
 def extract_features_working(match_data, player_prefix):
     features = {}
 
-    # Serve effectiveness from actual data
     serve_pts = match_data.get(f'{player_prefix}_serve_pts', 80)
     serve_pts_won = match_data.get(f'{player_prefix}_pts_won', 0)
 
@@ -3361,7 +2586,6 @@ def extract_features_working(match_data, player_prefix):
     else:
         features['serve_effectiveness'] = 0.65
 
-    # Return effectiveness
     return_pts = match_data.get(f'{player_prefix}_return_pts', 80)
     return_pts_won = match_data.get(f'{player_prefix}_return_pts_won', 24)
 
@@ -3370,22 +2594,17 @@ def extract_features_working(match_data, player_prefix):
     else:
         features['return_effectiveness'] = 0.35
 
-    # Winners rate from aces
     aces = match_data.get(f'{player_prefix}_aces', 7)
-    features['winners_rate'] = (aces / serve_pts) * 4 if serve_pts > 0 else 0.20  # Scale up
+    features['winners_rate'] = (aces / serve_pts) * 4 if serve_pts > 0 else 0.20
 
-    # Unforced rate from double faults
     dfs = match_data.get(f'{player_prefix}_dfs', 2)
-    features['unforced_rate'] = (dfs / serve_pts) * 10 if serve_pts > 0 else 0.18  # Scale up
+    features['unforced_rate'] = (dfs / serve_pts) * 10 if serve_pts > 0 else 0.18
 
-    # Pressure performance from break points
     bp_saved = match_data.get(f'{player_prefix}_bp_saved', 3)
     bk_pts = match_data.get(f'{player_prefix}_bk_pts', 7)
     features['pressure_performance'] = (bp_saved / bk_pts) if bk_pts > 0 else 0.50
 
-    # Net effectiveness
-    net_pts = match_data.get(f'{player_prefix}_net_pts', 40)
-    features['net_effectiveness'] = 0.65  # Default for now
+    features['net_effectiveness'] = 0.65
 
     return features
 
@@ -3402,7 +2621,6 @@ def extract_unified_match_context_fixed(match_data):
         tournament_tier = str(match_data.get('tournament_tier', '')).lower()
         composite_id = str(match_data.get('composite_id', '')).lower()
 
-        # Check composite_id for tournament info (important for TA matches)
         if 'wimbledon' in tournament_round or 'wimbledon' in tournament_name or 'wimbledon' in composite_id:
             surface = 'Grass'
         elif 'french' in tournament_round or 'roland_garros' in tournament_round or 'french' in composite_id or 'roland_garros' in composite_id:
@@ -3435,6 +2653,7 @@ def extract_unified_match_context_fixed(match_data):
     context['data_quality_score'] = min(score, 1.0)
 
     return context
+
 
 def predict_match_unified(args, hist, jeff_data, defaults):
     """Enhanced prediction function that tries multiple composite_id variations"""
@@ -3478,11 +2697,9 @@ def predict_match_unified(args, hist, jeff_data, defaults):
     print(
         f"Trying {len(tournament_variations)} tournament × {len(p1_variations)} × {len(p2_variations)} = {len(tournament_variations) * len(p1_variations) * len(p2_variations)} combinations")
 
-    # Try all combinations
     for tournament in tournament_variations:
         for p1 in p1_variations:
             for p2 in p2_variations:
-                # Try both player orders
                 for player1, player2 in [(p1, p2), (p2, p1)]:
                     comp_id = f"{match_date.strftime('%Y%m%d')}-{tournament}-{player1}-{player2}"
 
@@ -3491,11 +2708,9 @@ def predict_match_unified(args, hist, jeff_data, defaults):
                     if not row.empty:
                         print(f"✅ Found match: {comp_id}")
 
-                        # Determine if players are swapped
                         match_row = row.iloc[0]
                         match_dict = match_row.to_dict()
 
-                        # If we swapped players, swap the features back
                         if (player1, player2) == (p2, p1):
                             print("  → Players were swapped, correcting features...")
                             swapped_dict = {}
@@ -3508,18 +2723,15 @@ def predict_match_unified(args, hist, jeff_data, defaults):
                                     swapped_dict[key] = value
                             match_dict = swapped_dict
 
-                        # Extract features and predict
                         p1_features = extract_unified_features_fixed(match_dict, 'winner')
                         p2_features = extract_unified_features_fixed(match_dict, 'loser')
                         match_context = extract_unified_match_context_fixed(match_dict)
 
-                        # Show data source info
                         source_rank = match_dict.get('source_rank', 3)
                         data_sources = {1: 'Tennis Abstract', 2: 'API-Tennis', 3: 'Tennis Data Files'}
                         print(f"  → Data source: {data_sources.get(source_rank, 'Unknown')} (rank: {source_rank})")
                         print(f"  → Data quality: {match_context['data_quality_score']:.2f}")
 
-                        # Show feature breakdown
                         print(f"\n=== UNIFIED FEATURE ANALYSIS ===")
                         print(f"Surface: {match_context.get('surface', 'Unknown')}")
                         print(
@@ -3536,14 +2748,10 @@ def predict_match_unified(args, hist, jeff_data, defaults):
                             p2_val = p2_features.get(feature_name, 0)
                             print(f"{feature_name}: P1={p1_val:.3f}, P2={p2_val:.3f}")
 
-                        # Run prediction
-                        from model import TennisModelPipeline
                         pipeline = TennisModelPipeline(fast_mode=True)
-                        # Would need to train pipeline first or load pre-trained model
                         result = pipeline.predict(match_context, best_of=args.best_of, fast_mode=True)
                         prob = result['win_probability']
 
-                        # Show results
                         print(f"\n=== PREDICTION RESULTS ===")
                         print(f"P({args.player1} wins) = {prob:.3f}")
                         print(f"P({args.player2} wins) = {1 - prob:.3f}")
@@ -3552,6 +2760,188 @@ def predict_match_unified(args, hist, jeff_data, defaults):
 
     print("❌ No match found with any variation")
     return None
+
+
+def prepare_training_data_for_ml_model(historical_data: pd.DataFrame, scraped_records: list) -> tuple:
+    """Prepare point-level and match-level data for ML training"""
+
+    # Match data: Use real compiled historical data
+    match_data = historical_data.copy()
+    match_data['actual_winner'] = 1
+
+    # Add missing feature columns with defaults
+    feature_columns = [
+        'winner_elo', 'loser_elo', 'p1_h2h_win_pct', 'winner_aces', 'loser_aces',
+        'winner_serve_pts', 'loser_serve_pts', 'winner_last10_wins', 'loser_last10_wins',
+        'p1_surface_h2h_wins', 'p2_surface_h2h_wins'
+    ]
+
+    for col in feature_columns:
+        if col not in match_data.columns:
+            if 'elo' in col:
+                match_data[col] = 1500
+            elif 'h2h' in col:
+                match_data[col] = 0.5 if 'pct' in col else 0
+            elif 'last10' in col:
+                match_data[col] = 5
+            else:
+                match_data[col] = 5
+
+    # Point data: Extract real point sequences from Tennis Abstract URLs
+    def extract_raw_point_sequences(scraped_records):
+        """Convert scraped URLs to raw point sequences"""
+        from tennis_updated import TennisAbstractScraper
+
+        scraper = TennisAbstractScraper()
+        point_data_list = []
+
+        # Get unique URLs from scraped records
+        scraped_urls = list(set(r.get('scrape_url') for r in scraped_records if r.get('scrape_url')))
+        print(f"Extracting point data from {len(scraped_urls)} Tennis Abstract URLs...")
+
+        for url in scraped_urls[:15]:  # Limit for training speed
+            try:
+                points_df = scraper.get_raw_pointlog(url)
+                if len(points_df) > 0:
+                    # Add surface and tournament info
+                    for _, point in points_df.iterrows():
+                        point_record = point.to_dict()
+                        # Add match context from scraped record
+                        matching_record = next((r for r in scraped_records if r.get('scrape_url') == url), {})
+                        point_record.update({
+                            'surface': matching_record.get('surface', 'Hard'),
+                            'tournament': matching_record.get('tournament', ''),
+                            'round': matching_record.get('round', 'R32')
+                        })
+                        point_data_list.append(point_record)
+
+                    print(f"  ✓ Extracted {len(points_df)} points from {url.split('/')[-1]}")
+                else:
+                    print(f"  ✗ No points from {url.split('/')[-1]}")
+            except Exception as e:
+                print(f"  ✗ Failed: {url.split('/')[-1]} - {e}")
+                continue
+
+        return point_data_list
+
+    # Try to get real point data first
+    point_data_list = extract_raw_point_sequences(scraped_records)
+
+    def enrich_points_with_ta_statistics(point_data_list, scraped_records):
+        """Enrich basic point sequences with Tennis Abstract detailed statistics"""
+        import numpy as np
+
+        # Group scraped records by match and player
+        match_stats = {}
+        for record in scraped_records:
+            if record.get('data_type') not in ['pointlog']:  # Skip basic pointlog, use detailed stats
+                comp_id = record.get('composite_id')
+                player = record.get('Player_canonical')
+
+                if comp_id not in match_stats:
+                    match_stats[comp_id] = {}
+                if player not in match_stats[comp_id]:
+                    match_stats[comp_id][player] = {}
+
+                stat_name = record.get('stat_name', '')
+                stat_value = record.get('stat_value', 0)
+                match_stats[comp_id][player][stat_name] = stat_value
+
+        # Enrich each point with match statistics
+        enriched_points = []  # FIX: Initialize the list
+        for point in point_data_list:
+            match_id = point.get('match_id')
+            server = point.get('Svr')  # 1 or 2
+
+            # Get match statistics for this point's server
+            if match_id in match_stats:
+                players = list(match_stats[match_id].keys())
+                if len(players) >= 2:
+                    server_stats = match_stats[match_id][players[server - 1]] if server <= len(players) else {}
+
+                    # Add serve direction from TA stats
+                    wide_pct = server_stats.get('wide_pct', 0.3)
+                    body_pct = server_stats.get('body_pct', 0.3)
+                    t_pct = server_stats.get('t_pct', 0.4)
+
+                    # Add rally characteristics
+                    avg_rally = server_stats.get('avg_rally_length', 4)
+                    rally_winners = server_stats.get('winners_pct', 0.15)
+
+                    # Distribute stats to this point
+                    point.update({
+                        'serve_direction_wide': 1 if hash(f"{match_id}{point['Pt']}wide") % 100 < wide_pct * 100 else 0,
+                        'serve_direction_body': 1 if hash(f"{match_id}{point['Pt']}body") % 100 < body_pct * 100 else 0,
+                        'serve_direction_t': 1 if hash(f"{match_id}{point['Pt']}t") % 100 < t_pct * 100 else 0,
+                        'rally_length': max(1, int(avg_rally + np.random.normal(0, 2))),
+                        'is_rally_winner': 1 if hash(
+                            f"{match_id}{point['Pt']}winner") % 100 < rally_winners * 100 else 0,
+                        'first_serve_pct': server_stats.get('first_serve_pct', 0.65),
+                        'return_depth_deep': server_stats.get('deep_pct', 0.4)
+                    })
+
+            enriched_points.append(point)  # Add enriched point to list
+
+        return enriched_points  # Return the enriched list
+
+
+def train_ml_model(historical_data: pd.DataFrame, scraped_records: list = None, fast_mode: bool = True):
+    """Train the ML model pipeline"""
+
+    if scraped_records is None:
+        scraped_records = []
+
+    point_data, match_data = prepare_training_data_for_ml_model(historical_data, scraped_records)
+
+    pipeline = TennisModelPipeline(fast_mode=fast_mode)
+
+    print("Training ML model pipeline...")
+    feature_importance = pipeline.train(point_data, match_data)
+
+    model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
+    pipeline.save(model_path)
+
+    print(f"Model training complete. Saved to {model_path}")
+    return pipeline, feature_importance
+
+
+def predict_match_ml(player1: str, player2: str, tournament: str, surface: str = "Hard",
+                     best_of: int = 3, model_path: str = None) -> dict:
+    """Make ML-based match prediction"""
+
+    if model_path is None:
+        model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
+
+    pipeline = TennisModelPipeline()
+
+    if os.path.exists(model_path):
+        pipeline.load(model_path)
+    else:
+        print(f"No trained model found at {model_path}. Train model first.")
+        return {'win_probability': 0.5, 'confidence': 'LOW', 'error': 'No trained model'}
+
+    match_context = {
+        'surface': surface,
+        'best_of': best_of,
+        'is_grand_slam': tournament.lower() in ['wimbledon', 'french open', 'australian open', 'us open'],
+        'is_masters': 'masters' in tournament.lower() or 'atp 1000' in tournament.lower(),
+        'round_level': 4,
+        'elo_diff': 0,
+        'h2h_advantage': 0,
+        'data_quality_score': 0.7
+    }
+
+    prediction = pipeline.predict(match_context, best_of=best_of)
+
+    print(f"\nML-Based Prediction:")
+    print(f"P({player1} wins) = {prediction['win_probability']:.3f}")
+    print(f"P({player2} wins) = {1 - prediction['win_probability']:.3f}")
+    print(f"Confidence: {prediction['confidence']}")
+    print(f"Simulation component: {prediction['simulation_component']:.3f}")
+    print(f"Direct ML component: {prediction['direct_component']:.3f}")
+
+    return prediction
+
 
 # ============================================================================
 # MAIN EXECUTION BLOCK
@@ -3595,7 +2985,13 @@ if __name__ == "__main__":
         try:
             # Get scraped records for point-level data
             scraper = AutomatedTennisAbstractScraper()
-            scraped_records = scraper.automated_scraping_session(days_back=30, max_matches=50)
+            fresh_scraped = scraper.automated_scraping_session(days_back=30, max_matches=50)
+
+            if not fresh_scraped:
+                print("No fresh scrapes, extracting Tennis Abstract data from historical dataset...")
+                scraped_records = extract_ta_data_from_historical(hist)
+            else:
+                scraped_records = fresh_scraped
 
             # Train the model
             pipeline, feature_importance = train_ml_model(hist, scraped_records, fast_mode=args.fast_mode)
@@ -3640,7 +3036,6 @@ if __name__ == "__main__":
         print(f"🏆 P({args.player1} wins) = {prob:.3f}")
         print(f"🏆 P({args.player2} wins) = {1 - prob:.3f}")
 
-        # Add confidence assessment
         confidence = "High" if abs(prob - 0.5) > 0.2 else "Medium" if abs(prob - 0.5) > 0.1 else "Low"
         print(f"🎯 Prediction confidence: {confidence}")
 
