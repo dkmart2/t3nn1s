@@ -687,7 +687,6 @@ def load_cached_scraped_data():
     print(f"Loaded {len(scraped_data)} cached Tennis Abstract records")
     return scraped_data
 
-
 # ============================================================================
 # SYNTHETIC DATA GENERATION
 # ============================================================================
@@ -2507,6 +2506,192 @@ def extract_ta_data_from_historical(historical_data):
 
     return scraped_records
 
+def audit_data_pipeline(historical_data, jeff_data, defaults, scraped_records=None):
+    """Comprehensive audit of what data actually reaches the model"""
+    print("=== COMPREHENSIVE DATA AUDIT ===")
+
+    # 1. Historical Data Audit
+    print(f"\n1. HISTORICAL DATA:")
+    print(f"   Total matches: {len(historical_data):,}")
+    print(f"   Total columns: {len(historical_data.columns)}")
+
+    # Source breakdown
+    if 'source_rank' in historical_data.columns:
+        source_counts = historical_data['source_rank'].value_counts().sort_index()
+        source_map = {1: 'Tennis Abstract', 2: 'API-Tennis', 3: 'Tennis Data Files'}
+        for rank, count in source_counts.items():
+            print(f"   {source_map.get(rank, f'Source {rank}')}: {count:,} matches")
+
+    # Date range
+    if 'date' in historical_data.columns:
+        dates = pd.to_datetime(historical_data['date'], errors='coerce').dropna()
+        if len(dates) > 0:
+            print(f"   Date range: {dates.min().date()} to {dates.max().date()}")
+
+    # 2. Jeff Data Audit
+    print(f"\n2. JEFF SACKMANN DATA:")
+    for gender, data in jeff_data.items():
+        print(f"   {gender.title()}: {len(data)} datasets")
+        for dataset, df in data.items():
+            if isinstance(df, pd.DataFrame):
+                print(f"     {dataset}: {len(df)} records")
+
+    # 3. Feature Coverage Audit
+    print(f"\n3. FEATURE COVERAGE:")
+    jeff_cols = [col for col in historical_data.columns if col.startswith(('winner_', 'loser_'))]
+    ta_cols = [col for col in historical_data.columns if 'ta_' in col]
+    api_cols = [col for col in historical_data.columns if any(x in col for x in ['service_', 'return_', 'odds_'])]
+
+    print(f"   Jeff features: {len(jeff_cols)} columns")
+    print(f"   Tennis Abstract features: {len(ta_cols)} columns")
+    print(f"   API features: {len(api_cols)} columns")
+
+    # Feature completeness
+    if jeff_cols:
+        jeff_completeness = historical_data[jeff_cols].notna().mean().mean()
+        print(f"   Jeff feature completeness: {jeff_completeness:.1%}")
+
+    if ta_cols:
+        ta_completeness = historical_data[ta_cols].notna().mean().mean()
+        print(f"   TA feature completeness: {ta_completeness:.1%}")
+
+    # 4. Tennis Abstract Integration Audit
+    print(f"\n4. TENNIS ABSTRACT INTEGRATION:")
+    if scraped_records:
+        print(f"   Scraped records: {len(scraped_records):,}")
+        data_types = {}
+        for record in scraped_records:
+            dt = record.get('data_type', 'unknown')
+            data_types[dt] = data_types.get(dt, 0) + 1
+
+        for data_type, count in sorted(data_types.items()):
+            print(f"     {data_type}: {count:,} records")
+
+    # 5. Sample Data Quality Check
+    print(f"\n5. SAMPLE DATA QUALITY:")
+    sample_match = historical_data.iloc[0] if len(historical_data) > 0 else None
+    if sample_match is not None:
+        non_null_features = sample_match.notna().sum()
+        print(f"   Sample match features populated: {non_null_features}/{len(sample_match)}")
+
+        # Check for key features
+        key_features = ['winner_aces', 'loser_aces', 'winner_serve_pts', 'loser_serve_pts']
+        present_key_features = [f for f in key_features if f in historical_data.columns and sample_match[f] is not None]
+        print(f"   Key features present: {len(present_key_features)}/{len(key_features)}")
+
+    # 6. Data Loss Warning
+    print(f"\n6. POTENTIAL DATA LOSS POINTS:")
+    warnings = []
+
+    if len(ta_cols) == 0:
+        warnings.append("⚠️  No Tennis Abstract features found in historical data")
+
+    if 'source_rank' in historical_data.columns:
+        if len(historical_data[historical_data['source_rank'] == 1]) == 0:
+            warnings.append("⚠️  No Tennis Abstract matches (source_rank=1) in historical data")
+
+    if jeff_cols and jeff_completeness < 0.1:
+        warnings.append("⚠️  Very low Jeff feature completeness (<10%)")
+
+    if warnings:
+        for warning in warnings:
+            print(f"   {warning}")
+    else:
+        print("   ✅ No obvious data loss detected")
+
+    return {
+        'total_matches': len(historical_data),
+        'feature_count': len(historical_data.columns),
+        'jeff_features': len(jeff_cols),
+        'ta_features': len(ta_cols),
+        'api_features': len(api_cols),
+        'scraped_records': len(scraped_records) if scraped_records else 0
+    }
+
+
+def debug_ta_scraping():
+    """Debug why Tennis Abstract scraping is so low"""
+    print("=== DEBUGGING TENNIS ABSTRACT SCRAPING ===")
+
+    scraper = AutomatedTennisAbstractScraper()
+
+    # Check what URLs the scraper finds
+    start_date = date(2025, 6, 10)
+    end_date = date.today()
+
+    print(f"Searching Tennis Abstract URLs from {start_date} to {end_date}")
+
+    # Test URL discovery
+    urls = scraper.discover_match_urls(start_date, end_date, max_pages=200)
+    print(f"URLs discovered: {len(urls)}")
+
+    # Check cached URLs
+    cache_dir = Path("cache/tennis_abstract_cache")
+    scraped_urls_file = cache_dir / "scraped_urls.txt"
+
+    if scraped_urls_file.exists():
+        with open(scraped_urls_file, 'r') as f:
+            cached_urls = [line.strip() for line in f if line.strip()]
+        print(f"URLs in cache: {len(cached_urls)}")
+        print(f"New URLs to scrape: {len(set(urls) - set(cached_urls))}")
+    else:
+        print("No cached URLs file found")
+
+    # Check scraping success rate
+    print("\nTesting scraping on first 5 URLs...")
+    for i, url in enumerate(urls[:5]):
+        try:
+            data = scraper.scrape_comprehensive_match_data(url)
+            print(f"  {i + 1}. {url.split('/')[-1]}: {len(data)} records")
+        except Exception as e:
+            print(f"  {i + 1}. {url.split('/')[-1]}: FAILED - {e}")
+
+
+def debug_ta_integration():
+    """Debug why Tennis Abstract integration is failing"""
+    print("=== DEBUGGING TENNIS ABSTRACT INTEGRATION ===")
+
+    # Load current historical data
+    hist, _, _ = load_from_cache_with_scraping()
+    print(f"Current TA matches in historical data: {len(hist[hist['source_rank'] == 1])}")
+
+    # Get fresh scraped data
+    scraper = AutomatedTennisAbstractScraper()
+    fresh_scraped = scraper.automated_scraping_session(days_back=60, max_matches=100, force=True)
+    print(f"Fresh scraped records: {len(fresh_scraped)}")
+
+    if not fresh_scraped:
+        print("No fresh scraped data to integrate")
+        return
+
+    # Test integration step by step
+    print("\n1. Processing scraped data...")
+    processed_records = process_tennis_abstract_scraped_data(fresh_scraped)
+    print(f"Processed into {len(processed_records)} match records")
+
+    print("\n2. Testing match lookup...")
+    for i, (comp_id, match_players) in enumerate(list(processed_records.items())[:5]):
+        existing_match = hist[hist["composite_id"] == comp_id]
+        print(f"  {comp_id}: {'EXISTS' if not existing_match.empty else 'NEW'}")
+        print(f"    Players: {list(match_players.keys())}")
+
+    print("\n3. Running integration...")
+    hist_before = len(hist[hist['source_rank'] == 1])
+    enhanced_data = integrate_scraped_data_hybrid(hist, fresh_scraped)
+    hist_after = len(enhanced_data[enhanced_data['source_rank'] == 1])
+
+    print(f"TA matches before integration: {hist_before}")
+    print(f"TA matches after integration: {hist_after}")
+    print(f"Net change: {hist_after - hist_before}")
+
+    print("\n4. Integration issues:")
+    if hist_after - hist_before < len(processed_records) * 0.5:
+        print("⚠️  Most scraped matches not integrated")
+        print("⚠️  Possible composite_id mismatch")
+        print("⚠️  Check player name normalization")
+        print("⚠️  Check date formatting")
+    else:
+        print("✅ Integration working correctly")
 
 # ============================================================================
 # CACHE FUNCTIONS
@@ -3310,9 +3495,23 @@ if __name__ == "__main__":
     parser.add_argument("--train_model", action="store_true", help="Train the ML model")
     parser.add_argument("--use_ml_model", action="store_true", help="Use ML model for prediction")
     parser.add_argument("--fast_mode", action="store_true", help="Use fast training mode")
+    parser.add_argument("--test_data", action="store_true", help="Test data pipeline only")
     args = parser.parse_args()
 
     print("🎾 TENNIS MATCH PREDICTION SYSTEM 🎾\n")
+
+    # Handle test mode FIRST (before heavy data loading)
+    if args.test_data:
+        print("=== TESTING DATA PIPELINE ONLY ===")
+        hist, jeff_data, defaults = load_from_cache_with_scraping()
+        if hist is None:
+            hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=True, n_sample=100)
+
+        scraped_records = extract_ta_data_from_historical(hist)
+        audit_results = audit_data_pipeline(hist, jeff_data, defaults, scraped_records)
+        debug_ta_scraping()
+        debug_ta_integration()
+        exit(0)
 
     # Load or generate data with Tennis Abstract integration
     hist, jeff_data, defaults = load_from_cache_with_scraping()
