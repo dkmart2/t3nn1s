@@ -2647,6 +2647,159 @@ def transform_shot_types(ta_records):
     return output
 
 
+def transform_return_outcomes(ta_records):
+    """Transform TA return1/return2 tables to Jeff ReturnOutcomes format"""
+
+    jeff_return_columns = [
+        'return_attempts', 'return_winners', 'return_forced_errors', 'return_unforced_errors',
+        'return_winners_pct', 'return_forced_errors_pct', 'return_unforced_errors_pct',
+        'return_crosscourt_attempts', 'return_crosscourt_winners', 'return_crosscourt_errors',
+        'return_down_line_attempts', 'return_down_line_winners', 'return_down_line_errors',
+        'return_crosscourt_effectiveness', 'return_down_line_effectiveness',
+        'return_deep_attempts', 'return_deep_winners', 'return_deep_errors',
+        'return_shallow_attempts', 'return_shallow_winners', 'return_shallow_errors',
+        'return_deep_effectiveness', 'return_shallow_effectiveness',
+        'first_serve_return_attempts', 'first_serve_return_winners', 'first_serve_return_errors',
+        'second_serve_return_attempts', 'second_serve_return_winners', 'second_serve_return_errors',
+        'first_serve_return_effectiveness', 'second_serve_return_effectiveness',
+        'return_accuracy_index', 'return_aggression_index', 'return_consistency_index'
+    ]
+
+    def extract_return_stats(ta_records):
+        return_data = {}
+        return_records = [r for r in ta_records if any(x in r.get('data_type', '')
+                                                       for x in ['return1', 'return2', 'return', 'returning'])]
+
+        for record in return_records:
+            player = record.get('Player_canonical')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value', 0)
+
+            if player not in return_data:
+                return_data[player] = {}
+
+            return_data[player][stat_name] = stat_value
+
+        return return_data
+
+    return_stats = extract_return_stats(ta_records)
+    output = []
+    match_id = extract_match_id(ta_records)
+
+    for player, stats in return_stats.items():
+        record = {
+            'match_id': match_id,
+            'Player_canonical': player,
+            'context': 'Return_Outcomes'
+        }
+
+        # Map basic stats
+        record['return_attempts'] = stats.get('return_attempts', 0)
+        record['return_winners'] = stats.get('return_winners', 0)
+        record['return_forced_errors'] = stats.get('return_forced_errors', 0)
+        record['return_unforced_errors'] = stats.get('return_unforced_errors', 0)
+
+        # Calculate percentages
+        attempts = record['return_attempts']
+        if attempts > 0:
+            record['return_winners_pct'] = (record['return_winners'] / attempts * 100)
+            record['return_forced_errors_pct'] = (record['return_forced_errors'] / attempts * 100)
+            record['return_unforced_errors_pct'] = (record['return_unforced_errors'] / attempts * 100)
+        else:
+            record['return_winners_pct'] = 0
+            record['return_forced_errors_pct'] = 0
+            record['return_unforced_errors_pct'] = 0
+
+        # Calculate accuracy index
+        total_outcomes = record['return_winners'] + record['return_unforced_errors']
+        if total_outcomes > 0:
+            record['return_accuracy_index'] = (record['return_winners'] / total_outcomes * 100)
+        else:
+            record['return_accuracy_index'] = 0
+
+        # Set remaining columns to 0
+        for col in jeff_return_columns:
+            if col not in record:
+                record[col] = 0
+
+        output.append(record)
+
+    return output
+
+
+def transform_rally(ta_records):
+    """Transform TA rally tables to Jeff Rally format"""
+
+    jeff_rally_columns = [
+        'rally_0_4_server_won', 'rally_0_4_returner_won', 'rally_0_4_total',
+        'rally_5_8_server_won', 'rally_5_8_returner_won', 'rally_5_8_total',
+        'rally_9_plus_server_won', 'rally_9_plus_returner_won', 'rally_9_plus_total',
+        'rally_server_winners', 'rally_server_errors', 'rally_returner_winners', 'rally_returner_errors',
+        'rally_server_winners_pct', 'rally_server_errors_pct', 'rally_returner_winners_pct',
+        'rally_returner_errors_pct',
+        'avg_rally_length', 'longest_rally', 'shortest_rally',
+        'rally_dominance_server', 'rally_dominance_returner', 'rally_control_index'
+    ]
+
+    def extract_rally_stats(ta_records):
+        rally_data = {}
+        rally_records = [r for r in ta_records if any(x in r.get('data_type', '')
+                                                      for x in ['rallyoutcomes', 'rally', 'Rally'])]
+
+        for record in rally_records:
+            player = record.get('Player_canonical')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value', 0)
+
+            if player not in rally_data:
+                rally_data[player] = {}
+
+            rally_data[player][stat_name] = stat_value
+
+        return rally_data
+
+    rally_stats = extract_rally_stats(ta_records)
+    output = []
+    match_id = extract_match_id(ta_records)
+
+    for player, stats in rally_stats.items():
+        record = {
+            'match_id': match_id,
+            'Player_canonical': player,
+            'context': 'Rally_Outcomes'
+        }
+
+        # Map basic stats
+        record['rally_0_4_server_won'] = stats.get('0_4_server_won', 0)
+        record['rally_0_4_returner_won'] = stats.get('0_4_returner_won', 0)
+        record['rally_5_8_server_won'] = stats.get('5_8_server_won', 0)
+        record['rally_server_winners'] = stats.get('server_winners', 0)
+        record['rally_server_errors'] = stats.get('server_errors', 0)
+        record['avg_rally_length'] = stats.get('avg_rally', 0)
+
+        # Calculate totals
+        record['rally_0_4_total'] = record['rally_0_4_server_won'] + record['rally_0_4_returner_won']
+
+        # Calculate percentages
+        server_total = record['rally_server_winners'] + record['rally_server_errors']
+        if server_total > 0:
+            record['rally_server_winners_pct'] = (record['rally_server_winners'] / server_total * 100)
+            record['rally_server_errors_pct'] = (record['rally_server_errors'] / server_total * 100)
+        else:
+            record['rally_server_winners_pct'] = 0
+            record['rally_server_errors_pct'] = 0
+
+        # Set remaining columns to 0
+        for col in jeff_rally_columns:
+            if col not in record:
+                record[col] = 0
+
+        output.append(record)
+
+    return output
+
+#========================#
+
 def integrate_scraped_data_hybrid(historical_data, scraped_records):
     """Hybrid: enhance existing matches, add new TA matches if not in API"""
     if not scraped_records:
