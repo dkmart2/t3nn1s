@@ -2798,6 +2798,444 @@ def transform_rally(ta_records):
 
     return output
 
+
+def transform_serve_direction(ta_records):
+    """Transform TA serve direction tables to Jeff ServeDirection format"""
+
+    jeff_serve_direction_columns = [
+        'serve_wide_attempts', 'serve_wide_won', 'serve_wide_pct', 'serve_wide_effectiveness',
+        'serve_t_attempts', 'serve_t_won', 'serve_t_pct', 'serve_t_effectiveness',
+        'serve_body_attempts', 'serve_body_won', 'serve_body_pct', 'serve_body_effectiveness',
+        'first_serve_wide', 'first_serve_t', 'first_serve_body',
+        'second_serve_wide', 'second_serve_t', 'second_serve_body',
+        'serve_wide_aces', 'serve_t_aces', 'serve_body_aces',
+        'serve_wide_winners', 'serve_t_winners', 'serve_body_winners',
+        'serve_wide_errors', 'serve_t_errors', 'serve_body_errors',
+        'serve_direction_variety', 'serve_direction_dominance', 'optimal_direction_index'
+    ]
+
+    def extract_serve_direction_stats(ta_records):
+        direction_data = {}
+        direction_records = [r for r in ta_records if any(x in r.get('data_type', '')
+                                                          for x in
+                                                          ['serve1', 'serve2', 'serve_direction', 'serveNeut'])]
+
+        for record in direction_records:
+            player = record.get('Player_canonical')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value', 0)
+
+            if player not in direction_data:
+                direction_data[player] = {}
+
+            direction_data[player][stat_name] = stat_value
+
+        return direction_data
+
+    direction_stats = extract_serve_direction_stats(ta_records)
+    output = []
+    match_id = extract_match_id(ta_records)
+
+    for player, stats in direction_stats.items():
+        record = {
+            'match_id': match_id,
+            'Player_canonical': player,
+            'context': 'Serve_Direction'
+        }
+
+        # Map basic stats
+        record['serve_wide_attempts'] = stats.get('wide_attempts', 0)
+        record['serve_wide_won'] = stats.get('wide_won', 0)
+        record['serve_t_attempts'] = stats.get('t_attempts', 0)
+        record['serve_t_won'] = stats.get('t_won', 0)
+        record['serve_body_attempts'] = stats.get('body_attempts', 0)
+        record['serve_body_won'] = stats.get('body_won', 0)
+
+        # Calculate percentages
+        total_serves = record['serve_wide_attempts'] + record['serve_t_attempts'] + record['serve_body_attempts']
+        if total_serves > 0:
+            record['serve_wide_pct'] = (record['serve_wide_attempts'] / total_serves * 100)
+            record['serve_t_pct'] = (record['serve_t_attempts'] / total_serves * 100)
+            record['serve_body_pct'] = (record['serve_body_attempts'] / total_serves * 100)
+        else:
+            record['serve_wide_pct'] = 0
+            record['serve_t_pct'] = 0
+            record['serve_body_pct'] = 0
+
+        # Calculate effectiveness
+        if record['serve_wide_attempts'] > 0:
+            record['serve_wide_effectiveness'] = (record['serve_wide_won'] / record['serve_wide_attempts'] * 100)
+        else:
+            record['serve_wide_effectiveness'] = 0
+
+        if record['serve_t_attempts'] > 0:
+            record['serve_t_effectiveness'] = (record['serve_t_won'] / record['serve_t_attempts'] * 100)
+        else:
+            record['serve_t_effectiveness'] = 0
+
+        # Set remaining columns to 0
+        for col in jeff_serve_direction_columns:
+            if col not in record:
+                record[col] = 0
+
+        output.append(record)
+
+    return output
+
+
+def transform_shot_dir_outcomes(ta_records):
+    """Transform TA shot direction outcome tables to Jeff ShotDirOutcomes format"""
+
+    jeff_shot_dir_outcomes_columns = [
+        'crosscourt_attempts', 'crosscourt_winners', 'crosscourt_errors', 'crosscourt_effectiveness',
+        'down_line_attempts', 'down_line_winners', 'down_line_errors', 'down_line_effectiveness',
+        'inside_out_attempts', 'inside_out_winners', 'inside_out_errors', 'inside_out_effectiveness',
+        'inside_in_attempts', 'inside_in_winners', 'inside_in_errors', 'inside_in_effectiveness',
+        'fh_crosscourt_attempts', 'fh_crosscourt_winners', 'fh_crosscourt_errors', 'fh_crosscourt_effectiveness',
+        'fh_down_line_attempts', 'fh_down_line_winners', 'fh_down_line_errors', 'fh_down_line_effectiveness',
+        'bh_crosscourt_attempts', 'bh_crosscourt_winners', 'bh_crosscourt_errors', 'bh_crosscourt_effectiveness',
+        'bh_down_line_attempts', 'bh_down_line_winners', 'bh_down_line_errors', 'bh_down_line_effectiveness',
+        'crosscourt_pct', 'down_line_pct', 'inside_out_pct', 'inside_in_pct',
+        'directional_accuracy', 'directional_aggression', 'directional_consistency'
+    ]
+
+    def extract_shot_dir_outcomes_stats(ta_records):
+        outcomes_data = {}
+        outcomes_records = [r for r in ta_records if any(x in r.get('data_type', '')
+                                                         for x in ['shotdir1', 'shotdir2', 'shot_dir_outcomes',
+                                                                   'direction_outcomes'])]
+
+        for record in outcomes_records:
+            player = record.get('Player_canonical')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value', 0)
+
+            if player not in outcomes_data:
+                outcomes_data[player] = {}
+
+            outcomes_data[player][stat_name] = stat_value
+
+        return outcomes_data
+
+    outcomes_stats = extract_shot_dir_outcomes_stats(ta_records)
+    output = []
+    match_id = extract_match_id(ta_records)
+
+    for player, stats in outcomes_stats.items():
+        record = {
+            'match_id': match_id,
+            'Player_canonical': player,
+            'context': 'Shot_Dir_Outcomes'
+        }
+
+        # Map basic stats
+        record['crosscourt_attempts'] = stats.get('crosscourt_attempts', 0)
+        record['crosscourt_winners'] = stats.get('crosscourt_winners', 0)
+        record['crosscourt_errors'] = stats.get('crosscourt_errors', 0)
+        record['down_line_attempts'] = stats.get('down_line_attempts', 0)
+        record['down_line_winners'] = stats.get('down_line_winners', 0)
+        record['down_line_errors'] = stats.get('down_line_errors', 0)
+        record['fh_crosscourt_winners'] = stats.get('fh_crosscourt_winners', 0)
+        record['fh_down_line_winners'] = stats.get('fh_down_line_winners', 0)
+
+        # Calculate total attempts
+        total_attempts = record['crosscourt_attempts'] + record['down_line_attempts']
+
+        # Calculate percentages
+        if total_attempts > 0:
+            record['crosscourt_pct'] = (record['crosscourt_attempts'] / total_attempts * 100)
+            record['down_line_pct'] = (record['down_line_attempts'] / total_attempts * 100)
+        else:
+            record['crosscourt_pct'] = 0
+            record['down_line_pct'] = 0
+
+        # Calculate effectiveness
+        if record['crosscourt_attempts'] > 0:
+            cc_total_outcomes = record['crosscourt_winners'] + record['crosscourt_errors']
+            record['crosscourt_effectiveness'] = (
+                        record['crosscourt_winners'] / cc_total_outcomes * 100) if cc_total_outcomes > 0 else 0
+        else:
+            record['crosscourt_effectiveness'] = 0
+
+        if record['down_line_attempts'] > 0:
+            dl_total_outcomes = record['down_line_winners'] + record['down_line_errors']
+            record['down_line_effectiveness'] = (
+                        record['down_line_winners'] / dl_total_outcomes * 100) if dl_total_outcomes > 0 else 0
+        else:
+            record['down_line_effectiveness'] = 0
+
+        # Set remaining columns to 0
+        for col in jeff_shot_dir_outcomes_columns:
+            if col not in record:
+                record[col] = 0
+
+        output.append(record)
+
+    return output
+
+
+def transform_net_points(ta_records):
+    """Transform TA net points tables to Jeff NetPoints format"""
+
+    jeff_net_points_columns = [
+        'net_points_attempted', 'net_points_won', 'net_points_lost', 'net_points_won_pct',
+        'approach_shots', 'approach_shots_won', 'approach_shots_lost', 'approach_effectiveness',
+        'volleys_attempted', 'volleys_won', 'volleys_lost', 'volley_effectiveness',
+        'overheads_attempted', 'overheads_won', 'overheads_lost', 'overhead_effectiveness',
+        'net_winners', 'net_errors', 'net_forced_errors', 'net_unforced_errors',
+        'passed_at_net', 'passing_shots_against', 'passing_shot_defense_pct',
+        'fh_volleys', 'bh_volleys', 'fh_volley_winners', 'bh_volley_winners',
+        'net_game_dominance', 'net_tactical_advantage', 'net_positioning_effectiveness'
+    ]
+
+    def extract_net_points_stats(ta_records):
+        net_data = {}
+        net_records = [r for r in ta_records if any(x in r.get('data_type', '')
+                                                    for x in ['netpts1', 'netpts2', 'net_points', 'netpoints'])]
+
+        for record in net_records:
+            player = record.get('Player_canonical')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value', 0)
+
+            if player not in net_data:
+                net_data[player] = {}
+
+            net_data[player][stat_name] = stat_value
+
+        return net_data
+
+    net_stats = extract_net_points_stats(ta_records)
+    output = []
+    match_id = extract_match_id(ta_records)
+
+    for player, stats in net_stats.items():
+        record = {
+            'match_id': match_id,
+            'Player_canonical': player,
+            'context': 'Net_Points'
+        }
+
+        # Map basic stats
+        record['net_points_attempted'] = stats.get('net_points_attempted', 0)
+        record['net_points_won'] = stats.get('net_points_won', 0)
+        record['net_points_lost'] = stats.get('net_points_lost', 0)
+        record['approach_shots'] = stats.get('approach_shots', 0)
+        record['approach_shots_won'] = stats.get('approach_shots_won', 0)
+        record['volleys_attempted'] = stats.get('volleys_attempted', 0)
+        record['volleys_won'] = stats.get('volleys_won', 0)
+        record['net_winners'] = stats.get('net_winners', 0)
+        record['net_errors'] = stats.get('net_errors', 0)
+        record['passed_at_net'] = stats.get('passed_at_net', 0)
+
+        # Calculate percentages
+        if record['net_points_attempted'] > 0:
+            record['net_points_won_pct'] = (record['net_points_won'] / record['net_points_attempted'] * 100)
+        else:
+            record['net_points_won_pct'] = 0
+
+        if record['approach_shots'] > 0:
+            record['approach_effectiveness'] = (record['approach_shots_won'] / record['approach_shots'] * 100)
+        else:
+            record['approach_effectiveness'] = 0
+
+        if record['volleys_attempted'] > 0:
+            record['volley_effectiveness'] = (record['volleys_won'] / record['volleys_attempted'] * 100)
+        else:
+            record['volley_effectiveness'] = 0
+
+        # Set remaining columns to 0
+        for col in jeff_net_points_columns:
+            if col not in record:
+                record[col] = 0
+
+        output.append(record)
+
+    return output
+
+
+def transform_sv_break_split(ta_records):
+    """Transform TA serve/break data to Jeff SvBreakSplit format"""
+
+    jeff_sv_break_split_columns = [
+        'service_games_played', 'service_games_won', 'service_games_lost', 'service_hold_pct',
+        'break_points_faced', 'break_points_saved', 'break_points_saved_pct',
+        'break_points_lost', 'break_points_lost_pct',
+        'deuce_games', 'deuce_games_won', 'deuce_games_lost', 'deuce_games_won_pct',
+        'love_holds', 'fifteen_holds', 'thirty_holds', 'forty_holds', 'deuce_holds',
+        'easy_holds_pct', 'pressure_holds_pct', 'clutch_holds_pct',
+        'first_serve_hold_pct', 'second_serve_hold_pct',
+        'service_dominance_index', 'hold_consistency', 'pressure_resistance'
+    ]
+
+    def extract_sv_break_split_stats(ta_records):
+        split_data = {}
+        split_records = [r for r in ta_records if any(x in r.get('data_type', '')
+                                                      for x in ['serve1', 'serve2', 'keypoints', 'overview'])]
+
+        for record in split_records:
+            player = record.get('Player_canonical')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value', 0)
+
+            if player not in split_data:
+                split_data[player] = {}
+
+            split_data[player][stat_name] = stat_value
+
+        return split_data
+
+    split_stats = extract_sv_break_split_stats(ta_records)
+    output = []
+    match_id = extract_match_id(ta_records)
+
+    for player, stats in split_stats.items():
+        record = {
+            'match_id': match_id,
+            'Player_canonical': player,
+            'context': 'Sv_Break_Split'
+        }
+
+        # Map basic stats
+        record['service_games_played'] = stats.get('service_games_played', 0)
+        record['service_games_won'] = stats.get('service_games_won', 0)
+        record['service_games_lost'] = stats.get('service_games_lost', 0)
+        record['break_points_faced'] = stats.get('break_points_faced', 0)
+        record['break_points_saved'] = stats.get('break_points_saved', 0)
+        record['deuce_games'] = stats.get('deuce_games', 0)
+        record['deuce_games_won'] = stats.get('deuce_games_won', 0)
+        record['love_holds'] = stats.get('love_holds', 0)
+        record['easy_holds'] = stats.get('easy_holds', 0)
+
+        # Calculate derived stats
+        if record['service_games_played'] > 0:
+            record['service_hold_pct'] = (record['service_games_won'] / record['service_games_played'] * 100)
+        else:
+            record['service_hold_pct'] = 0
+
+        if record['break_points_faced'] > 0:
+            record['break_points_saved_pct'] = (record['break_points_saved'] / record['break_points_faced'] * 100)
+            record['break_points_lost'] = record['break_points_faced'] - record['break_points_saved']
+            record['break_points_lost_pct'] = (record['break_points_lost'] / record['break_points_faced'] * 100)
+        else:
+            record['break_points_saved_pct'] = 0
+            record['break_points_lost'] = 0
+            record['break_points_lost_pct'] = 0
+
+        if record['deuce_games'] > 0:
+            record['deuce_games_won_pct'] = (record['deuce_games_won'] / record['deuce_games'] * 100)
+        else:
+            record['deuce_games_won_pct'] = 0
+
+        # Set remaining columns to 0
+        for col in jeff_sv_break_split_columns:
+            if col not in record:
+                record[col] = 0
+
+        output.append(record)
+
+    return output
+
+
+def transform_sv_break_total(ta_records):
+    """Transform TA serve/break data to Jeff SvBreakTotal format"""
+
+    jeff_sv_break_total_columns = [
+        'total_service_points', 'total_service_points_won', 'total_service_points_lost', 'total_service_points_won_pct',
+        'total_return_points', 'total_return_points_won', 'total_return_points_lost', 'total_return_points_won_pct',
+        'total_break_points_faced', 'total_break_points_saved', 'total_break_points_saved_pct',
+        'total_break_points_created', 'total_break_points_converted', 'total_break_points_converted_pct',
+        'total_service_games', 'total_service_games_won', 'total_service_games_lost', 'total_service_hold_pct',
+        'total_return_games', 'total_return_games_won', 'total_return_games_lost', 'total_break_pct',
+        'net_break_differential', 'break_point_efficiency', 'service_dominance_total',
+        'return_aggression_total', 'pressure_point_performance', 'clutch_factor_total'
+    ]
+
+    def extract_sv_break_total_stats(ta_records):
+        total_data = {}
+        total_records = [r for r in ta_records if any(x in r.get('data_type', '')
+                                                      for x in ['overview', 'serve1', 'serve2', 'return1', 'return2',
+                                                                'keypoints'])]
+
+        for record in total_records:
+            player = record.get('Player_canonical')
+            stat_name = record.get('stat_name')
+            stat_value = record.get('stat_value', 0)
+
+            if player not in total_data:
+                total_data[player] = {}
+
+            total_data[player][stat_name] = stat_value
+
+        return total_data
+
+    total_stats = extract_sv_break_total_stats(ta_records)
+    output = []
+    match_id = extract_match_id(ta_records)
+
+    for player, stats in total_stats.items():
+        record = {
+            'match_id': match_id,
+            'Player_canonical': player,
+            'context': 'Sv_Break_Total'
+        }
+
+        # Map basic stats
+        record['total_service_points'] = stats.get('total_service_points', 0)
+        record['total_service_points_won'] = stats.get('total_service_points_won', 0)
+        record['total_return_points'] = stats.get('total_return_points', 0)
+        record['total_return_points_won'] = stats.get('total_return_points_won', 0)
+        record['total_break_points_faced'] = stats.get('total_break_points_faced', 0)
+        record['total_break_points_saved'] = stats.get('total_break_points_saved', 0)
+        record['total_break_points_created'] = stats.get('total_break_points_created', 0)
+        record['total_break_points_converted'] = stats.get('total_break_points_converted', 0)
+        record['total_service_games'] = stats.get('total_service_games', 0)
+        record['total_service_games_won'] = stats.get('total_service_games_won', 0)
+
+        # Calculate derived stats
+        if record['total_service_points'] > 0:
+            record['total_service_points_won_pct'] = (
+                        record['total_service_points_won'] / record['total_service_points'] * 100)
+        else:
+            record['total_service_points_won_pct'] = 0
+
+        if record['total_return_points'] > 0:
+            record['total_return_points_won_pct'] = (
+                        record['total_return_points_won'] / record['total_return_points'] * 100)
+        else:
+            record['total_return_points_won_pct'] = 0
+
+        if record['total_break_points_faced'] > 0:
+            record['total_break_points_saved_pct'] = (
+                        record['total_break_points_saved'] / record['total_break_points_faced'] * 100)
+        else:
+            record['total_break_points_saved_pct'] = 0
+
+        if record['total_break_points_created'] > 0:
+            record['total_break_points_converted_pct'] = (
+                        record['total_break_points_converted'] / record['total_break_points_created'] * 100)
+        else:
+            record['total_break_points_converted_pct'] = 0
+
+        if record['total_service_games'] > 0:
+            record['total_service_hold_pct'] = (record['total_service_games_won'] / record['total_service_games'] * 100)
+        else:
+            record['total_service_hold_pct'] = 0
+
+        # Calculate break differential
+        breaks_achieved = record['total_break_points_converted']
+        breaks_suffered = record['total_break_points_faced'] - record['total_break_points_saved']
+        record['net_break_differential'] = breaks_achieved - breaks_suffered
+
+        # Set remaining columns to 0
+        for col in jeff_sv_break_total_columns:
+            if col not in record:
+                record[col] = 0
+
+        output.append(record)
+
+    return output
+
 #========================#
 
 def integrate_scraped_data_hybrid(historical_data, scraped_records):
