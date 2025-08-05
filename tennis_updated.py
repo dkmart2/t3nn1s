@@ -75,26 +75,6 @@ CHARTING_INDEX_CSV = (
     "tennis_charting/master/charting_match_index.csv"
 )
 
-
-# ============================================================================
-# EXCEPTIONS
-# ============================================================================
-
-class TennisDataError(Exception):
-    """Base exception for tennis data pipeline"""
-    pass
-
-
-class DataIngestionError(TennisDataError):
-    """Data ingestion errors"""
-    pass
-
-
-class APIError(TennisDataError):
-    """API-related errors"""
-    pass
-
-
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -1920,8 +1900,6 @@ class JeffNotationParser:
         }
 
 def extract_jeff_notation_features(player_canonical, gender, jeff_data):
-    """Extract features from Jeff's notation for a specific player"""
-    player_canonical = canonical_player(player_canonical)
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'points_2020s' not in jeff_data[gender_key]:
@@ -5008,98 +4986,35 @@ if __name__ == "__main__":
 
     print(f"✓ Dataset complete: {hist.shape}")
     print(f"✓ Jeff features: {len([c for c in hist.columns if 'jeff_' in c])}")
-    print(f"✓ Saved to cache for model.py")jeff_data = load_jeff_comprehensive_data()
+    print(f"✓ Saved to cache for model.py")
 
-print('MEN FILES LOADED:')
-for i, (key, df) in enumerate(jeff_data['men'].items(), 1):
-    print(f'{i:2d}. {key}: {len(df)} records')
 
-print('\nWOMEN FILES LOADED:')
-for i, (key, df) in enumerate(jeff_data['women'].items(), 1):
-    print(f'{i:2d}. {key}: {len(df)} records')
+def trace_jeff_usage():
+    print("=== TRACING JEFF USAGE ===")
 
-print(f'\nTotal men files: {len(jeff_data["men"])}')
-print(f'Total women files: {len(jeff_data["women"])}')
-"
-2025-08-05 03:07:50,101 INFO:root:load_jeff_comprehensive_data:420: Stored original match_ids for men matches
-2025-08-05 03:07:50,101 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-matches.csv: 6639 records
-2025-08-05 03:07:50,630 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-points-2020s.csv: 461897 records
-2025-08-05 03:07:50,735 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-Overview.csv: 49928 records
-2025-08-05 03:07:50,806 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ServeBasics.csv: 39779 records
-2025-08-05 03:07:51,241 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ReturnOutcomes.csv: 271988 records
-2025-08-05 03:07:51,639 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ReturnDepth.csv: 236950 records
-2025-08-05 03:07:51,737 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-KeyPointsServe.csv: 53048 records
-2025-08-05 03:07:51,826 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-KeyPointsReturn.csv: 53048 records
-2025-08-05 03:07:51,920 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-NetPoints.csv: 52101 records
-2025-08-05 03:07:51,997 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-Rally.csv: 84877 records
-2025-08-05 03:07:52,074 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ServeDirection.csv: 39779 records
-2025-08-05 03:07:52,131 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ServeInfluence.csv: 26527 records
-2025-08-05 03:07:52,224 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ShotDirection.csv: 52639 records
-2025-08-05 03:07:52,475 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ShotDirOutcomes.csv: 153266 records
-2025-08-05 03:07:52,951 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ShotTypes.csv: 308946 records
-2025-08-05 03:07:53,033 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-SnV.csv: 44578 records
-2025-08-05 03:07:53,272 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-SvBreakSplit.csv: 144684 records
-2025-08-05 03:07:53,493 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-SvBreakTotal.csv: 144684 records
-2025-08-05 03:07:53,501 INFO:root:load_jeff_comprehensive_data:420: Stored original match_ids for women matches
-2025-08-05 03:07:53,501 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-matches.csv: 3491 records
-2025-08-05 03:07:53,729 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-points-2020s.csv: 263897 records
-2025-08-05 03:07:53,775 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-Overview.csv: 22998 records
-2025-08-05 03:07:53,812 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ServeBasics.csv: 20898 records
-2025-08-05 03:07:54,037 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ReturnOutcomes.csv: 144687 records
-2025-08-05 03:07:54,226 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ReturnDepth.csv: 124187 records
-2025-08-05 03:07:54,276 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-KeyPointsServe.csv: 27856 records
-2025-08-05 03:07:54,322 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-KeyPointsReturn.csv: 27854 records
-2025-08-05 03:07:54,371 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-NetPoints.csv: 26628 records
-2025-08-05 03:07:54,413 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-Rally.csv: 44755 records
-2025-08-05 03:07:54,454 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ServeDirection.csv: 20898 records
-2025-08-05 03:07:54,493 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ServeInfluence.csv: 13932 records
-2025-08-05 03:07:54,537 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ShotDirection.csv: 27408 records
-2025-08-05 03:07:54,654 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ShotDirOutcomes.csv: 76060 records
-2025-08-05 03:07:54,889 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ShotTypes.csv: 152698 records
-2025-08-05 03:07:54,903 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-SnV.csv: 5104 records
-2025-08-05 03:07:55,028 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-SvBreakSplit.csv: 76301 records
-2025-08-05 03:07:55,149 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-SvBreakTotal.csv: 76301 records
-MEN FILES LOADED:
- 1. matches: 6639 records
- 2. points_2020s: 461897 records
- 3. overview: 49928 records
- 4. serve_basics: 39779 records
- 5. return_outcomes: 271988 records
- 6. return_depth: 236950 records
- 7. key_points_serve: 53048 records
- 8. key_points_return: 53048 records
- 9. net_points: 52101 records
-10. rally: 84877 records
-11. serve_direction: 39779 records
-12. serve_influence: 26527 records
-13. shot_direction: 52639 records
-14. shot_dir_outcomes: 153266 records
-15. shot_types: 308946 records
-16. snv: 44578 records
-17. sv_break_split: 144684 records
-18. sv_break_total: 144684 records
+    # Check what extraction functions exist
+    import inspect
+    current_module = inspect.currentframe().f_globals
 
-WOMEN FILES LOADED:
- 1. matches: 3491 records
- 2. points_2020s: 263897 records
- 3. overview: 22998 records
- 4. serve_basics: 20898 records
- 5. return_outcomes: 144687 records
- 6. return_depth: 124187 records
- 7. key_points_serve: 27856 records
- 8. key_points_return: 27854 records
- 9. net_points: 26628 records
-10. rally: 44755 records
-11. serve_direction: 20898 records
-12. serve_influence: 13932 records
-13. shot_direction: 27408 records
-14. shot_dir_outcomes: 76060 records
-15. shot_types: 152698 records
-16. snv: 5104 records
-17. sv_break_split: 76301 records
-18. sv_break_total: 76301 records
-Traceback (most recent call last):
-  File "<string>", line 14, in <module>
-    print(f'\nTotal men files: {len(jeff_data[men])}')
-                                              ^^^
-NameError: name 'men' is not defined. Did you mean: 'len'?
+    jeff_functions = []
+    for name, obj in current_module.items():
+        if 'jeff' in name.lower() and callable(obj):
+            jeff_functions.append(name)
+
+    print(f"Jeff-related functions found: {jeff_functions}")
+
+    # Check if functions exist for each file type
+    file_types = ['overview', 'serve_basics', 'key_points_serve', 'net_points',
+                  'rally', 'serve_direction', 'points_2020s']
+
+    for file_type in file_types:
+        func_name = f"extract_{file_type}_features"
+        if func_name in current_module:
+            print(f"✓ {func_name} exists")
+        else:
+            print(f"❌ {func_name} missing")
+
+
+# Add at bottom of file:
+if __name__ == "__main__":
+    trace_jeff_usage()
