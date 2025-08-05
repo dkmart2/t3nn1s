@@ -2,6 +2,10 @@
 # TENNIS DATA PIPELINE - COMPREHENSIVE TENNIS PREDICTION SYSTEM
 # ============================================================================
 
+# ============================================================================
+# IMPORTS / CONFIGURATION
+# ============================================================================
+
 import logging
 import numpy as np
 import pandas as pd
@@ -484,6 +488,10 @@ def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
 
     return defaults
 
+
+# ============================================================================
+# JEFF FILE EXTRACTION
+# ============================================================================
 
 def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, weighted_defaults=None):
     """Enhanced feature extraction with actual Jeff data processing"""
@@ -1980,6 +1988,10 @@ def extract_jeff_notation_features(player_canonical, gender, jeff_data):
     )
 
     return features
+
+# ============================================================================
+# DATA INTEGRATION
+# ============================================================================
 
 def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
     """Add Jeff notation features to the historical dataset"""
@@ -4389,7 +4401,7 @@ def integrate_api_tennis_data_incremental(historical_data):
 
 
 # ============================================================================
-# MAIN DATA GENERATION FUNCTION
+# DATA PROCESSING
 # ============================================================================
 
 def generate_comprehensive_historical_data(fast=True, n_sample=500, use_synthetic=False):
@@ -4757,136 +4769,6 @@ def load_from_cache_direct():
         print(f"Error loading cache: {e}")
     return None
 
-
-# ============================================================================
-# PHASE 1: SET SCORE DATA EXTRACTION - Add to tennis_updated.py
-# ============================================================================
-
-import re
-from typing import Tuple, Optional, Dict, List
-import numpy as np
-import pandas as pd
-
-
-def calculate_service_dominance_gap(match_row) -> float:
-    """
-    Calculate the service dominance differential - key predictor of set margins
-
-    Service dominance = (Aces + Service Winners) / Total Service Points
-    Gap = Winner's dominance - Loser's dominance
-    """
-    # Winner's service dominance
-    winner_aces = getattr(match_row, 'winner_aces', 0) or 0
-    winner_serve_pts = getattr(match_row, 'winner_serve_pts', 80) or 80
-    winner_service_winners = getattr(match_row, 'winner_service_winners', winner_aces * 1.5) or winner_aces * 1.5
-
-    winner_dominance = (winner_aces + winner_service_winners) / winner_serve_pts if winner_serve_pts > 0 else 0.1
-
-    # Loser's service dominance
-    loser_aces = getattr(match_row, 'loser_aces', 0) or 0
-    loser_serve_pts = getattr(match_row, 'loser_serve_pts', 80) or 80
-    loser_service_winners = getattr(match_row, 'loser_service_winners', loser_aces * 1.5) or loser_aces * 1.5
-
-    loser_dominance = (loser_aces + loser_service_winners) / loser_serve_pts if loser_serve_pts > 0 else 0.1
-
-    return winner_dominance - loser_dominance
-
-
-def calculate_break_point_efficiency(match_row, player_prefix: str) -> float:
-    """
-    Calculate break point conversion/save rate - critical for set scores
-    """
-    if player_prefix == 'winner':
-        # Break points converted (return game)
-        bp_converted = getattr(match_row, 'winner_bp_converted', 0) or 0
-        bp_opportunities = getattr(match_row, 'winner_bp_opportunities', 0) or 0
-
-        if bp_opportunities > 0:
-            return bp_converted / bp_opportunities
-        else:
-            # Estimate from return points won
-            return_pts_won = getattr(match_row, 'winner_return_pts_won', 25) or 25
-            return_pts_total = getattr(match_row, 'winner_return_pts', 75) or 75
-            return return_pts_won / return_pts_total if return_pts_total > 0 else 0.33
-
-    else:  # loser
-        # Break points saved (service game)
-        bp_saved = getattr(match_row, 'loser_bp_saved', 0) or 0
-        bp_faced = getattr(match_row, 'loser_bp_faced', 0) or 0
-
-        if bp_faced > 0:
-            return bp_saved / bp_faced
-        else:
-            # Estimate from service points won
-            serve_pts_won = getattr(match_row, 'loser_serve_pts_won', 50) or 50
-            serve_pts_total = getattr(match_row, 'loser_serve_pts', 80) or 80
-            return serve_pts_won / serve_pts_total if serve_pts_total > 0 else 0.65
-
-
-def get_real_elo_diff(match_row) -> float:
-    """
-    Get actual ELO difference - FIXED VERSION
-    TODO: Replace with Tennis Abstract ELO scraping
-    """
-    # Current broken version uses random numbers
-    fake_elo_diff = getattr(match_row, 'elo_diff', 0)
-
-    # Use ranking as ELO proxy for now (will be replaced)
-    winner_rank = getattr(match_row, 'WRank', None) or getattr(match_row, 'p1_ranking', 50)
-    loser_rank = getattr(match_row, 'LRank', None) or getattr(match_row, 'p2_ranking', 50)
-
-    if winner_rank and loser_rank:
-        # Convert ranking difference to ELO difference approximation
-        rank_diff = loser_rank - winner_rank  # Higher rank = lower number
-        # Rough conversion: 10 ranking positions ≈ 25 ELO points
-        elo_diff_estimate = rank_diff * 2.5
-        return elo_diff_estimate
-
-    return fake_elo_diff
-
-
-def calculate_recent_form_variance(match_row) -> float:
-    """
-    Calculate form consistency - affects set score predictability
-    Lower variance = more predictable outcomes
-    """
-    # Use available recent performance indicators
-    winner_last10 = getattr(match_row, 'winner_last10_wins', 5) or 5
-    loser_last10 = getattr(match_row, 'loser_last10_wins', 5) or 5
-
-    # Convert to win percentages
-    winner_form = winner_last10 / 10
-    loser_form = loser_last10 / 10
-
-    # Form variance (higher = less predictable)
-    # Perfect form (1.0 or 0.0) = low variance, mixed form (0.5) = high variance
-    winner_variance = 4 * winner_form * (1 - winner_form)  # Max at 0.5
-    loser_variance = 4 * loser_form * (1 - loser_form)
-
-    return (winner_variance + loser_variance) / 2
-
-
-
-
-def calculate_data_completeness(match_row) -> float:
-    """
-    Score the completeness of match data (0-1)
-    Higher score = more reliable for set score prediction
-    """
-    required_fields = [
-        'winner_aces', 'loser_aces', 'winner_serve_pts', 'loser_serve_pts',
-        'winner_return_pts_won', 'loser_return_pts_won', 'WRank', 'LRank'
-    ]
-
-    present_fields = 0
-    for field in required_fields:
-        value = getattr(match_row, field, None)
-        if value is not None and not pd.isna(value) and value != 0:
-            present_fields += 1
-
-    return present_fields / len(required_fields)
-
-
 # ============================================================================
 # FEATURE EXTRACTION HELPERS
 # ============================================================================
@@ -4987,34 +4869,3 @@ if __name__ == "__main__":
     print(f"✓ Dataset complete: {hist.shape}")
     print(f"✓ Jeff features: {len([c for c in hist.columns if 'jeff_' in c])}")
     print(f"✓ Saved to cache for model.py")
-
-
-def trace_jeff_usage():
-    print("=== TRACING JEFF USAGE ===")
-
-    # Check what extraction functions exist
-    import inspect
-    current_module = inspect.currentframe().f_globals
-
-    jeff_functions = []
-    for name, obj in current_module.items():
-        if 'jeff' in name.lower() and callable(obj):
-            jeff_functions.append(name)
-
-    print(f"Jeff-related functions found: {jeff_functions}")
-
-    # Check if functions exist for each file type
-    file_types = ['overview', 'serve_basics', 'key_points_serve', 'net_points',
-                  'rally', 'serve_direction', 'points_2020s']
-
-    for file_type in file_types:
-        func_name = f"extract_{file_type}_features"
-        if func_name in current_module:
-            print(f"✓ {func_name} exists")
-        else:
-            print(f"❌ {func_name} missing")
-
-
-# Add at bottom of file:
-if __name__ == "__main__":
-    trace_jeff_usage()
