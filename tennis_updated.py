@@ -413,6 +413,12 @@ def load_jeff_comprehensive_data():
                     df = pd.read_csv(file_path, low_memory=False)
                     if 'player' in df.columns:
                         df['Player_canonical'] = df['player'].apply(normalize_jeff_name)
+
+                    # ADDED: Store original match_id for Tennis Abstract scraping
+                    if key == 'matches' and 'match_id' in df.columns:
+                        df['jeff_original_id'] = df['match_id'].copy()
+                        logging.info(f"Stored original match_ids for {gender} matches")
+
                     data[gender][key] = df
                     logging.info(f"Loaded {gender}/{filename}: {len(df)} records")
     return data
@@ -1796,6 +1802,74 @@ class TennisAbstractSetScoreScraper:
 
         return all_scores
 
+
+def backfill_jeff_matches_with_ta_set_scores(historical_data, jeff_data):
+    """Backfill Jeff matches with TA set scores"""
+    print("DEBUG: Starting backfill function")
+    scraper = TennisAbstractSetScoreScraper()
+    ta_scores = scraper.bulk_scrape_jeff_set_scores(jeff_data, max_matches_per_gender=300)
+
+    print(f"DEBUG: Got {len(ta_scores)} scores from TA")
+
+    # DEBUG: Show some TA score keys
+    ta_keys = list(ta_scores.keys())[:5]
+    print(f"DEBUG: Sample TA keys: {ta_keys}")
+
+    # DEBUG: Show some historical composite_ids
+    hist_ids = historical_data['composite_id'].dropna().head(5).tolist()
+    print(f"DEBUG: Sample hist IDs: {hist_ids}")
+
+    # Add set score columns if they don't exist
+    set_columns = ['sets_won_winner', 'sets_won_loser', 'total_sets', 'score_string', 'set_score_source']
+    for col in set_columns:
+        if col not in historical_data.columns:
+            historical_data[col] = None
+            print(f"DEBUG: Added column {col}")
+
+    matches_updated = 0
+    matches_found = 0
+
+    for idx, row in historical_data.iterrows():
+        # Skip if already has set score data
+        if pd.notna(row.get('sets_won_winner')):
+            continue
+
+        # Try multiple ID formats to find match
+        found_score = None
+        match_key = None
+
+        # Try composite_id first
+        comp_id = row.get('composite_id')
+        if comp_id and comp_id in ta_scores:
+            found_score = ta_scores[comp_id]
+            match_key = comp_id
+            matches_found += 1
+
+        # Try jeff_original_id if available
+        elif 'jeff_original_id' in row and pd.notna(row.get('jeff_original_id')):
+            jeff_id = row.get('jeff_original_id')
+            if jeff_id in ta_scores:
+                found_score = ta_scores[jeff_id]
+                match_key = jeff_id
+                matches_found += 1
+
+        # Update if found
+        if found_score:
+            set_outcome = found_score.get('set_outcome')
+            if set_outcome:
+                historical_data.at[idx, 'sets_won_winner'] = set_outcome[0]
+                historical_data.at[idx, 'sets_won_loser'] = set_outcome[1]
+                historical_data.at[idx, 'total_sets'] = set_outcome[0] + set_outcome[1]
+                historical_data.at[idx, 'score_string'] = found_score.get('score', '')
+                historical_data.at[idx, 'set_score_source'] = 'tennis_abstract'
+                matches_updated += 1
+
+                if matches_updated <= 3:  # Show first few matches
+                    print(f"DEBUG: Updated match {match_key}: {found_score.get('score', '')}")
+
+    print(f"DEBUG: Found {matches_found} potential matches in TA scores")
+    print(f"Updated {matches_updated} Jeff matches with TA set scores")
+    return historical_data
 # ============================================================================
 # TENNIS ABSTRACT TO JEFF TRANSFORMATION
 # ============================================================================
@@ -3925,8 +3999,8 @@ def get_player_profile(player_key):
         return {}
 
 
-def integrate_api_tennis_data_incremental(historical_data):
-    """FIXED: Fetch API data with proper statistics integration"""
+def integrate_api_tennis_data_incremental_with_sets(historical_data):
+    """FIXED: API integration that properly stores set scores"""
     df = historical_data.copy()
     if "source_rank" not in df.columns:
         df["source_rank"] = 3
@@ -4059,6 +4133,12 @@ def integrate_api_tennis_data_incremental(historical_data):
                 "tournament_key": tournament_key,
                 "tournament_round": fixture.get("tournament_round"),
                 "tournament_season": fixture.get("tournament_season"),
+
+                # FIXED: Store set score data
+                "sets_won_p1": embed.get("sets_won_p1"),
+                "sets_won_p2": embed.get("sets_won_p2"),
+                "total_sets": embed.get("total_sets"),
+                "set_score_source": "api"
             }
 
             if stats_map:
@@ -4089,7 +4169,7 @@ def integrate_api_tennis_data_incremental(historical_data):
             df = pd.concat([df, pd.DataFrame([record])], ignore_index=True)
 
     df = df.sort_values("source_rank").drop_duplicates(subset="composite_id", keep="first").reset_index(drop=True)
-    print(f"Added {len(dates_to_fetch)} days of API data to cache.")
+    print(f"Added {len(dates_to_fetch)} days of API data with set scores to cache.")
     return df
 
 
@@ -5243,7 +5323,9 @@ if __name__ == "__main__":
 
     # Integrate recent API data with full feature set
     print("Integrating recent API data with full feature extraction...")
-    hist = integrate_api_tennis_data_incremental(hist)
+    hist = integrate_api_tennis_data_incremental_with_sets(hist)
+    hist = backfill_jeff_matches_with_ta_set_scores(hist, jeff_data)
+    print("DEBUG: Backfill complete")
     save_to_cache(hist, jeff_data, defaults)
 
     # Handle training mode
@@ -5321,3 +5403,170 @@ if __name__ == "__main__":
         print(f"- Use --use_ml_model for ML-based prediction")
 
     print("\nPREDICTION COMPLETE")
+
+
+    def test_set_score_integration():
+        """Test set score integration functionality"""
+        print("=== TESTING SET SCORE INTEGRATION ===")
+
+        # Test 1: Load data and check set score columns
+        print("\n1. Loading data and checking structure...")
+        hist, jeff_data, defaults = load_from_cache()
+
+        if hist is None:
+            print("❌ No cached data found. Run main pipeline first.")
+            return
+
+        print(f"✓ Loaded {len(hist)} matches")
+
+        # Check for set score columns
+        set_columns = ['sets_won_winner', 'sets_won_loser', 'total_sets', 'score_string', 'set_score_source']
+        missing_cols = [col for col in set_columns if col not in hist.columns]
+
+        if missing_cols:
+            print(f"❌ Missing columns: {missing_cols}")
+            print("Run integration first.")
+            return
+        else:
+            print("✓ Set score columns exist")
+
+        # Test 2: Check set score coverage
+        print("\n2. Analyzing set score coverage...")
+        total_matches = len(hist)
+        with_set_scores = hist['sets_won_winner'].notna().sum()
+        coverage_pct = (with_set_scores / total_matches) * 100
+
+        print(f"Set score coverage: {with_set_scores}/{total_matches} ({coverage_pct:.1f}%)")
+
+        # Coverage by source
+        if 'set_score_source' in hist.columns:
+            by_source = hist.groupby('set_score_source').size().sort_values(ascending=False)
+            print("Coverage by source:")
+            for source, count in by_source.items():
+                print(f"  {source}: {count}")
+
+        # Coverage by date
+        if 'date' in hist.columns:
+            hist['date'] = pd.to_datetime(hist['date'], errors='coerce')
+            hist['year'] = hist['date'].dt.year
+
+            by_year = hist.groupby('year').agg({
+                'composite_id': 'count',
+                'sets_won_winner': lambda x: x.notna().sum()
+            }).rename(columns={'composite_id': 'total', 'sets_won_winner': 'with_scores'})
+            by_year['coverage_pct'] = (by_year['with_scores'] / by_year['total'] * 100).round(1)
+
+            print("\nCoverage by year:")
+            print(by_year)
+
+        # Test 3: Sample some Tennis Abstract URLs
+        print("\n3. Testing Tennis Abstract scraper on sample matches...")
+
+        # Get some Jeff matches
+        jeff_matches = []
+        for gender in ['men', 'women']:
+            if gender in jeff_data and 'matches' in jeff_data[gender]:
+                sample = jeff_data[gender]['matches'].head(3)
+                for _, match in sample.iterrows():
+                    jeff_matches.append({
+                        'match_id': match.get('match_id', ''),
+                        'player1': match.get('player1', ''),
+                        'player2': match.get('player2', ''),
+                        'gender': gender
+                    })
+
+        if jeff_matches:
+            scraper = TennisAbstractSetScoreScraper()
+
+            for match in jeff_matches[:3]:  # Test first 3
+                match_id = match['match_id']
+                url = f"https://tennisabstract.com/charting/{match_id}.html"
+
+                print(f"\nTesting: {match['player1']} vs {match['player2']}")
+                print(f"URL: {url}")
+
+                try:
+                    result = scraper.extract_set_score_from_ta_page(url)
+                    if result:
+                        print(f"✓ Found: {result['score']}")
+                        print(f"  Winner: {result['winner']}")
+                        print(f"  Loser: {result['loser']}")
+
+                        # Test parsing
+                        set_outcome = scraper.parse_set_score_to_outcome(result['score'])
+                        print(f"  Parsed: {set_outcome}")
+                    else:
+                        print("❌ No score found")
+
+                except Exception as e:
+                    print(f"❌ Error: {e}")
+
+        # Test 4: Validate some set scores
+        print("\n4. Validating set score data...")
+
+        sample_with_scores = hist[hist['sets_won_winner'].notna()].head(10)
+
+        if len(sample_with_scores) > 0:
+            print("Sample set scores:")
+            for _, row in sample_with_scores.iterrows():
+                winner_sets = row.get('sets_won_winner', 0)
+                loser_sets = row.get('sets_won_loser', 0)
+                total_sets = row.get('total_sets', 0)
+                score_string = row.get('score_string', '')
+                source = row.get('set_score_source', '')
+
+                print(f"  {winner_sets}-{loser_sets} ({total_sets} sets) '{score_string}' [{source}]")
+
+                # Basic validation
+                if winner_sets + loser_sets != total_sets:
+                    print(f"    ❌ Invalid: {winner_sets} + {loser_sets} ≠ {total_sets}")
+        else:
+            print("❌ No matches with set scores found")
+
+        # Test 5: Check API set scores
+        print("\n5. Checking API set score integration...")
+
+        api_matches = hist[hist['source_rank'] == 2]  # API matches
+        api_with_sets = api_matches['sets_won_p1'].notna().sum()
+
+        print(f"API matches: {len(api_matches)}")
+        print(f"API matches with sets: {api_with_sets}")
+
+        if api_with_sets > 0:
+            print("Sample API set scores:")
+            api_sample = api_matches[api_matches['sets_won_p1'].notna()].head(3)
+            for _, row in api_sample.iterrows():
+                p1_sets = row.get('sets_won_p1', 0)
+                p2_sets = row.get('sets_won_p2', 0)
+                total = row.get('total_sets', 0)
+                print(f"  {p1_sets}-{p2_sets} ({total} sets)")
+
+        print("\n=== TEST COMPLETE ===")
+
+
+    def quick_set_score_test():
+        """Quick test of set score parsing"""
+        print("=== QUICK SET SCORE PARSER TEST ===")
+
+        test_scores = [
+            "6-4 6-2",  # → (2, 0)
+            "4-6 6-3 6-4",  # → (2, 1)
+            "6-7 6-4 3-6",  # → (1, 2)
+            "7-6(3) 6-4",  # → (2, 0)
+            "6-0 6-1",  # → (2, 0)
+            "6-4 4-6 7-6(5)"  # → (2, 1)
+        ]
+
+        scraper = TennisAbstractSetScoreScraper()
+
+        for score in test_scores:
+            result = scraper.parse_set_score_to_outcome(score)
+            print(f"'{score}' → {result}")
+
+        print("✓ Parser test complete")
+
+
+    if __name__ == "__main__":
+        # Run tests
+        quick_set_score_test()
+        test_set_score_integration()
