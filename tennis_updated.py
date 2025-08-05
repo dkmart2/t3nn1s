@@ -1919,9 +1919,9 @@ class JeffNotationParser:
             'clutch_shot_accuracy': 0.48
         }
 
-
 def extract_jeff_notation_features(player_canonical, gender, jeff_data):
-    """Fixed to work with actual points data structure"""
+    """Extract features from Jeff's notation for a specific player"""
+    player_canonical = canonical_player(player_canonical)
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'points_2020s' not in jeff_data[gender_key]:
@@ -1932,15 +1932,11 @@ def extract_jeff_notation_features(player_canonical, gender, jeff_data):
 
     for _, row in points_df.iterrows():
         match_id = row['match_id']
-
-        # Parse player names from match_id
         parts = match_id.split('-')
-        if len(parts) >= 6:
-            player1_name = parts[-2].replace('_', ' ')
-            player2_name = parts[-1].replace('_', ' ')
 
-            player1_canonical = canonical_player(player1_name)
-            player2_canonical = canonical_player(player2_name)
+        if len(parts) >= 6:
+            player1_canonical = canonical_player(parts[-2].replace('_', ' '))
+            player2_canonical = canonical_player(parts[-1].replace('_', ' '))
 
             server = row['Svr']
             current_player = player1_canonical if server == 1 else player2_canonical
@@ -1956,6 +1952,56 @@ def extract_jeff_notation_features(player_canonical, gender, jeff_data):
 
     if not player_points:
         return {}
+
+    # Parse with Jeff notation parser
+    parser = JeffNotationParser()
+    patterns = parser.extract_player_patterns(player_points)
+
+    # Convert to flat feature dictionary (COMPLETE VERSION - 17 features)
+    features = {}
+
+    # Serve features
+    serve_patterns = patterns.get('serve_patterns', {})
+    features['jeff_ace_rate'] = serve_patterns.get('ace_rate', 0.08)
+    features['jeff_service_winner_rate'] = serve_patterns.get('service_winner_rate', 0.15)
+    features['jeff_serve_rally_length'] = serve_patterns.get('avg_rally_length', 2.5)
+
+    # Direction preferences
+    direction_dist = serve_patterns.get('direction_distribution', {})
+    features['jeff_serve_wide_pct'] = direction_dist.get('wide', 0.3)
+    features['jeff_serve_body_pct'] = direction_dist.get('body', 0.4)
+    features['jeff_serve_center_pct'] = direction_dist.get('center', 0.3)
+
+    # Return features
+    return_patterns = patterns.get('return_patterns', {})
+    features['jeff_return_winner_rate'] = return_patterns.get('return_winner_rate', 0.05)
+    features['jeff_return_error_rate'] = return_patterns.get('return_error_rate', 0.15)
+    features['jeff_return_rally_length'] = return_patterns.get('avg_rally_length', 4.2)
+
+    # Rally features
+    rally_patterns = patterns.get('rally_patterns', {})
+    features['jeff_avg_rally_length'] = rally_patterns.get('avg_rally_length', 3.8)
+    features['jeff_short_rally_rate'] = rally_patterns.get('short_rally_rate', 0.6)
+    features['jeff_long_rally_rate'] = rally_patterns.get('long_rally_rate', 0.1)
+    features['jeff_net_approach_rate'] = rally_patterns.get('net_approach_rate', 0.08)
+    features['jeff_winner_error_ratio'] = rally_patterns.get('winner_to_error_ratio', 1.2)
+
+    # Derived tactical features
+    features['jeff_aggression_index'] = (
+                                                features['jeff_service_winner_rate'] +
+                                                features['jeff_return_winner_rate'] +
+                                                features['jeff_net_approach_rate']
+                                        ) / 3
+
+    features['jeff_consistency_index'] = 1 - features['jeff_return_error_rate']
+
+    features['jeff_serve_placement_variety'] = 1 - max(
+        features['jeff_serve_wide_pct'],
+        features['jeff_serve_body_pct'],
+        features['jeff_serve_center_pct']
+    )
+
+    return features
 
 def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
     """Add Jeff notation features to the historical dataset"""
@@ -4900,7 +4946,6 @@ def extract_features_working(match_data, player_prefix):
 
     return features
 
-
 def extract_unified_match_context_fixed(match_data):
     """Fixed version that properly infers surface from tournament"""
     context = {}
@@ -4946,415 +4991,115 @@ def extract_unified_match_context_fixed(match_data):
 
     return context
 
-def predict_match_unified(args, hist, jeff_data, defaults):
-    """Enhanced prediction function that tries multiple composite_id variations"""
-
-    match_date = pd.to_datetime(args.date).date()
-
-    tournament_base = args.tournament or "tournament"
-    tournament_base = tournament_base.lower().strip()
-    tournament_variations = [
-        tournament_base,
-        tournament_base.replace(' ', '_'),
-        tournament_base.replace('_', ' '),
-        tournament_base.replace('-', ' '),
-        tournament_base.replace(' ', ''),
-        f"atp {tournament_base}",
-        f"wta {tournament_base}",
-        tournament_base.replace('atp ', ''),
-        tournament_base.replace('wta ', ''),
-    ]
-
-    def get_name_variations(player_name):
-        base = normalize_name(player_name)
-        variations = [base]
-
-        parts = player_name.lower().split()
-        if len(parts) >= 2:
-            first = parts[0]
-            last = parts[-1]
-            variations.extend([
-                f"{last}_{first[0]}",
-                f"{first[0]}_{last}",
-                f"{first}_{last}",
-                f"{last}_{first}"
-            ])
-
-        return list(set(variations))
-
-    p1_variations = get_name_variations(args.player1)
-    p2_variations = get_name_variations(args.player2)
-
-    print(
-        f"Trying {len(tournament_variations)} tournament × {len(p1_variations)} × {len(p2_variations)} = {len(tournament_variations) * len(p1_variations) * len(p2_variations)} combinations")
-
-    for tournament in tournament_variations:
-        for p1 in p1_variations:
-            for p2 in p2_variations:
-                for player1, player2 in [(p1, p2), (p2, p1)]:
-                    comp_id = f"{match_date.strftime('%Y%m%d')}-{tournament}-{player1}-{player2}"
-
-                    row = hist[hist["composite_id"] == comp_id]
-
-                    if not row.empty:
-                        print(f"✅ Found match: {comp_id}")
-
-                        match_row = row.iloc[0]
-                        match_dict = match_row.to_dict()
-
-                        if (player1, player2) == (p2, p1):
-                            print("  → Players were swapped, correcting features...")
-                            swapped_dict = {}
-                            for key, value in match_dict.items():
-                                if key.startswith('winner_'):
-                                    swapped_dict[key.replace('winner_', 'loser_')] = value
-                                elif key.startswith('loser_'):
-                                    swapped_dict[key.replace('loser_', 'winner_')] = value
-                                else:
-                                    swapped_dict[key] = value
-                            match_dict = swapped_dict
-
-                        p1_features = extract_unified_features_fixed(match_dict, 'winner')
-                        p2_features = extract_unified_features_fixed(match_dict, 'loser')
-                        match_context = extract_unified_match_context_fixed(match_dict)
-
-                        source_rank = match_dict.get('source_rank', 3)
-                        data_sources = {1: 'Tennis Abstract', 2: 'API-Tennis', 3: 'Tennis Data Files'}
-                        print(f"  → Data source: {data_sources.get(source_rank, 'Unknown')} (rank: {source_rank})")
-                        print(f"  → Data quality: {match_context['data_quality_score']:.2f}")
-
-                        print(f"\n=== UNIFIED FEATURE ANALYSIS ===")
-                        print(f"Surface: {match_context.get('surface', 'Unknown')}")
-                        print(
-                            f"Rankings: P1={match_context.get('p1_ranking', 'N/A')}, P2={match_context.get('p2_ranking', 'N/A')}")
-                        print(
-                            f"H2H Record: {match_context.get('h2h_matches', 0)} matches, P1 win rate: {match_context.get('p1_h2h_win_pct', 0.5):.1%}")
-
-                        if match_context.get('implied_prob_p1'):
-                            print(
-                                f"Market Odds: P1={match_context.get('implied_prob_p1'):.1%}, P2={match_context.get('implied_prob_p2'):.1%}")
-
-                        print(f"\n=== PLAYER FEATURES ===")
-                        for feature_name, p1_val in p1_features.items():
-                            p2_val = p2_features.get(feature_name, 0)
-                            print(f"{feature_name}: P1={p1_val:.3f}, P2={p2_val:.3f}")
-
-                        pipeline = TennisModelPipeline(fast_mode=True)
-                        result = pipeline.predict(match_context, best_of=args.best_of, fast_mode=True)
-                        prob = result['win_probability']
-
-                        print(f"\n=== PREDICTION RESULTS ===")
-                        print(f"P({args.player1} wins) = {prob:.3f}")
-                        print(f"P({args.player2} wins) = {1 - prob:.3f}")
-
-                        return prob
-
-    print("❌ No match found with any variation")
-    return None
-
-
-def prepare_training_data_for_ml_model(historical_data: pd.DataFrame, scraped_records: list) -> tuple:
-    """Prepare point-level and match-level data for ML training"""
-
-    # Match data: Use real compiled historical data
-    match_data = historical_data.copy()
-    match_data['actual_winner'] = 1
-
-    # Add missing feature columns with defaults
-    feature_columns = [
-        'winner_elo', 'loser_elo', 'p1_h2h_win_pct', 'winner_aces', 'loser_aces',
-        'winner_serve_pts', 'loser_serve_pts', 'winner_last10_wins', 'loser_last10_wins',
-        'p1_surface_h2h_wins', 'p2_surface_h2h_wins'
-    ]
-
-    for col in feature_columns:
-        if col not in match_data.columns:
-            if 'elo' in col:
-                match_data[col] = 1500
-            elif 'h2h' in col:
-                match_data[col] = 0.5 if 'pct' in col else 0
-            elif 'last10' in col:
-                match_data[col] = 5
-            else:
-                match_data[col] = 5
-
-    # Point data: Extract real point sequences from Tennis Abstract URLs
-    def extract_raw_point_sequences(scraped_records):
-        """Convert scraped URLs to raw point sequences"""
-        from tennis_updated import TennisAbstractScraper
-
-        scraper = TennisAbstractScraper()
-        point_data_list = []
-
-        # Get unique URLs from scraped records
-        scraped_urls = list(set(r.get('scrape_url') for r in scraped_records if r.get('scrape_url')))
-        print(f"Extracting point data from {len(scraped_urls)} Tennis Abstract URLs...")
-
-        for url in scraped_urls[:15]:  # Limit for training speed
-            try:
-                points_df = scraper.get_raw_pointlog(url)
-                if len(points_df) > 0:
-                    # Add surface and tournament info
-                    for _, point in points_df.iterrows():
-                        point_record = point.to_dict()
-                        # Add match context from scraped record
-                        matching_record = next((r for r in scraped_records if r.get('scrape_url') == url), {})
-                        point_record.update({
-                            'surface': matching_record.get('surface', 'Hard'),
-                            'tournament': matching_record.get('tournament', ''),
-                            'round': matching_record.get('round', 'R32')
-                        })
-                        point_data_list.append(point_record)
-
-                    print(f"  ✓ Extracted {len(points_df)} points from {url.split('/')[-1]}")
-                else:
-                    print(f"  ✗ No points from {url.split('/')[-1]}")
-            except Exception as e:
-                print(f"  ✗ Failed: {url.split('/')[-1]} - {e}")
-                continue
-
-        return point_data_list
-
-    # Try to get real point data first
-    point_data_list = extract_raw_point_sequences(scraped_records)
-
-    def enrich_points_with_ta_statistics(point_data_list, scraped_records):
-        """Enrich basic point sequences with Tennis Abstract detailed statistics"""
-        import numpy as np
-
-        # Group scraped records by match and player
-        match_stats = {}
-        for record in scraped_records:
-            if record.get('data_type') not in ['pointlog']:  # Skip basic pointlog, use detailed stats
-                comp_id = record.get('composite_id')
-                player = record.get('Player_canonical')
-
-                if comp_id not in match_stats:
-                    match_stats[comp_id] = {}
-                if player not in match_stats[comp_id]:
-                    match_stats[comp_id][player] = {}
-
-                stat_name = record.get('stat_name', '')
-                stat_value = record.get('stat_value', 0)
-                match_stats[comp_id][player][stat_name] = stat_value
-
-        # Enrich each point with match statistics
-        enriched_points = []  # FIX: Initialize the list
-        for point in point_data_list:
-            match_id = point.get('match_id')
-            server = point.get('Svr')  # 1 or 2
-
-            # Get match statistics for this point's server
-            if match_id in match_stats:
-                players = list(match_stats[match_id].keys())
-                if len(players) >= 2:
-                    server_stats = match_stats[match_id][players[server - 1]] if server <= len(players) else {}
-
-                    # Add serve direction from TA stats
-                    wide_pct = server_stats.get('wide_pct', 0.3)
-                    body_pct = server_stats.get('body_pct', 0.3)
-                    t_pct = server_stats.get('t_pct', 0.4)
-
-                    # Add rally characteristics
-                    avg_rally = server_stats.get('avg_rally_length', 4)
-                    rally_winners = server_stats.get('winners_pct', 0.15)
-
-                    # Distribute stats to this point
-                    point.update({
-                        'serve_direction_wide': 1 if hash(f"{match_id}{point['Pt']}wide") % 100 < wide_pct * 100 else 0,
-                        'serve_direction_body': 1 if hash(f"{match_id}{point['Pt']}body") % 100 < body_pct * 100 else 0,
-                        'serve_direction_t': 1 if hash(f"{match_id}{point['Pt']}t") % 100 < t_pct * 100 else 0,
-                        'rally_length': max(1, int(avg_rally + np.random.normal(0, 2))),
-                        'is_rally_winner': 1 if hash(
-                            f"{match_id}{point['Pt']}winner") % 100 < rally_winners * 100 else 0,
-                        'first_serve_pct': server_stats.get('first_serve_pct', 0.65),
-                        'return_depth_deep': server_stats.get('deep_pct', 0.4)
-                    })
-
-            enriched_points.append(point)  # Add enriched point to list
-
-        return enriched_points  # Return the enriched list
-
-
-def train_ml_model(historical_data: pd.DataFrame, scraped_records: list = None, fast_mode: bool = True):
-    """Train the ML model pipeline"""
-
-    if scraped_records is None:
-        scraped_records = []
-
-    point_data, match_data = prepare_training_data_for_ml_model(historical_data, scraped_records)
-
-    pipeline = TennisModelPipeline(fast_mode=fast_mode)
-
-    print("Training ML model pipeline...")
-    feature_importance = pipeline.train(point_data, match_data)
-
-    model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
-    pipeline.save(model_path)
-
-    print(f"Model training complete. Saved to {model_path}")
-    return pipeline, feature_importance
-
-
-def predict_match_ml(player1: str, player2: str, tournament: str, surface: str = "Hard",
-                     best_of: int = 3, model_path: str = None) -> dict:
-    """Make ML-based match prediction"""
-
-    if model_path is None:
-        model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
-
-    pipeline = TennisModelPipeline()
-
-    if os.path.exists(model_path):
-        pipeline.load(model_path)
-    else:
-        print(f"No trained model found at {model_path}. Train model first.")
-        return {'win_probability': 0.5, 'confidence': 'LOW', 'error': 'No trained model'}
-
-    match_context = {
-        'surface': surface,
-        'best_of': best_of,
-        'is_grand_slam': tournament.lower() in ['wimbledon', 'french open', 'australian open', 'us open'],
-        'is_masters': 'masters' in tournament.lower() or 'atp 1000' in tournament.lower(),
-        'round_level': 4,
-        'elo_diff': 0,
-        'h2h_advantage': 0,
-        'data_quality_score': 0.7
-    }
-
-    prediction = pipeline.predict(match_context, best_of=best_of)
-
-    print(f"\nML-Based Prediction:")
-    print(f"P({player1} wins) = {prediction['win_probability']:.3f}")
-    print(f"P({player2} wins) = {1 - prediction['win_probability']:.3f}")
-    print(f"Confidence: {prediction['confidence']}")
-    print(f"Simulation component: {prediction['simulation_component']:.3f}")
-    print(f"Direct ML component: {prediction['direct_component']:.3f}")
-
-    return prediction
-
-
-# ============================================================================
-# MAIN EXECUTION BLOCK
-# ============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Tennis match win probability predictor")
-    parser.add_argument("--player1", help="Name of player 1")
-    parser.add_argument("--player2", help="Name of player 2")
-    parser.add_argument("--date", help="Match date in YYYY-MM-DD")
-    parser.add_argument("--tournament", help="Tournament name")
-    parser.add_argument("--gender", choices=["M", "W"], help="Gender: M or W")
-    parser.add_argument("--best_of", type=int, default=3, help="Sets in match, default 3")
-    parser.add_argument("--surface", default="Hard", help="Court surface")
-    parser.add_argument("--train_model", action="store_true", help="Train the ML model")
-    parser.add_argument("--use_ml_model", action="store_true", help="Use ML model for prediction")
-    parser.add_argument("--fast_mode", action="store_true", help="Use fast training mode")
-    args = parser.parse_args()
+    """Pure data pipeline execution"""
 
-    print("🎾 TENNIS MATCH PREDICTION SYSTEM 🎾\n")
+    print("🎾 TENNIS DATA PIPELINE 🎾")
 
-    # Load or generate data with Tennis Abstract integration
-    hist, jeff_data, defaults = load_from_cache_with_scraping()
-    if hist is None:
-        print("No cache found. Generating full historical dataset...")
-        hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
-        hist = run_automated_tennis_abstract_integration(hist)
-        save_to_cache(hist, jeff_data, defaults)
-        print("Historical data with Tennis Abstract integration cached for future use.")
-    else:
-        print("Loaded historical data from cache with Tennis Abstract integration.")
+    # Generate complete dataset
+    hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
 
-    # Integrate recent API data with full feature extraction...
-    print("Integrating recent API data with full feature extraction...")
+    # Integrate all data sources
     hist = integrate_api_tennis_data_incremental(hist)
+
+    # Save final dataset
     save_to_cache(hist, jeff_data, defaults)
 
-    # Data testing mode - exit before prediction
-    if args.player1 == "test_data_only":
-        print("=== DATA TESTING COMPLETE ===")
-        print(f"Historical data shape: {hist.shape}")
-        jeff_cols = [col for col in hist.columns if 'jeff_' in col]
-        print(f"Jeff notation columns: {len(jeff_cols)}")
-        if jeff_cols:
-            matches_with_jeff = hist['winner_jeff_ace_rate'].notna().sum()
-            print(f"Matches with Jeff features: {matches_with_jeff}/{len(hist)}")
-        else:
-            print("❌ No Jeff notation columns found")
-        exit()
+    print(f"✓ Dataset complete: {hist.shape}")
+    print(f"✓ Jeff features: {len([c for c in hist.columns if 'jeff_' in c])}")
+    print(f"✓ Saved to cache for model.py")jeff_data = load_jeff_comprehensive_data()
 
-    # Handle training mode
-    if args.train_model:
-        print("\n=== TRAINING ML MODEL ===")
-        try:
-            # Get scraped records for point-level data
-            scraper = AutomatedTennisAbstractScraper()
-            fresh_scraped = scraper.automated_scraping_session(days_back=30, max_matches=50)
+print('MEN FILES LOADED:')
+for i, (key, df) in enumerate(jeff_data['men'].items(), 1):
+    print(f'{i:2d}. {key}: {len(df)} records')
 
-            if not fresh_scraped:
-                print("No fresh scrapes, extracting Tennis Abstract data from historical dataset...")
-                scraped_records = extract_ta_data_from_historical(hist)
-            else:
-                scraped_records = fresh_scraped
+print('\nWOMEN FILES LOADED:')
+for i, (key, df) in enumerate(jeff_data['women'].items(), 1):
+    print(f'{i:2d}. {key}: {len(df)} records')
 
-            # Train the model
-            pipeline, feature_importance = train_ml_model(hist, scraped_records, fast_mode=args.fast_mode)
+print(f'\nTotal men files: {len(jeff_data["men"])}')
+print(f'Total women files: {len(jeff_data["women"])}')
+"
+2025-08-05 03:07:50,101 INFO:root:load_jeff_comprehensive_data:420: Stored original match_ids for men matches
+2025-08-05 03:07:50,101 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-matches.csv: 6639 records
+2025-08-05 03:07:50,630 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-points-2020s.csv: 461897 records
+2025-08-05 03:07:50,735 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-Overview.csv: 49928 records
+2025-08-05 03:07:50,806 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ServeBasics.csv: 39779 records
+2025-08-05 03:07:51,241 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ReturnOutcomes.csv: 271988 records
+2025-08-05 03:07:51,639 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ReturnDepth.csv: 236950 records
+2025-08-05 03:07:51,737 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-KeyPointsServe.csv: 53048 records
+2025-08-05 03:07:51,826 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-KeyPointsReturn.csv: 53048 records
+2025-08-05 03:07:51,920 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-NetPoints.csv: 52101 records
+2025-08-05 03:07:51,997 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-Rally.csv: 84877 records
+2025-08-05 03:07:52,074 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ServeDirection.csv: 39779 records
+2025-08-05 03:07:52,131 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ServeInfluence.csv: 26527 records
+2025-08-05 03:07:52,224 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ShotDirection.csv: 52639 records
+2025-08-05 03:07:52,475 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ShotDirOutcomes.csv: 153266 records
+2025-08-05 03:07:52,951 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-ShotTypes.csv: 308946 records
+2025-08-05 03:07:53,033 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-SnV.csv: 44578 records
+2025-08-05 03:07:53,272 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-SvBreakSplit.csv: 144684 records
+2025-08-05 03:07:53,493 INFO:root:load_jeff_comprehensive_data:423: Loaded men/charting-m-stats-SvBreakTotal.csv: 144684 records
+2025-08-05 03:07:53,501 INFO:root:load_jeff_comprehensive_data:420: Stored original match_ids for women matches
+2025-08-05 03:07:53,501 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-matches.csv: 3491 records
+2025-08-05 03:07:53,729 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-points-2020s.csv: 263897 records
+2025-08-05 03:07:53,775 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-Overview.csv: 22998 records
+2025-08-05 03:07:53,812 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ServeBasics.csv: 20898 records
+2025-08-05 03:07:54,037 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ReturnOutcomes.csv: 144687 records
+2025-08-05 03:07:54,226 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ReturnDepth.csv: 124187 records
+2025-08-05 03:07:54,276 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-KeyPointsServe.csv: 27856 records
+2025-08-05 03:07:54,322 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-KeyPointsReturn.csv: 27854 records
+2025-08-05 03:07:54,371 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-NetPoints.csv: 26628 records
+2025-08-05 03:07:54,413 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-Rally.csv: 44755 records
+2025-08-05 03:07:54,454 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ServeDirection.csv: 20898 records
+2025-08-05 03:07:54,493 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ServeInfluence.csv: 13932 records
+2025-08-05 03:07:54,537 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ShotDirection.csv: 27408 records
+2025-08-05 03:07:54,654 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ShotDirOutcomes.csv: 76060 records
+2025-08-05 03:07:54,889 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-ShotTypes.csv: 152698 records
+2025-08-05 03:07:54,903 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-SnV.csv: 5104 records
+2025-08-05 03:07:55,028 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-SvBreakSplit.csv: 76301 records
+2025-08-05 03:07:55,149 INFO:root:load_jeff_comprehensive_data:423: Loaded women/charting-w-stats-SvBreakTotal.csv: 76301 records
+MEN FILES LOADED:
+ 1. matches: 6639 records
+ 2. points_2020s: 461897 records
+ 3. overview: 49928 records
+ 4. serve_basics: 39779 records
+ 5. return_outcomes: 271988 records
+ 6. return_depth: 236950 records
+ 7. key_points_serve: 53048 records
+ 8. key_points_return: 53048 records
+ 9. net_points: 52101 records
+10. rally: 84877 records
+11. serve_direction: 39779 records
+12. serve_influence: 26527 records
+13. shot_direction: 52639 records
+14. shot_dir_outcomes: 153266 records
+15. shot_types: 308946 records
+16. snv: 44578 records
+17. sv_break_split: 144684 records
+18. sv_break_total: 144684 records
 
-            print("\nModel training completed successfully!")
-            print(f"Top 10 most important features:")
-            print(feature_importance.head(10))
-
-        except Exception as e:
-            print(f"Model training failed: {e}")
-
-        exit(0)
-
-    # Validate required arguments for prediction
-    if not all([args.player1, args.player2, args.tournament, args.gender]):
-        parser.error("For prediction, --player1, --player2, --tournament, and --gender are required")
-
-    # Handle ML prediction mode
-    if args.use_ml_model:
-        print("\n=== ML-BASED PREDICTION ===")
-        prediction = predict_match_ml(
-            args.player1, args.player2, args.tournament,
-            surface=args.surface, best_of=args.best_of
-        )
-        exit(0)
-
-    # Regular prediction mode
-    print(f"\n=== MATCH DETAILS ===")
-    print(f"Date: {args.date}")
-    print(f"Tournament: {args.tournament}")
-    print(f"Player 1: {args.player1}")
-    print(f"Player 2: {args.player2}")
-    print(f"Gender: {args.gender}")
-    print(f"Best of: {args.best_of}")
-    print(f"Surface: {args.surface}")
-
-    # Run regular prediction
-    prob = predict_match_unified(args, hist, jeff_data, defaults)
-
-    if prob is not None:
-        print(f"\n=== HEURISTIC PREDICTION ===")
-        print(f"🏆 P({args.player1} wins) = {prob:.3f}")
-        print(f"🏆 P({args.player2} wins) = {1 - prob:.3f}")
-
-        confidence = "High" if abs(prob - 0.5) > 0.2 else "Medium" if abs(prob - 0.5) > 0.1 else "Low"
-        print(f"🎯 Prediction confidence: {confidence}")
-
-    else:
-        print("\nPREDICTION FAILED")
-        print("No match data found. Possible reasons:")
-        print("- Match not in dataset (check date, tournament, player names)")
-        print("- Tournament name mismatch (try different format)")
-        print("- Players not in our database")
-
-        print(f"\nSuggestions:")
-        print(f"- Try 'Wimbledon' instead of '{args.tournament}'")
-        print(f"- Check player name spelling")
-        print(f"- Verify match date")
-        print(f"- Use --train_model first to train ML model")
-        print(f"- Use --use_ml_model for ML-based prediction")
-
-    print("\nPREDICTION COMPLETE")
+WOMEN FILES LOADED:
+ 1. matches: 3491 records
+ 2. points_2020s: 263897 records
+ 3. overview: 22998 records
+ 4. serve_basics: 20898 records
+ 5. return_outcomes: 144687 records
+ 6. return_depth: 124187 records
+ 7. key_points_serve: 27856 records
+ 8. key_points_return: 27854 records
+ 9. net_points: 26628 records
+10. rally: 44755 records
+11. serve_direction: 20898 records
+12. serve_influence: 13932 records
+13. shot_direction: 27408 records
+14. shot_dir_outcomes: 76060 records
+15. shot_types: 152698 records
+16. snv: 5104 records
+17. sv_break_split: 76301 records
+18. sv_break_total: 76301 records
+Traceback (most recent call last):
+  File "<string>", line 14, in <module>
+    print(f'\nTotal men files: {len(jeff_data[men])}')
+                                              ^^^
+NameError: name 'men' is not defined. Did you mean: 'len'?

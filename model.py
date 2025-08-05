@@ -1010,3 +1010,420 @@ class TennisModelPipeline:
             print(f"Model loaded from {path}")
         except Exception as e:
             print(f"Failed to load model: {e}")
+
+
+
+
+
+def predict_match_unified(args, hist, jeff_data, defaults):
+    """Enhanced prediction function that tries multiple composite_id variations"""
+
+    match_date = pd.to_datetime(args.date).date()
+
+    tournament_base = args.tournament or "tournament"
+    tournament_base = tournament_base.lower().strip()
+    tournament_variations = [
+        tournament_base,
+        tournament_base.replace(' ', '_'),
+        tournament_base.replace('_', ' '),
+        tournament_base.replace('-', ' '),
+        tournament_base.replace(' ', ''),
+        f"atp {tournament_base}",
+        f"wta {tournament_base}",
+        tournament_base.replace('atp ', ''),
+        tournament_base.replace('wta ', ''),
+    ]
+
+    def get_name_variations(player_name):
+        base = normalize_name(player_name)
+        variations = [base]
+
+        parts = player_name.lower().split()
+        if len(parts) >= 2:
+            first = parts[0]
+            last = parts[-1]
+            variations.extend([
+                f"{last}_{first[0]}",
+                f"{first[0]}_{last}",
+                f"{first}_{last}",
+                f"{last}_{first}"
+            ])
+
+        return list(set(variations))
+
+    p1_variations = get_name_variations(args.player1)
+    p2_variations = get_name_variations(args.player2)
+
+    print(
+        f"Trying {len(tournament_variations)} tournament × {len(p1_variations)} × {len(p2_variations)} = {len(tournament_variations) * len(p1_variations) * len(p2_variations)} combinations")
+
+    for tournament in tournament_variations:
+        for p1 in p1_variations:
+            for p2 in p2_variations:
+                for player1, player2 in [(p1, p2), (p2, p1)]:
+                    comp_id = f"{match_date.strftime('%Y%m%d')}-{tournament}-{player1}-{player2}"
+
+                    row = hist[hist["composite_id"] == comp_id]
+
+                    if not row.empty:
+                        print(f"✅ Found match: {comp_id}")
+
+                        match_row = row.iloc[0]
+                        match_dict = match_row.to_dict()
+
+                        if (player1, player2) == (p2, p1):
+                            print("  → Players were swapped, correcting features...")
+                            swapped_dict = {}
+                            for key, value in match_dict.items():
+                                if key.startswith('winner_'):
+                                    swapped_dict[key.replace('winner_', 'loser_')] = value
+                                elif key.startswith('loser_'):
+                                    swapped_dict[key.replace('loser_', 'winner_')] = value
+                                else:
+                                    swapped_dict[key] = value
+                            match_dict = swapped_dict
+
+                        p1_features = extract_unified_features_fixed(match_dict, 'winner')
+                        p2_features = extract_unified_features_fixed(match_dict, 'loser')
+                        match_context = extract_unified_match_context_fixed(match_dict)
+
+                        source_rank = match_dict.get('source_rank', 3)
+                        data_sources = {1: 'Tennis Abstract', 2: 'API-Tennis', 3: 'Tennis Data Files'}
+                        print(f"  → Data source: {data_sources.get(source_rank, 'Unknown')} (rank: {source_rank})")
+                        print(f"  → Data quality: {match_context['data_quality_score']:.2f}")
+
+                        print(f"\n=== UNIFIED FEATURE ANALYSIS ===")
+                        print(f"Surface: {match_context.get('surface', 'Unknown')}")
+                        print(
+                            f"Rankings: P1={match_context.get('p1_ranking', 'N/A')}, P2={match_context.get('p2_ranking', 'N/A')}")
+                        print(
+                            f"H2H Record: {match_context.get('h2h_matches', 0)} matches, P1 win rate: {match_context.get('p1_h2h_win_pct', 0.5):.1%}")
+
+                        if match_context.get('implied_prob_p1'):
+                            print(
+                                f"Market Odds: P1={match_context.get('implied_prob_p1'):.1%}, P2={match_context.get('implied_prob_p2'):.1%}")
+
+                        print(f"\n=== PLAYER FEATURES ===")
+                        for feature_name, p1_val in p1_features.items():
+                            p2_val = p2_features.get(feature_name, 0)
+                            print(f"{feature_name}: P1={p1_val:.3f}, P2={p2_val:.3f}")
+
+                        pipeline = TennisModelPipeline(fast_mode=True)
+                        result = pipeline.predict(match_context, best_of=args.best_of, fast_mode=True)
+                        prob = result['win_probability']
+
+                        print(f"\n=== PREDICTION RESULTS ===")
+                        print(f"P({args.player1} wins) = {prob:.3f}")
+                        print(f"P({args.player2} wins) = {1 - prob:.3f}")
+
+                        return prob
+
+    print("❌ No match found with any variation")
+    return None
+
+
+def prepare_training_data_for_ml_model(historical_data: pd.DataFrame, scraped_records: list) -> tuple:
+    """Prepare point-level and match-level data for ML training"""
+
+    # Match data: Use real compiled historical data
+    match_data = historical_data.copy()
+    match_data['actual_winner'] = 1
+
+    # Add missing feature columns with defaults
+    feature_columns = [
+        'winner_elo', 'loser_elo', 'p1_h2h_win_pct', 'winner_aces', 'loser_aces',
+        'winner_serve_pts', 'loser_serve_pts', 'winner_last10_wins', 'loser_last10_wins',
+        'p1_surface_h2h_wins', 'p2_surface_h2h_wins'
+    ]
+
+    for col in feature_columns:
+        if col not in match_data.columns:
+            if 'elo' in col:
+                match_data[col] = 1500
+            elif 'h2h' in col:
+                match_data[col] = 0.5 if 'pct' in col else 0
+            elif 'last10' in col:
+                match_data[col] = 5
+            else:
+                match_data[col] = 5
+
+    # Point data: Extract real point sequences from Tennis Abstract URLs
+    def extract_raw_point_sequences(scraped_records):
+        """Convert scraped URLs to raw point sequences"""
+        from tennis_updated import TennisAbstractScraper
+
+        scraper = TennisAbstractScraper()
+        point_data_list = []
+
+        # Get unique URLs from scraped records
+        scraped_urls = list(set(r.get('scrape_url') for r in scraped_records if r.get('scrape_url')))
+        print(f"Extracting point data from {len(scraped_urls)} Tennis Abstract URLs...")
+
+        for url in scraped_urls[:15]:  # Limit for training speed
+            try:
+                points_df = scraper.get_raw_pointlog(url)
+                if len(points_df) > 0:
+                    # Add surface and tournament info
+                    for _, point in points_df.iterrows():
+                        point_record = point.to_dict()
+                        # Add match context from scraped record
+                        matching_record = next((r for r in scraped_records if r.get('scrape_url') == url), {})
+                        point_record.update({
+                            'surface': matching_record.get('surface', 'Hard'),
+                            'tournament': matching_record.get('tournament', ''),
+                            'round': matching_record.get('round', 'R32')
+                        })
+                        point_data_list.append(point_record)
+
+                    print(f"  ✓ Extracted {len(points_df)} points from {url.split('/')[-1]}")
+                else:
+                    print(f"  ✗ No points from {url.split('/')[-1]}")
+            except Exception as e:
+                print(f"  ✗ Failed: {url.split('/')[-1]} - {e}")
+                continue
+
+        return point_data_list
+
+    # Try to get real point data first
+    point_data_list = extract_raw_point_sequences(scraped_records)
+
+    def enrich_points_with_ta_statistics(point_data_list, scraped_records):
+        """Enrich basic point sequences with Tennis Abstract detailed statistics"""
+        import numpy as np
+
+        # Group scraped records by match and player
+        match_stats = {}
+        for record in scraped_records:
+            if record.get('data_type') not in ['pointlog']:  # Skip basic pointlog, use detailed stats
+                comp_id = record.get('composite_id')
+                player = record.get('Player_canonical')
+
+                if comp_id not in match_stats:
+                    match_stats[comp_id] = {}
+                if player not in match_stats[comp_id]:
+                    match_stats[comp_id][player] = {}
+
+                stat_name = record.get('stat_name', '')
+                stat_value = record.get('stat_value', 0)
+                match_stats[comp_id][player][stat_name] = stat_value
+
+        # Enrich each point with match statistics
+        enriched_points = []  # FIX: Initialize the list
+        for point in point_data_list:
+            match_id = point.get('match_id')
+            server = point.get('Svr')  # 1 or 2
+
+            # Get match statistics for this point's server
+            if match_id in match_stats:
+                players = list(match_stats[match_id].keys())
+                if len(players) >= 2:
+                    server_stats = match_stats[match_id][players[server - 1]] if server <= len(players) else {}
+
+                    # Add serve direction from TA stats
+                    wide_pct = server_stats.get('wide_pct', 0.3)
+                    body_pct = server_stats.get('body_pct', 0.3)
+                    t_pct = server_stats.get('t_pct', 0.4)
+
+                    # Add rally characteristics
+                    avg_rally = server_stats.get('avg_rally_length', 4)
+                    rally_winners = server_stats.get('winners_pct', 0.15)
+
+                    # Distribute stats to this point
+                    point.update({
+                        'serve_direction_wide': 1 if hash(f"{match_id}{point['Pt']}wide") % 100 < wide_pct * 100 else 0,
+                        'serve_direction_body': 1 if hash(f"{match_id}{point['Pt']}body") % 100 < body_pct * 100 else 0,
+                        'serve_direction_t': 1 if hash(f"{match_id}{point['Pt']}t") % 100 < t_pct * 100 else 0,
+                        'rally_length': max(1, int(avg_rally + np.random.normal(0, 2))),
+                        'is_rally_winner': 1 if hash(
+                            f"{match_id}{point['Pt']}winner") % 100 < rally_winners * 100 else 0,
+                        'first_serve_pct': server_stats.get('first_serve_pct', 0.65),
+                        'return_depth_deep': server_stats.get('deep_pct', 0.4)
+                    })
+
+            enriched_points.append(point)  # Add enriched point to list
+
+        return enriched_points  # Return the enriched list
+
+
+def train_ml_model(historical_data: pd.DataFrame, scraped_records: list = None, fast_mode: bool = True):
+    """Train the ML model pipeline"""
+
+    if scraped_records is None:
+        scraped_records = []
+
+    point_data, match_data = prepare_training_data_for_ml_model(historical_data, scraped_records)
+
+    pipeline = TennisModelPipeline(fast_mode=fast_mode)
+
+    print("Training ML model pipeline...")
+    feature_importance = pipeline.train(point_data, match_data)
+
+    model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
+    pipeline.save(model_path)
+
+    print(f"Model training complete. Saved to {model_path}")
+    return pipeline, feature_importance
+
+
+def predict_match_ml(player1: str, player2: str, tournament: str, surface: str = "Hard",
+                     best_of: int = 3, model_path: str = None) -> dict:
+    """Make ML-based match prediction"""
+
+    if model_path is None:
+        model_path = os.path.join(CACHE_DIR, "trained_tennis_model.pkl")
+
+    pipeline = TennisModelPipeline()
+
+    if os.path.exists(model_path):
+        pipeline.load(model_path)
+    else:
+        print(f"No trained model found at {model_path}. Train model first.")
+        return {'win_probability': 0.5, 'confidence': 'LOW', 'error': 'No trained model'}
+
+    match_context = {
+        'surface': surface,
+        'best_of': best_of,
+        'is_grand_slam': tournament.lower() in ['wimbledon', 'french open', 'australian open', 'us open'],
+        'is_masters': 'masters' in tournament.lower() or 'atp 1000' in tournament.lower(),
+        'round_level': 4,
+        'elo_diff': 0,
+        'h2h_advantage': 0,
+        'data_quality_score': 0.7
+    }
+
+    prediction = pipeline.predict(match_context, best_of=best_of)
+
+    print(f"\nML-Based Prediction:")
+    print(f"P({player1} wins) = {prediction['win_probability']:.3f}")
+    print(f"P({player2} wins) = {1 - prediction['win_probability']:.3f}")
+    print(f"Confidence: {prediction['confidence']}")
+    print(f"Simulation component: {prediction['simulation_component']:.3f}")
+    print(f"Direct ML component: {prediction['direct_component']:.3f}")
+
+    return prediction
+
+
+# ============================================================================
+# MAIN EXECUTION BLOCK
+# ============================================================================
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Tennis match win probability predictor")
+    parser.add_argument("--player1", help="Name of player 1")
+    parser.add_argument("--player2", help="Name of player 2")
+    parser.add_argument("--date", help="Match date in YYYY-MM-DD")
+    parser.add_argument("--tournament", help="Tournament name")
+    parser.add_argument("--gender", choices=["M", "W"], help="Gender: M or W")
+    parser.add_argument("--best_of", type=int, default=3, help="Sets in match, default 3")
+    parser.add_argument("--surface", default="Hard", help="Court surface")
+    parser.add_argument("--train_model", action="store_true", help="Train the ML model")
+    parser.add_argument("--use_ml_model", action="store_true", help="Use ML model for prediction")
+    parser.add_argument("--fast_mode", action="store_true", help="Use fast training mode")
+    args = parser.parse_args()
+
+    print("🎾 TENNIS MATCH PREDICTION SYSTEM 🎾\n")
+
+    # Load or generate data with Tennis Abstract integration
+    hist, jeff_data, defaults = load_from_cache_with_scraping()
+    if hist is None:
+        print("No cache found. Generating full historical dataset...")
+        hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
+        hist = run_automated_tennis_abstract_integration(hist)
+        save_to_cache(hist, jeff_data, defaults)
+        print("Historical data with Tennis Abstract integration cached for future use.")
+    else:
+        print("Loaded historical data from cache with Tennis Abstract integration.")
+
+    # Integrate recent API data with full feature extraction...
+    print("Integrating recent API data with full feature extraction...")
+    hist = integrate_api_tennis_data_incremental(hist)
+    save_to_cache(hist, jeff_data, defaults)
+
+    # Data testing mode - exit before prediction
+    if args.player1 == "test_data_only":
+        print("=== DATA TESTING COMPLETE ===")
+        print(f"Historical data shape: {hist.shape}")
+        jeff_cols = [col for col in hist.columns if 'jeff_' in col]
+        print(f"Jeff notation columns: {len(jeff_cols)}")
+        if jeff_cols:
+            matches_with_jeff = hist['winner_jeff_ace_rate'].notna().sum()
+            print(f"Matches with Jeff features: {matches_with_jeff}/{len(hist)}")
+        else:
+            print("❌ No Jeff notation columns found")
+        exit()
+
+    # Handle training mode
+    if args.train_model:
+        print("\n=== TRAINING ML MODEL ===")
+        try:
+            # Get scraped records for point-level data
+            scraper = AutomatedTennisAbstractScraper()
+            fresh_scraped = scraper.automated_scraping_session(days_back=30, max_matches=50)
+
+            if not fresh_scraped:
+                print("No fresh scrapes, extracting Tennis Abstract data from historical dataset...")
+                scraped_records = extract_ta_data_from_historical(hist)
+            else:
+                scraped_records = fresh_scraped
+
+            # Train the model
+            pipeline, feature_importance = train_ml_model(hist, scraped_records, fast_mode=args.fast_mode)
+
+            print("\nModel training completed successfully!")
+            print(f"Top 10 most important features:")
+            print(feature_importance.head(10))
+
+        except Exception as e:
+            print(f"Model training failed: {e}")
+
+        exit(0)
+
+    # Validate required arguments for prediction
+    if not all([args.player1, args.player2, args.tournament, args.gender]):
+        parser.error("For prediction, --player1, --player2, --tournament, and --gender are required")
+
+    # Handle ML prediction mode
+    if args.use_ml_model:
+        print("\n=== ML-BASED PREDICTION ===")
+        prediction = predict_match_ml(
+            args.player1, args.player2, args.tournament,
+            surface=args.surface, best_of=args.best_of
+        )
+        exit(0)
+
+    # Regular prediction mode
+    print(f"\n=== MATCH DETAILS ===")
+    print(f"Date: {args.date}")
+    print(f"Tournament: {args.tournament}")
+    print(f"Player 1: {args.player1}")
+    print(f"Player 2: {args.player2}")
+    print(f"Gender: {args.gender}")
+    print(f"Best of: {args.best_of}")
+    print(f"Surface: {args.surface}")
+
+    # Run regular prediction
+    prob = predict_match_unified(args, hist, jeff_data, defaults)
+
+    if prob is not None:
+        print(f"\n=== HEURISTIC PREDICTION ===")
+        print(f"🏆 P({args.player1} wins) = {prob:.3f}")
+        print(f"🏆 P({args.player2} wins) = {1 - prob:.3f}")
+
+        confidence = "High" if abs(prob - 0.5) > 0.2 else "Medium" if abs(prob - 0.5) > 0.1 else "Low"
+        print(f"🎯 Prediction confidence: {confidence}")
+
+    else:
+        print("\nPREDICTION FAILED")
+        print("No match data found. Possible reasons:")
+        print("- Match not in dataset (check date, tournament, player names)")
+        print("- Tournament name mismatch (try different format)")
+        print("- Players not in our database")
+
+        print(f"\nSuggestions:")
+        print(f"- Try 'Wimbledon' instead of '{args.tournament}'")
+        print(f"- Check player name spelling")
+        print(f"- Verify match date")
+        print(f"- Use --train_model first to train ML model")
+        print(f"- Use --use_ml_model for ML-based prediction")
+
+    print("\nPREDICTION COMPLETE")
