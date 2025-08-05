@@ -561,6 +561,8 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
                                        ) / 2
 
     features['net_game_strength'] = features.get('net_points_won_pct', 0.5)
+    jeff_notation_features = extract_jeff_notation_features(player_canonical, gender, jeff_data)
+    features.update(jeff_notation_features)
 
     return features
 
@@ -1573,6 +1575,503 @@ class AutomatedTennisAbstractScraper(TennisAbstractScraper):
             })
 
         return records
+
+# ============================================================================
+# JEFF NOTATION PARSER - Extract features from point-by-point shot sequences
+# ============================================================================
+
+class JeffNotationParser:
+    """Parse Jeff Sackmann's shot notation to extract tactical features"""
+    
+    def __init__(self):
+        # Shot direction mappings
+        self.directions = {
+            '1': 'wide_deuce', '2': 'wide_ad', '3': 'down_line', 
+            '4': 'wide', '5': 'body', '6': 'center', 
+            '7': 'inside_out', '8': 'crosscourt', '9': 'down_middle'
+        }
+        
+        # Shot type mappings  
+        self.shot_types = {
+            'f': 'forehand', 'b': 'backhand', 'v': 'volley',
+            'o': 'overhead', 'l': 'lob', 'd': 'drop', 
+            'h': 'half_volley', 'z': 'slice'
+        }
+        
+        # Shot outcomes
+        self.outcomes = {
+            '*': 'winner', '#': 'error', '@': 'forced_error',
+            '!': 'ace', '=': 'let', '+': 'net'
+        }
+
+    def parse_point(self, notation):
+        """Parse a single point notation into structured data"""
+        if pd.isna(notation) or not notation:
+            return {}
+            
+        notation = str(notation).strip()
+        shots = []
+        serve_info = {}
+        
+        # First character is usually serve direction
+        if notation and notation[0].isdigit():
+            serve_info['serve_direction'] = self.directions.get(notation[0], 'unknown')
+            notation = notation[1:]
+        
+        # Parse remaining shots
+        i = 0
+        shot_count = 0
+        while i < len(notation):
+            char = notation[i]
+            
+            # Shot type
+            if char.lower() in self.shot_types:
+                shot = {
+                    'shot_num': shot_count,
+                    'shot_type': self.shot_types[char.lower()],
+                    'direction': None,
+                    'outcome': None
+                }
+                
+                # Look ahead for direction
+                if i + 1 < len(notation) and notation[i + 1].isdigit():
+                    shot['direction'] = self.directions.get(notation[i + 1], 'unknown')
+                    i += 1
+                
+                # Look ahead for outcome
+                if i + 1 < len(notation) and notation[i + 1] in self.outcomes:
+                    shot['outcome'] = self.outcomes[notation[i + 1]]
+                    i += 1
+                    
+                shots.append(shot)
+                shot_count += 1
+                
+            # Direct outcome (ace, error, etc.)
+            elif char in self.outcomes:
+                if shots:
+                    shots[-1]['outcome'] = self.outcomes[char]
+                else:
+                    serve_info['serve_outcome'] = self.outcomes[char]
+            
+            i += 1
+        
+        return {
+            'serve_info': serve_info,
+            'shots': shots,
+            'rally_length': len(shots),
+            'point_notation': str(notation)
+        }
+
+    def extract_player_patterns(self, player_points):
+        """Extract tactical patterns from all points for a player"""
+        if not player_points or len(player_points) == 0:
+            return self._get_default_patterns()
+            
+        patterns = {
+            'total_points': len(player_points),
+            'serve_patterns': {},
+            'return_patterns': {},
+            'rally_patterns': {},
+            'pressure_patterns': {},
+            'shot_distribution': {}
+        }
+        
+        serve_points = []
+        return_points = []
+        
+        for point_data in player_points:
+            parsed = self.parse_point(point_data.get('notation', ''))
+            
+            if not parsed:
+                continue
+                
+            # Categorize by serve/return
+            if point_data.get('serving', True):  # Default assume serving
+                serve_points.append(parsed)
+            else:
+                return_points.append(parsed)
+        
+        # Extract serve patterns
+        patterns['serve_patterns'] = self._extract_serve_patterns(serve_points)
+        
+        # Extract return patterns  
+        patterns['return_patterns'] = self._extract_return_patterns(return_points)
+        
+        # Extract rally patterns from all points
+        all_parsed = [self.parse_point(p.get('notation', '')) for p in player_points]
+        patterns['rally_patterns'] = self._extract_rally_patterns(all_parsed)
+        
+        # Extract pressure performance
+        patterns['pressure_patterns'] = self._extract_pressure_patterns(player_points)
+        
+        return patterns
+
+    def _extract_serve_patterns(self, serve_points):
+        """Extract serving patterns"""
+        if not serve_points:
+            return self._get_default_serve_patterns()
+            
+        patterns = {
+            'total_serves': len(serve_points),
+            'direction_distribution': {},
+            'ace_rate': 0,
+            'service_winner_rate': 0,
+            'avg_rally_length': 0
+        }
+        
+        directions = []
+        aces = 0
+        service_winners = 0
+        rally_lengths = []
+        
+        for point in serve_points:
+            serve_info = point.get('serve_info', {})
+            direction = serve_info.get('serve_direction')
+            if direction:
+                directions.append(direction)
+                
+            outcome = serve_info.get('serve_outcome')
+            if outcome == 'ace':
+                aces += 1
+            elif outcome == 'winner':
+                service_winners += 1
+                
+            rally_lengths.append(point.get('rally_length', 0))
+        
+        # Calculate distributions
+        if directions:
+            from collections import Counter
+            dir_counts = Counter(directions)
+            total = len(directions)
+            patterns['direction_distribution'] = {
+                k: v / total for k, v in dir_counts.items()
+            }
+        
+        patterns['ace_rate'] = aces / len(serve_points) if serve_points else 0
+        patterns['service_winner_rate'] = service_winners / len(serve_points) if serve_points else 0
+        patterns['avg_rally_length'] = np.mean(rally_lengths) if rally_lengths else 0
+        
+        return patterns
+
+    def _extract_return_patterns(self, return_points):
+        """Extract return patterns"""
+        if not return_points:
+            return self._get_default_return_patterns()
+            
+        patterns = {
+            'total_returns': len(return_points),
+            'return_winner_rate': 0,
+            'return_error_rate': 0,
+            'avg_rally_length': 0,
+            'shot_type_distribution': {}
+        }
+        
+        winners = 0
+        errors = 0
+        rally_lengths = []
+        first_shots = []
+        
+        for point in return_points:
+            shots = point.get('shots', [])
+            
+            if shots:
+                first_shot = shots[0]
+                first_shots.append(first_shot.get('shot_type', 'unknown'))
+                
+                # Check for return winners/errors
+                for shot in shots:
+                    outcome = shot.get('outcome')
+                    if outcome == 'winner':
+                        winners += 1
+                        break
+                    elif outcome in ['error', 'forced_error']:
+                        errors += 1
+                        break
+                        
+            rally_lengths.append(point.get('rally_length', 0))
+        
+        patterns['return_winner_rate'] = winners / len(return_points) if return_points else 0
+        patterns['return_error_rate'] = errors / len(return_points) if return_points else 0
+        patterns['avg_rally_length'] = np.mean(rally_lengths) if rally_lengths else 0
+        
+        # Shot type distribution for returns
+        if first_shots:
+            from collections import Counter
+            shot_counts = Counter(first_shots)
+            total = len(first_shots)
+            patterns['shot_type_distribution'] = {
+                k: v / total for k, v in shot_counts.items()
+            }
+        
+        return patterns
+
+    def _extract_rally_patterns(self, all_points):
+        """Extract rally characteristics"""
+        if not all_points:
+            return self._get_default_rally_patterns()
+            
+        patterns = {
+            'avg_rally_length': 0,
+            'short_rally_rate': 0,  # <= 3 shots
+            'medium_rally_rate': 0,  # 4-9 shots  
+            'long_rally_rate': 0,   # >= 10 shots
+            'net_approach_rate': 0,
+            'winner_to_error_ratio': 1.0
+        }
+        
+        rally_lengths = []
+        net_approaches = 0
+        winners = 0
+        errors = 0
+        
+        for point in all_points:
+            if not point:
+                continue
+                
+            length = point.get('rally_length', 0)
+            rally_lengths.append(length)
+            
+            shots = point.get('shots', [])
+            
+            # Check for net approaches
+            for shot in shots:
+                if shot.get('shot_type') == 'volley':
+                    net_approaches += 1
+                    break
+            
+            # Count winners and errors
+            for shot in shots:
+                outcome = shot.get('outcome')
+                if outcome == 'winner':
+                    winners += 1
+                elif outcome in ['error', 'forced_error']:
+                    errors += 1
+        
+        if rally_lengths:
+            patterns['avg_rally_length'] = np.mean(rally_lengths)
+            total_rallies = len(rally_lengths)
+            patterns['short_rally_rate'] = sum(1 for x in rally_lengths if x <= 3) / total_rallies
+            patterns['medium_rally_rate'] = sum(1 for x in rally_lengths if 4 <= x <= 9) / total_rallies  
+            patterns['long_rally_rate'] = sum(1 for x in rally_lengths if x >= 10) / total_rallies
+        
+        patterns['net_approach_rate'] = net_approaches / len(all_points) if all_points else 0
+        patterns['winner_to_error_ratio'] = winners / errors if errors > 0 else 2.0
+        
+        return patterns
+
+    def _extract_pressure_patterns(self, all_points):
+        """Extract performance under pressure"""
+        if not all_points:
+            return self._get_default_pressure_patterns()
+            
+        patterns = {
+            'break_point_conversion': 0.5,
+            'deuce_performance': 0.5,
+            'set_point_performance': 0.5,
+            'clutch_shot_accuracy': 0.5
+        }
+        
+        # This would require score context which isn't in basic notation
+        # For now, return defaults - could be enhanced with game score data
+        
+        return patterns
+
+    def _get_default_patterns(self):
+        """Default patterns when no data available"""
+        return {
+            'serve_patterns': self._get_default_serve_patterns(),
+            'return_patterns': self._get_default_return_patterns(), 
+            'rally_patterns': self._get_default_rally_patterns(),
+            'pressure_patterns': self._get_default_pressure_patterns()
+        }
+
+    def _get_default_serve_patterns(self):
+        return {
+            'direction_distribution': {'wide': 0.3, 'body': 0.4, 'center': 0.3},
+            'ace_rate': 0.08,
+            'service_winner_rate': 0.15,
+            'avg_rally_length': 2.5
+        }
+
+    def _get_default_return_patterns(self):
+        return {
+            'return_winner_rate': 0.05,
+            'return_error_rate': 0.15,
+            'avg_rally_length': 4.2,
+            'shot_type_distribution': {'forehand': 0.6, 'backhand': 0.4}
+        }
+
+    def _get_default_rally_patterns(self):
+        return {
+            'avg_rally_length': 3.8,
+            'short_rally_rate': 0.6,
+            'medium_rally_rate': 0.3,
+            'long_rally_rate': 0.1,
+            'net_approach_rate': 0.08,
+            'winner_to_error_ratio': 1.2
+        }
+
+    def _get_default_pressure_patterns(self):
+        return {
+            'break_point_conversion': 0.42,
+            'deuce_performance': 0.52,
+            'set_point_performance': 0.65,
+            'clutch_shot_accuracy': 0.48
+        }
+
+
+def extract_jeff_notation_features(player_canonical, gender, jeff_data):
+    """Extract features from Jeff's notation for a specific player"""
+    gender_key = 'men' if gender == 'M' else 'women'
+    
+    if gender_key not in jeff_data or 'points_2020s' not in jeff_data[gender_key]:
+        return {}
+        
+    points_df = jeff_data[gender_key]['points_2020s']
+    
+    if 'Player_canonical' not in points_df.columns:
+        return {}
+        
+    # Get all points for this player
+    player_points = points_df[points_df['Player_canonical'] == player_canonical]
+    
+    if len(player_points) == 0:
+        return {}
+    
+    # Convert to list of point dictionaries
+    point_data = []
+    for _, row in player_points.iterrows():
+        point_info = {
+            'notation': row.get('notation', ''),
+            'serving': row.get('serving', True),
+            'score': row.get('score', ''),
+            'match_id': row.get('match_id', '')
+        }
+        point_data.append(point_info)
+    
+    # Parse with Jeff notation parser
+    parser = JeffNotationParser()
+    patterns = parser.extract_player_patterns(point_data)
+    
+    # Convert to flat feature dictionary
+    features = {}
+    
+    # Serve features
+    serve_patterns = patterns.get('serve_patterns', {})
+    features['jeff_ace_rate'] = serve_patterns.get('ace_rate', 0.08)
+    features['jeff_service_winner_rate'] = serve_patterns.get('service_winner_rate', 0.15)
+    features['jeff_serve_rally_length'] = serve_patterns.get('avg_rally_length', 2.5)
+    
+    # Direction preferences
+    direction_dist = serve_patterns.get('direction_distribution', {})
+    features['jeff_serve_wide_pct'] = direction_dist.get('wide', 0.3)
+    features['jeff_serve_body_pct'] = direction_dist.get('body', 0.4)
+    features['jeff_serve_center_pct'] = direction_dist.get('center', 0.3)
+    
+    # Return features
+    return_patterns = patterns.get('return_patterns', {})
+    features['jeff_return_winner_rate'] = return_patterns.get('return_winner_rate', 0.05)
+    features['jeff_return_error_rate'] = return_patterns.get('return_error_rate', 0.15)
+    features['jeff_return_rally_length'] = return_patterns.get('avg_rally_length', 4.2)
+    
+    # Rally features
+    rally_patterns = patterns.get('rally_patterns', {})
+    features['jeff_avg_rally_length'] = rally_patterns.get('avg_rally_length', 3.8)
+    features['jeff_short_rally_rate'] = rally_patterns.get('short_rally_rate', 0.6)
+    features['jeff_long_rally_rate'] = rally_patterns.get('long_rally_rate', 0.1)
+    features['jeff_net_approach_rate'] = rally_patterns.get('net_approach_rate', 0.08)
+    features['jeff_winner_error_ratio'] = rally_patterns.get('winner_to_error_ratio', 1.2)
+    
+    # Derived tactical features
+    features['jeff_aggression_index'] = (
+        features['jeff_service_winner_rate'] + 
+        features['jeff_return_winner_rate'] + 
+        features['jeff_net_approach_rate']
+    ) / 3
+    
+    features['jeff_consistency_index'] = 1 - features['jeff_return_error_rate']
+    
+    features['jeff_serve_placement_variety'] = 1 - max(
+        features['jeff_serve_wide_pct'],
+        features['jeff_serve_body_pct'], 
+        features['jeff_serve_center_pct']
+    )
+    
+    return features
+
+
+def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
+    """Add Jeff notation features to the historical dataset"""
+    print("Integrating Jeff notation features...")
+    
+    # Add Jeff notation feature columns
+    jeff_features = [
+        'jeff_ace_rate', 'jeff_service_winner_rate', 'jeff_serve_rally_length',
+        'jeff_serve_wide_pct', 'jeff_serve_body_pct', 'jeff_serve_center_pct',
+        'jeff_return_winner_rate', 'jeff_return_error_rate', 'jeff_return_rally_length',
+        'jeff_avg_rally_length', 'jeff_short_rally_rate', 'jeff_long_rally_rate',
+        'jeff_net_approach_rate', 'jeff_winner_error_ratio', 'jeff_aggression_index',
+        'jeff_consistency_index', 'jeff_serve_placement_variety'
+    ]
+    
+    # Add columns for winner and loser
+    for feature in jeff_features:
+        for prefix in ['winner', 'loser']:
+            col_name = f"{prefix}_{feature}"
+            if col_name not in historical_data.columns:
+                historical_data[col_name] = np.nan
+    
+    matches_updated = 0
+    total_matches = len(historical_data)
+    
+    for idx, row in historical_data.iterrows():
+        if idx % 1000 == 0:
+            print(f"Processing Jeff notation for match {idx}/{total_matches}")
+            
+        # Skip if already has Jeff notation features
+        if pd.notna(row.get('winner_jeff_ace_rate')):
+            continue
+            
+        try:
+            winner_canonical = row.get('winner_canonical', '')
+            loser_canonical = row.get('loser_canonical', '')
+            gender = row.get('gender', 'M')
+            
+            if not winner_canonical or not loser_canonical:
+                continue
+                
+            # Extract features for winner
+            winner_jeff_features = extract_jeff_notation_features(
+                winner_canonical, gender, jeff_data
+            )
+            
+            # Extract features for loser  
+            loser_jeff_features = extract_jeff_notation_features(
+                loser_canonical, gender, jeff_data
+            )
+            
+            # Update dataframe
+            for feature_name, feature_value in winner_jeff_features.items():
+                col_name = f'winner_{feature_name}'
+                if col_name in historical_data.columns:
+                    historical_data.at[idx, col_name] = feature_value
+                    
+            for feature_name, feature_value in loser_jeff_features.items():
+                col_name = f'loser_{feature_name}'
+                if col_name in historical_data.columns:
+                    historical_data.at[idx, col_name] = feature_value
+            
+            if winner_jeff_features or loser_jeff_features:
+                matches_updated += 1
+                
+        except Exception as e:
+            if idx < 10:  # Only log first few errors
+                print(f"Error processing Jeff notation for match {idx}: {e}")
+            continue
+    
+    print(f"Updated {matches_updated} matches with Jeff notation features")
+    return historical_data
+
 
 # ============================================================================
 # TENNIS ABSTRACT TO JEFF TRANSFORMATION
@@ -4096,7 +4595,10 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
         logging.error(f"ERROR extracting Jeff features: {e}")
         return pd.DataFrame(), jeff_data, weighted_defaults
 
-    logging.info("Step 7: Integrating API and TA data...")
+    logging.info("Step 7: Adding Jeff notation features...")
+    tennis_data = integrate_jeff_notation_into_pipeline(tennis_data, jeff_data)
+
+    logging.info("Step 8: Integrating API and TA data...")
     tennis_data = integrate_api_tennis_data_incremental(tennis_data)
 
     logging.info(f"=== REAL DATA GENERATION COMPLETE ===")
