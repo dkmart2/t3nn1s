@@ -1568,6 +1568,234 @@ class AutomatedTennisAbstractScraper(TennisAbstractScraper):
 
         return records
 
+
+# ============================================================================
+# FINAL TENNIS ABSTRACT SET SCORE SCRAPER
+# ============================================================================
+
+import requests
+import time
+import re
+from bs4 import BeautifulSoup
+import pandas as pd
+from typing import Dict, Optional, Tuple, List
+import os
+import pickle
+
+
+class TennisAbstractSetScoreScraper:
+    def __init__(self, cache_dir="cache/ta_scores"):
+        self.headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        self.cache_dir = cache_dir
+        self.score_cache = {}
+        os.makedirs(cache_dir, exist_ok=True)
+        self._load_cache()
+
+    def _load_cache(self):
+        """Load existing scraped scores from cache"""
+        cache_file = os.path.join(self.cache_dir, "scraped_scores.pkl")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'rb') as f:
+                    self.score_cache = pickle.load(f)
+                print(f"Loaded {len(self.score_cache)} cached scores")
+            except Exception as e:
+                print(f"Error loading cache: {e}")
+                self.score_cache = {}
+
+    def _save_cache(self):
+        """Save scraped scores to cache"""
+        cache_file = os.path.join(self.cache_dir, "scraped_scores.pkl")
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(self.score_cache, f)
+        except Exception as e:
+            print(f"Error saving cache: {e}")
+
+    def extract_set_score_from_ta_page(self, url: str) -> Optional[Dict]:
+        """Extract set score from Tennis Abstract match page"""
+        try:
+            response = requests.get(url, headers=self.headers, timeout=30)
+            response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # Look for the pattern: <b>Player1 d. Player2 6-4 7-5 7-6(3)</b>
+            bold_tags = soup.find_all('b')
+
+            for bold in bold_tags:
+                text = bold.get_text().strip()
+
+                # Pattern handles tiebreakers: "Jannik Sinner d. Novak Djokovic 6-4 7-5 7-6(3)"
+                pattern = r'^(.+?)\s+d\.\s+(.+?)\s+((?:\d+-\d+(?:\(\d+\))?\s*)+)$'
+                match = re.search(pattern, text)
+
+                if match:
+                    winner = match.group(1).strip()
+                    loser = match.group(2).strip()
+                    score_str = match.group(3).strip()
+
+                    # Clean up score: normalize spacing
+                    score_str = re.sub(r'\s+', ' ', score_str)
+
+                    return {
+                        'score': score_str,
+                        'winner': winner,
+                        'loser': loser,
+                        'raw_text': text,
+                        'url': url
+                    }
+
+            return None
+
+        except Exception as e:
+            print(f"Error scraping {url}: {e}")
+            return None
+
+    def parse_set_score_to_outcome(self, score_str: str) -> Optional[Tuple[int, int]]:
+        """Convert "6-4 7-5 7-6(3)" to (3, 0) set outcome"""
+        if not score_str:
+            return None
+
+        # Split into individual set scores
+        sets = score_str.split()
+        winner_sets = 0
+        loser_sets = 0
+
+        for set_score in sets:
+            if '-' in set_score:
+                # Handle tiebreaks: "7-6(3)" → "7-6"
+                clean_score = re.sub(r'\(\d+\)', '', set_score.strip())
+                parts = clean_score.split('-')
+
+                if len(parts) == 2:
+                    try:
+                        p1_games = int(parts[0])
+                        p2_games = int(parts[1])
+
+                        # Winner has more games (or wins tiebreak if tied)
+                        if p1_games > p2_games:
+                            winner_sets += 1
+                        elif p2_games > p1_games:
+                            loser_sets += 1
+                        # If tied (7-7), check original for tiebreak
+                        elif '(' in set_score:
+                            # Tiebreak: first player listed won
+                            winner_sets += 1
+
+                    except ValueError:
+                        continue
+
+        return (winner_sets, loser_sets) if (winner_sets + loser_sets) > 0 else None
+
+    def build_ta_url_from_jeff_match(self, match_row: Dict) -> Optional[str]:
+        """Build Tennis Abstract URL from Jeff's match metadata"""
+        try:
+            match_id = match_row.get('match_id', '')
+            if not match_id:
+                return None
+            return f"https://tennisabstract.com/charting/{match_id}.html"
+        except Exception:
+            return None
+
+    def bulk_scrape_jeff_set_scores(self, jeff_data: Dict, max_matches_per_gender: int = 300) -> Dict:
+        """Scrape set scores for Jeff matches with caching and rate limiting"""
+
+        all_scores = {}
+        total_scraped = 0
+
+        for gender in ['men', 'women']:
+            if gender not in jeff_data or 'matches' not in jeff_data[gender]:
+                continue
+
+            jeff_matches = jeff_data[gender]['matches']
+            print(f"\n=== Scraping {gender.upper()} matches ===")
+            print(f"Total available: {len(jeff_matches)}, Processing: {min(len(jeff_matches), max_matches_per_gender)}")
+
+            scraped = 0
+            errors = 0
+            cached_hits = 0
+
+            for idx, match_row in jeff_matches.head(max_matches_per_gender).iterrows():
+                try:
+                    match_id = match_row.get('match_id', '')
+                    if not match_id:
+                        continue
+
+                    # Check cache first
+                    if match_id in self.score_cache:
+                        all_scores[match_id] = self.score_cache[match_id]
+                        cached_hits += 1
+                        continue
+
+                    # Build Tennis Abstract URL
+                    url = self.build_ta_url_from_jeff_match(match_row)
+                    if not url:
+                        continue
+
+                    # Scrape set score
+                    result = self.extract_set_score_from_ta_page(url)
+
+                    if result:
+                        score_str = result['score']
+                        set_outcome = self.parse_set_score_to_outcome(score_str)
+
+                        # Use Jeff's "Best of" column directly
+                        best_of = int(match_row.get('Best of', 3))
+                        if best_of not in [3, 5]:
+                            best_of = 3
+
+                        score_data = {
+                            'score': score_str,
+                            'set_outcome': set_outcome,  # (3, 0), (2, 1), etc.
+                            'best_of': best_of,
+                            'winner': result['winner'],
+                            'loser': result['loser'],
+                            'tournament': match_row.get('tournament', ''),
+                            'round': match_row.get('round', ''),
+                            'gender': 'M' if gender == 'men' else 'W'
+                        }
+
+                        all_scores[match_id] = score_data
+                        self.score_cache[match_id] = score_data
+
+                        scraped += 1
+                        total_scraped += 1
+                        print(f"  ✓ {match_id}: {score_str} → {set_outcome} (Bo{best_of})")
+
+                    else:
+                        errors += 1
+                        if errors < 3:
+                            print(f"  ✗ {match_id}: No score found")
+
+                    # Progress update and rate limiting
+                    if (scraped + errors + cached_hits) % 25 == 0:
+                        progress = scraped + errors + cached_hits
+                        print(
+                            f"    Progress: {progress}/{max_matches_per_gender} ({scraped} new, {cached_hits} cached, {errors} errors)")
+
+                    if scraped > 0 and scraped % 10 == 0:
+                        self._save_cache()  # Periodic cache saves
+
+                    time.sleep(1.2)  # Rate limiting
+
+                except KeyboardInterrupt:
+                    print("Scraping interrupted by user")
+                    break
+                except Exception as e:
+                    errors += 1
+                    continue
+
+            print(f"  {gender.upper()} complete: {scraped} new scores, {cached_hits} from cache, {errors} errors")
+
+        # Final cache save
+        self._save_cache()
+        print(f"\n=== SCRAPING SUMMARY ===")
+        print(f"Total scores in dataset: {len(all_scores)}")
+        print(f"New scores scraped this session: {total_scraped}")
+
+        return all_scores
+
 # ============================================================================
 # TENNIS ABSTRACT TO JEFF TRANSFORMATION
 # ============================================================================
