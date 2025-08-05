@@ -1921,84 +1921,41 @@ class JeffNotationParser:
 
 
 def extract_jeff_notation_features(player_canonical, gender, jeff_data):
-    """Extract features from Jeff's notation for a specific player"""
+    """Fixed to work with actual points data structure"""
     gender_key = 'men' if gender == 'M' else 'women'
-    
+
     if gender_key not in jeff_data or 'points_2020s' not in jeff_data[gender_key]:
         return {}
-        
-    points_df = jeff_data[gender_key]['points_2020s']
-    
-    if 'Player_canonical' not in points_df.columns:
-        return {}
-        
-    # Get all points for this player
-    player_points = points_df[points_df['Player_canonical'] == player_canonical]
-    
-    if len(player_points) == 0:
-        return {}
-    
-    # Convert to list of point dictionaries
-    point_data = []
-    for _, row in player_points.iterrows():
-        point_info = {
-            'notation': row.get('notation', ''),
-            'serving': row.get('serving', True),
-            'score': row.get('score', ''),
-            'match_id': row.get('match_id', '')
-        }
-        point_data.append(point_info)
-    
-    # Parse with Jeff notation parser
-    parser = JeffNotationParser()
-    patterns = parser.extract_player_patterns(point_data)
-    
-    # Convert to flat feature dictionary
-    features = {}
-    
-    # Serve features
-    serve_patterns = patterns.get('serve_patterns', {})
-    features['jeff_ace_rate'] = serve_patterns.get('ace_rate', 0.08)
-    features['jeff_service_winner_rate'] = serve_patterns.get('service_winner_rate', 0.15)
-    features['jeff_serve_rally_length'] = serve_patterns.get('avg_rally_length', 2.5)
-    
-    # Direction preferences
-    direction_dist = serve_patterns.get('direction_distribution', {})
-    features['jeff_serve_wide_pct'] = direction_dist.get('wide', 0.3)
-    features['jeff_serve_body_pct'] = direction_dist.get('body', 0.4)
-    features['jeff_serve_center_pct'] = direction_dist.get('center', 0.3)
-    
-    # Return features
-    return_patterns = patterns.get('return_patterns', {})
-    features['jeff_return_winner_rate'] = return_patterns.get('return_winner_rate', 0.05)
-    features['jeff_return_error_rate'] = return_patterns.get('return_error_rate', 0.15)
-    features['jeff_return_rally_length'] = return_patterns.get('avg_rally_length', 4.2)
-    
-    # Rally features
-    rally_patterns = patterns.get('rally_patterns', {})
-    features['jeff_avg_rally_length'] = rally_patterns.get('avg_rally_length', 3.8)
-    features['jeff_short_rally_rate'] = rally_patterns.get('short_rally_rate', 0.6)
-    features['jeff_long_rally_rate'] = rally_patterns.get('long_rally_rate', 0.1)
-    features['jeff_net_approach_rate'] = rally_patterns.get('net_approach_rate', 0.08)
-    features['jeff_winner_error_ratio'] = rally_patterns.get('winner_to_error_ratio', 1.2)
-    
-    # Derived tactical features
-    features['jeff_aggression_index'] = (
-        features['jeff_service_winner_rate'] + 
-        features['jeff_return_winner_rate'] + 
-        features['jeff_net_approach_rate']
-    ) / 3
-    
-    features['jeff_consistency_index'] = 1 - features['jeff_return_error_rate']
-    
-    features['jeff_serve_placement_variety'] = 1 - max(
-        features['jeff_serve_wide_pct'],
-        features['jeff_serve_body_pct'], 
-        features['jeff_serve_center_pct']
-    )
-    
-    return features
 
+    points_df = jeff_data[gender_key]['points_2020s']
+    player_points = []
+
+    for _, row in points_df.iterrows():
+        match_id = row['match_id']
+
+        # Parse player names from match_id
+        parts = match_id.split('-')
+        if len(parts) >= 6:
+            player1_name = parts[-2].replace('_', ' ')
+            player2_name = parts[-1].replace('_', ' ')
+
+            player1_canonical = canonical_player(player1_name)
+            player2_canonical = canonical_player(player2_name)
+
+            server = row['Svr']
+            current_player = player1_canonical if server == 1 else player2_canonical
+
+            if current_player == player_canonical:
+                notation = row.get('1st', '') or row.get('2nd', '')
+                if notation and pd.notna(notation):
+                    player_points.append({
+                        'notation': notation,
+                        'serving': True,
+                        'match_id': match_id
+                    })
+
+    if not player_points:
+        return {}
 
 def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
     """Add Jeff notation features to the historical dataset"""
@@ -4120,6 +4077,40 @@ def get_h2h_data(p1_key, p2_key):
         return result
 
 
+def infer_surface_from_tournament(tournament_name, tournament_round=""):
+    """Map tournament names to surfaces"""
+    name = str(tournament_name).lower()
+    round_info = str(tournament_round).lower()
+
+    # Grand Slams
+    if 'wimbledon' in name or 'wimbledon' in round_info:
+        return 'Grass'
+    elif any(x in name for x in ['french', 'roland', 'garros']):
+        return 'Clay'
+    elif 'us open' in name or 'australian' in name:
+        return 'Hard'
+
+    # ATP/WTA Tours - Clay
+    elif any(x in name for x in
+             ['monte carlo', 'madrid', 'rome', 'barcelona', 'hamburg', 'gstaad', 'umag', 'bastad', 'kitzbuhel',
+              'bucharest', 'marrakech', 'estoril', 'munich', 'geneva']):
+        return 'Clay'
+
+    # ATP/WTA Tours - Hard
+    elif any(x in name for x in
+             ['masters', 'miami', 'indian wells', 'cincinnati', 'toronto', 'montreal', 'paris masters', 'shanghai',
+              'beijing', 'tokyo', 'dubai', 'doha', 'acapulco', 'delray beach', 'memphis', 'las vegas', 'winston salem',
+              'washington', 'atlanta', 'newport', 'los cabos']):
+        return 'Hard'
+
+    # ATP/WTA Tours - Grass
+    elif any(x in name for x in ['halle', 'queens', 'eastbourne', 's-hertogenbosch', 'stuttgart', 'mallorca']):
+        return 'Grass'
+
+    # Default to Hard (most common)
+    return 'Hard'
+
+
 def get_tournaments_metadata():
     """Get tournament metadata from fixtures since API endpoint is restricted"""
     cache_file = CACHE_API / "tournaments.pkl"
@@ -4140,13 +4131,16 @@ def get_tournaments_metadata():
             for fixture in fixtures:
                 tournament_key = safe_int_convert(fixture.get('tournament_key'))
                 if tournament_key is not None:
+                    tournament_name = fixture.get('tournament_name', '')
+                    tournament_round = fixture.get('tournament_round', '')
+
                     tournament_dict[str(tournament_key)] = {
-                        'tournament_name': fixture.get('tournament_name'),
+                        'tournament_name': tournament_name,
                         'tournament_key': tournament_key,
-                        'tournament_round': fixture.get('tournament_round'),
+                        'tournament_round': tournament_round,
                         'tournament_season': fixture.get('tournament_season'),
                         'event_type_type': fixture.get('event_type_type'),
-                        'surface': 'Unknown'
+                        'surface': infer_surface_from_tournament(tournament_name, tournament_round)
                     }
 
         cache_file.write_bytes(pickle.dumps(tournament_dict, 4))
@@ -4202,7 +4196,7 @@ def get_player_profile(player_key):
         return {}
 
 
-def integrate_api_tennis_data_incremental_with_sets(historical_data):
+def integrate_api_tennis_data_incremental(historical_data):
     """FIXED: API integration that properly stores set scores"""
     df = historical_data.copy()
     if "source_rank" not in df.columns:
@@ -4870,62 +4864,6 @@ def calculate_data_completeness(match_row) -> float:
 
 
 # ============================================================================
-# INTEGRATION FUNCTIONS
-# ============================================================================
-
-
-
-def validate_set_score_extraction():
-    """
-    Test the set score parsing and feature extraction
-    """
-    print("=== VALIDATING SET SCORE EXTRACTION ===")
-
-    # Test set score parsing
-    test_scores = [
-        "6-4 6-2",  # → (2, 0)
-        "4-6 6-3 6-4",  # → (2, 1)
-        "6-7 6-4 3-6",  # → (1, 2)
-        "6-0 6-1",  # → (2, 0)
-        "7-6 6-7 6-3"  # → (2, 1)
-    ]
-
-    for score in test_scores:
-        result = parse_set_score(score)
-        print(f"'{score}' → {result}")
-
-    # Test with actual data if available
-    try:
-        # Try to load cached data - functions defined later in file
-        if os.path.exists(HD_PATH):
-            hist = pd.read_parquet(HD_PATH)
-            if hist is not None and not hist.empty:
-                sample = hist.head(5)
-                features = extract_set_score_features(sample)
-                print(f"\nSample features shape: {features.shape}")
-                print(f"Sample features columns: {list(features.columns)}")
-                print(f"\nSample data:")
-                print(features[['match_id', 'service_gap', 'elo_diff', 'actual_set_outcome']].head())
-            else:
-                print("No cached data found for testing")
-        else:
-            print("No cache file exists yet - run data generation first")
-    except Exception as e:
-        print(f"Could not test with real data: {e}")
-
-
-if __name__ == "__main__":
-    # Only run validation, not the full enhancement (to avoid function call issues)
-    validate_set_score_extraction()
-
-    print("\nTo run full enhancement:")
-    print("1. Ensure cache exists: Run main tennis prediction pipeline first")
-    print("2. Then call: enhance_historical_data_for_set_scores()")
-
-    # Uncomment below after cache functions are defined later in file:
-    # hist, set_features, jeff_data = enhance_historical_data_for_set_scores()
-
-# ============================================================================
 # FEATURE EXTRACTION HELPERS
 # ============================================================================
 
@@ -5007,7 +4945,6 @@ def extract_unified_match_context_fixed(match_data):
     context['data_quality_score'] = min(score, 1.0)
 
     return context
-
 
 def predict_match_unified(args, hist, jeff_data, defaults):
     """Enhanced prediction function that tries multiple composite_id variations"""
@@ -5333,6 +5270,19 @@ if __name__ == "__main__":
     hist = integrate_api_tennis_data_incremental(hist)
     save_to_cache(hist, jeff_data, defaults)
 
+    # Data testing mode - exit before prediction
+    if args.player1 == "test_data_only":
+        print("=== DATA TESTING COMPLETE ===")
+        print(f"Historical data shape: {hist.shape}")
+        jeff_cols = [col for col in hist.columns if 'jeff_' in col]
+        print(f"Jeff notation columns: {len(jeff_cols)}")
+        if jeff_cols:
+            matches_with_jeff = hist['winner_jeff_ace_rate'].notna().sum()
+            print(f"Matches with Jeff features: {matches_with_jeff}/{len(hist)}")
+        else:
+            print("❌ No Jeff notation columns found")
+        exit()
+
     # Handle training mode
     if args.train_model:
         print("\n=== TRAINING ML MODEL ===")
@@ -5408,170 +5358,3 @@ if __name__ == "__main__":
         print(f"- Use --use_ml_model for ML-based prediction")
 
     print("\nPREDICTION COMPLETE")
-
-
-    def test_set_score_integration():
-        """Test set score integration functionality"""
-        print("=== TESTING SET SCORE INTEGRATION ===")
-
-        # Test 1: Load data and check set score columns
-        print("\n1. Loading data and checking structure...")
-        hist, jeff_data, defaults = load_from_cache()
-
-        if hist is None:
-            print("❌ No cached data found. Run main pipeline first.")
-            return
-
-        print(f"✓ Loaded {len(hist)} matches")
-
-        # Check for set score columns
-        set_columns = ['sets_won_winner', 'sets_won_loser', 'total_sets', 'score_string', 'set_score_source']
-        missing_cols = [col for col in set_columns if col not in hist.columns]
-
-        if missing_cols:
-            print(f"❌ Missing columns: {missing_cols}")
-            print("Run integration first.")
-            return
-        else:
-            print("✓ Set score columns exist")
-
-        # Test 2: Check set score coverage
-        print("\n2. Analyzing set score coverage...")
-        total_matches = len(hist)
-        with_set_scores = hist['sets_won_winner'].notna().sum()
-        coverage_pct = (with_set_scores / total_matches) * 100
-
-        print(f"Set score coverage: {with_set_scores}/{total_matches} ({coverage_pct:.1f}%)")
-
-        # Coverage by source
-        if 'set_score_source' in hist.columns:
-            by_source = hist.groupby('set_score_source').size().sort_values(ascending=False)
-            print("Coverage by source:")
-            for source, count in by_source.items():
-                print(f"  {source}: {count}")
-
-        # Coverage by date
-        if 'date' in hist.columns:
-            hist['date'] = pd.to_datetime(hist['date'], errors='coerce')
-            hist['year'] = hist['date'].dt.year
-
-            by_year = hist.groupby('year').agg({
-                'composite_id': 'count',
-                'sets_won_winner': lambda x: x.notna().sum()
-            }).rename(columns={'composite_id': 'total', 'sets_won_winner': 'with_scores'})
-            by_year['coverage_pct'] = (by_year['with_scores'] / by_year['total'] * 100).round(1)
-
-            print("\nCoverage by year:")
-            print(by_year)
-
-        # Test 3: Sample some Tennis Abstract URLs
-        print("\n3. Testing Tennis Abstract scraper on sample matches...")
-
-        # Get some Jeff matches
-        jeff_matches = []
-        for gender in ['men', 'women']:
-            if gender in jeff_data and 'matches' in jeff_data[gender]:
-                sample = jeff_data[gender]['matches'].head(3)
-                for _, match in sample.iterrows():
-                    jeff_matches.append({
-                        'match_id': match.get('match_id', ''),
-                        'player1': match.get('player1', ''),
-                        'player2': match.get('player2', ''),
-                        'gender': gender
-                    })
-
-        if jeff_matches:
-            scraper = TennisAbstractSetScoreScraper()
-
-            for match in jeff_matches[:3]:  # Test first 3
-                match_id = match['match_id']
-                url = f"https://tennisabstract.com/charting/{match_id}.html"
-
-                print(f"\nTesting: {match['player1']} vs {match['player2']}")
-                print(f"URL: {url}")
-
-                try:
-                    result = scraper.extract_set_score_from_ta_page(url)
-                    if result:
-                        print(f"✓ Found: {result['score']}")
-                        print(f"  Winner: {result['winner']}")
-                        print(f"  Loser: {result['loser']}")
-
-                        # Test parsing
-                        set_outcome = scraper.parse_set_score_to_outcome(result['score'])
-                        print(f"  Parsed: {set_outcome}")
-                    else:
-                        print("❌ No score found")
-
-                except Exception as e:
-                    print(f"❌ Error: {e}")
-
-        # Test 4: Validate some set scores
-        print("\n4. Validating set score data...")
-
-        sample_with_scores = hist[hist['sets_won_winner'].notna()].head(10)
-
-        if len(sample_with_scores) > 0:
-            print("Sample set scores:")
-            for _, row in sample_with_scores.iterrows():
-                winner_sets = row.get('sets_won_winner', 0)
-                loser_sets = row.get('sets_won_loser', 0)
-                total_sets = row.get('total_sets', 0)
-                score_string = row.get('score_string', '')
-                source = row.get('set_score_source', '')
-
-                print(f"  {winner_sets}-{loser_sets} ({total_sets} sets) '{score_string}' [{source}]")
-
-                # Basic validation
-                if winner_sets + loser_sets != total_sets:
-                    print(f"    ❌ Invalid: {winner_sets} + {loser_sets} ≠ {total_sets}")
-        else:
-            print("❌ No matches with set scores found")
-
-        # Test 5: Check API set scores
-        print("\n5. Checking API set score integration...")
-
-        api_matches = hist[hist['source_rank'] == 2]  # API matches
-        api_with_sets = api_matches['sets_won_p1'].notna().sum()
-
-        print(f"API matches: {len(api_matches)}")
-        print(f"API matches with sets: {api_with_sets}")
-
-        if api_with_sets > 0:
-            print("Sample API set scores:")
-            api_sample = api_matches[api_matches['sets_won_p1'].notna()].head(3)
-            for _, row in api_sample.iterrows():
-                p1_sets = row.get('sets_won_p1', 0)
-                p2_sets = row.get('sets_won_p2', 0)
-                total = row.get('total_sets', 0)
-                print(f"  {p1_sets}-{p2_sets} ({total} sets)")
-
-        print("\n=== TEST COMPLETE ===")
-
-
-    def quick_set_score_test():
-        """Quick test of set score parsing"""
-        print("=== QUICK SET SCORE PARSER TEST ===")
-
-        test_scores = [
-            "6-4 6-2",  # → (2, 0)
-            "4-6 6-3 6-4",  # → (2, 1)
-            "6-7 6-4 3-6",  # → (1, 2)
-            "7-6(3) 6-4",  # → (2, 0)
-            "6-0 6-1",  # → (2, 0)
-            "6-4 4-6 7-6(5)"  # → (2, 1)
-        ]
-
-        scraper = TennisAbstractSetScoreScraper()
-
-        for score in test_scores:
-            result = scraper.parse_set_score_to_outcome(score)
-            print(f"'{score}' → {result}")
-
-        print("✓ Parser test complete")
-
-
-    if __name__ == "__main__":
-        # Run tests
-        quick_set_score_test()
-        test_set_score_integration()
