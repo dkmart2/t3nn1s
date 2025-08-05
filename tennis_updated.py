@@ -621,332 +621,6 @@ def extract_jeff_features(player_canonical, gender, jeff_data):
     }
 
 
-def parse_set_score(score_string: str) -> Optional[Tuple[int, int]]:
-    """
-    Convert tennis score string to set outcome
-
-    Examples:
-    "6-4 6-2" → (2, 0)
-    "4-6 6-3 6-4" → (2, 1)
-    "6-7 6-4 3-6" → (1, 2)
-
-    Returns:
-        (winner_sets, loser_sets) or None if unparseable
-    """
-    if pd.isna(score_string) or not score_string:
-        return None
-
-    # Clean the score string
-    score_string = str(score_string).strip()
-
-    # Handle common formats: "6-4 6-2", "6-4, 6-2", "6-4  6-2"
-    sets = re.split(r'[,\s]+', score_string)
-
-    winner_sets = 0
-    loser_sets = 0
-
-    for set_score in sets:
-        # Match pattern like "6-4", "7-6", "6-7"
-        match = re.match(r'(\d+)-(\d+)', set_score.strip())
-        if match:
-            g1, g2 = int(match.group(1)), int(match.group(2))
-
-            # Determine set winner
-            if g1 > g2:
-                winner_sets += 1
-            else:
-                loser_sets += 1
-
-    return (winner_sets, loser_sets) if (winner_sets + loser_sets) > 0 else None
-
-
-def calculate_service_dominance_gap(match_row) -> float:
-    """
-    Calculate the service dominance differential - key predictor of set margins
-
-    Service dominance = (Aces + Service Winners) / Total Service Points
-    Gap = Winner's dominance - Loser's dominance
-    """
-    # Winner's service dominance
-    winner_aces = getattr(match_row, 'winner_aces', 0) or 0
-    winner_serve_pts = getattr(match_row, 'winner_serve_pts', 80) or 80
-    winner_service_winners = getattr(match_row, 'winner_service_winners', winner_aces * 1.5) or winner_aces * 1.5
-
-    winner_dominance = (winner_aces + winner_service_winners) / winner_serve_pts if winner_serve_pts > 0 else 0.1
-
-    # Loser's service dominance
-    loser_aces = getattr(match_row, 'loser_aces', 0) or 0
-    loser_serve_pts = getattr(match_row, 'loser_serve_pts', 80) or 80
-    loser_service_winners = getattr(match_row, 'loser_service_winners', loser_aces * 1.5) or loser_aces * 1.5
-
-    loser_dominance = (loser_aces + loser_service_winners) / loser_serve_pts if loser_serve_pts > 0 else 0.1
-
-    return winner_dominance - loser_dominance
-
-
-def calculate_break_point_efficiency(match_row, player_prefix: str) -> float:
-    """
-    Calculate break point conversion/save rate - critical for set scores
-    """
-    if player_prefix == 'winner':
-        # Break points converted (return game)
-        bp_converted = getattr(match_row, 'winner_bp_converted', 0) or 0
-        bp_opportunities = getattr(match_row, 'winner_bp_opportunities', 0) or 0
-
-        if bp_opportunities > 0:
-            return bp_converted / bp_opportunities
-        else:
-            # Estimate from return points won
-            return_pts_won = getattr(match_row, 'winner_return_pts_won', 25) or 25
-            return_pts_total = getattr(match_row, 'winner_return_pts', 75) or 75
-            return return_pts_won / return_pts_total if return_pts_total > 0 else 0.33
-
-    else:  # loser
-        # Break points saved (service game)
-        bp_saved = getattr(match_row, 'loser_bp_saved', 0) or 0
-        bp_faced = getattr(match_row, 'loser_bp_faced', 0) or 0
-
-        if bp_faced > 0:
-            return bp_saved / bp_faced
-        else:
-            # Estimate from service points won
-            serve_pts_won = getattr(match_row, 'loser_serve_pts_won', 50) or 50
-            serve_pts_total = getattr(match_row, 'loser_serve_pts', 80) or 80
-            return serve_pts_won / serve_pts_total if serve_pts_total > 0 else 0.65
-
-
-def get_real_elo_diff(match_row) -> float:
-    """
-    Get actual ELO difference - FIXED VERSION
-    TODO: Replace with Tennis Abstract ELO scraping
-    """
-    # Current broken version uses random numbers
-    fake_elo_diff = getattr(match_row, 'elo_diff', 0)
-
-    # Use ranking as ELO proxy for now (will be replaced)
-    winner_rank = getattr(match_row, 'WRank', None) or getattr(match_row, 'p1_ranking', 50)
-    loser_rank = getattr(match_row, 'LRank', None) or getattr(match_row, 'p2_ranking', 50)
-
-    if winner_rank and loser_rank:
-        # Convert ranking difference to ELO difference approximation
-        rank_diff = loser_rank - winner_rank  # Higher rank = lower number
-        # Rough conversion: 10 ranking positions ≈ 25 ELO points
-        elo_diff_estimate = rank_diff * 2.5
-        return elo_diff_estimate
-
-    return fake_elo_diff
-
-
-def calculate_recent_form_variance(match_row) -> float:
-    """
-    Calculate form consistency - affects set score predictability
-    Lower variance = more predictable outcomes
-    """
-    # Use available recent performance indicators
-    winner_last10 = getattr(match_row, 'winner_last10_wins', 5) or 5
-    loser_last10 = getattr(match_row, 'loser_last10_wins', 5) or 5
-
-    # Convert to win percentages
-    winner_form = winner_last10 / 10
-    loser_form = loser_last10 / 10
-
-    # Form variance (higher = less predictable)
-    # Perfect form (1.0 or 0.0) = low variance, mixed form (0.5) = high variance
-    winner_variance = 4 * winner_form * (1 - winner_form)  # Max at 0.5
-    loser_variance = 4 * loser_form * (1 - loser_form)
-
-    return (winner_variance + loser_variance) / 2
-
-
-def extract_set_score_features(historical_data: pd.DataFrame, jeff_data: dict = None) -> pd.DataFrame:
-    """
-    Convert existing tennis_updated data into set-score-predictive features
-
-    Returns:
-        DataFrame with columns: match_id, service_gap, elo_diff, break_point_diff,
-                               form_variance, actual_set_outcome, surface, etc.
-    """
-    print(f"Extracting set score features from {len(historical_data)} matches...")
-
-    set_features = []
-    processed = 0
-    errors = 0
-
-    for idx, match_row in historical_data.iterrows():
-        try:
-            # Core set-predictive features
-            service_gap = calculate_service_dominance_gap(match_row)
-            elo_diff = get_real_elo_diff(match_row)
-
-            # Break point differentials
-            winner_bp_efficiency = calculate_break_point_efficiency(match_row, 'winner')
-            loser_bp_efficiency = calculate_break_point_efficiency(match_row, 'loser')
-            break_point_diff = winner_bp_efficiency - (1 - loser_bp_efficiency)
-
-            # Form and predictability
-            form_variance = calculate_recent_form_variance(match_row)
-
-            # Match context
-            surface = getattr(match_row, 'surface', 'Hard') or 'Hard'
-            best_of = 3  # Default, could extract from tournament info
-
-            # H2H dominance
-            h2h_win_pct = getattr(match_row, 'p1_h2h_win_pct', 0.5) or 0.5
-            h2h_dominance = abs(h2h_win_pct - 0.5)
-
-            # Parse actual set outcome if available
-            actual_sets = None
-            score_column = getattr(match_row, 'Score', None) or getattr(match_row, 'score', None)
-            if score_column:
-                actual_sets = parse_set_score(score_column)
-
-            # Data quality indicators
-            source_rank = getattr(match_row, 'source_rank', 3)
-            data_completeness = calculate_data_completeness(match_row)
-
-            feature_dict = {
-                'match_id': getattr(match_row, 'composite_id', f'match_{idx}'),
-                'service_gap': service_gap,
-                'elo_diff': elo_diff,
-                'break_point_diff': break_point_diff,
-                'form_variance': form_variance,
-                'h2h_dominance': h2h_dominance,
-                'surface': surface,
-                'best_of': best_of,
-                'source_rank': source_rank,
-                'data_completeness': data_completeness,
-                'actual_set_outcome': actual_sets,
-
-                # Store raw match data for reference
-                'winner_name': getattr(match_row, 'Winner', ''),
-                'loser_name': getattr(match_row, 'Loser', ''),
-                'date': getattr(match_row, 'date', None),
-                'tournament': getattr(match_row, 'tournament_name', ''),
-
-                # Additional predictive features
-                'winner_aces_per_set': getattr(match_row, 'winner_aces', 5) / 2,  # Assume 2 sets avg
-                'loser_aces_per_set': getattr(match_row, 'loser_aces', 3) / 2,
-                'winner_df_per_set': getattr(match_row, 'winner_dfs', 2) / 2,
-                'loser_df_per_set': getattr(match_row, 'loser_dfs', 3) / 2
-            }
-
-            set_features.append(feature_dict)
-            processed += 1
-
-            if processed % 1000 == 0:
-                print(f"  Processed {processed}/{len(historical_data)} matches...")
-
-        except Exception as e:
-            errors += 1
-            if errors < 5:  # Show first few errors
-                print(f"  Error processing match {idx}: {e}")
-            continue
-
-    result_df = pd.DataFrame(set_features)
-
-    print(f"✓ Extracted features from {processed} matches ({errors} errors)")
-    print(f"✓ Found {result_df['actual_set_outcome'].notna().sum()} matches with set scores")
-
-    # Surface encoding for ML models
-    result_df['surface_hard'] = (result_df['surface'] == 'Hard').astype(int)
-    result_df['surface_clay'] = (result_df['surface'] == 'Clay').astype(int)
-    result_df['surface_grass'] = (result_df['surface'] == 'Grass').astype(int)
-
-    return result_df
-
-
-def calculate_data_completeness(match_row) -> float:
-    """
-    Score the completeness of match data (0-1)
-    Higher score = more reliable for set score prediction
-    """
-    required_fields = [
-        'winner_aces', 'loser_aces', 'winner_serve_pts', 'loser_serve_pts',
-        'winner_return_pts_won', 'loser_return_pts_won', 'WRank', 'LRank'
-    ]
-
-    present_fields = 0
-    for field in required_fields:
-        value = getattr(match_row, field, None)
-        if value is not None and not pd.isna(value) and value != 0:
-            present_fields += 1
-
-    return present_fields / len(required_fields)
-
-
-# ============================================================================
-# INTEGRATION FUNCTIONS
-# ============================================================================
-
-def enhance_historical_data_for_set_scores(cache_reload=False):
-    """
-    Main function to load existing data and enhance it for set score prediction
-    """
-    print("=== PHASE 1: ENHANCING DATA FOR SET SCORE PREDICTION ===")
-
-    # Load existing data
-    if cache_reload:
-        hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
-    else:
-        hist, jeff_data, defaults = load_from_cache_with_scraping()
-
-    if hist is None or hist.empty:
-        print("No historical data available. Run data generation first.")
-        return None, None, None
-
-    print(f"Loaded {len(hist)} historical matches")
-
-    # Extract set score features
-    set_features_df = extract_set_score_features(hist, jeff_data)
-
-    # Save enhanced dataset
-    enhanced_cache_path = os.path.join(CACHE_DIR, "set_score_features.parquet")
-    set_features_df.to_parquet(enhanced_cache_path, index=False)
-    print(f"✓ Saved enhanced set score features to {enhanced_cache_path}")
-
-    return hist, set_features_df, jeff_data
-
-
-def validate_set_score_extraction():
-    """
-    Test the set score parsing and feature extraction
-    """
-    print("=== VALIDATING SET SCORE EXTRACTION ===")
-
-    # Test set score parsing
-    test_scores = [
-        "6-4 6-2",  # → (2, 0)
-        "4-6 6-3 6-4",  # → (2, 1)
-        "6-7 6-4 3-6",  # → (1, 2)
-        "6-0 6-1",  # → (2, 0)
-        "7-6 6-7 6-3"  # → (2, 1)
-    ]
-
-    for score in test_scores:
-        result = parse_set_score(score)
-        print(f"'{score}' → {result}")
-
-    # Test with actual data if available
-    try:
-        hist, _, _ = load_from_cache()
-        if hist is not None and not hist.empty:
-            sample = hist.head(5)
-            features = extract_set_score_features(sample)
-            print(f"\nSample features shape: {features.shape}")
-            print(f"Sample features columns: {list(features.columns)}")
-            print(f"\nSample data:")
-            print(features[['match_id', 'service_gap', 'elo_diff', 'actual_set_outcome']].head())
-    except Exception as e:
-        print(f"Could not test with real data: {e}")
-
-
-if __name__ == "__main__":
-    # Run validation
-    validate_set_score_extraction()
-
-    # Run enhancement
-    hist, set_features, jeff_data = enhance_historical_data_for_set_scores()
-
 def extract_unified_features_fixed(match_data, player_prefix):
     """Enhanced version that prioritizes TA data, falls back to API, then defaults"""
     features = {}
@@ -3686,11 +3360,11 @@ def run_automated_tennis_abstract_integration(historical_data, days_back=None):
     scraper = AutomatedTennisAbstractScraper()
     fresh_scraped = scraper.automated_scraping_session(days_back=30, max_matches=50)
 
-    if not scraped_records:
+    if not fresh_scraped:  # FIXED: was scraped_records
         print("No new Tennis Abstract data scraped")
         return historical_data
 
-    enhanced_data = integrate_scraped_data_hybrid(historical_data, scraped_records)
+    enhanced_data = integrate_scraped_data_hybrid(historical_data, fresh_scraped)  # FIXED: was scraped_records
 
     print(f"Tennis Abstract integration complete. Enhanced dataset with detailed charting features.")
     return enhanced_data
@@ -4557,6 +4231,384 @@ def load_from_cache_direct():
         print(f"Error loading cache: {e}")
     return None
 
+
+# ============================================================================
+# PHASE 1: SET SCORE DATA EXTRACTION - Add to tennis_updated.py
+# ============================================================================
+
+import re
+from typing import Tuple, Optional, Dict, List
+import numpy as np
+import pandas as pd
+
+def parse_set_score(score_string: str) -> Optional[Tuple[int, int]]:
+    """
+    Convert tennis score string to set outcome
+
+    Examples:
+    "6-4 6-2" → (2, 0)
+    "4-6 6-3 6-4" → (2, 1)
+    "6-7 6-4 3-6" → (1, 2)
+
+    Returns:
+        (winner_sets, loser_sets) or None if unparseable
+    """
+    if pd.isna(score_string) or not score_string:
+        return None
+
+    # Clean the score string
+    score_string = str(score_string).strip()
+
+    # Handle common formats: "6-4 6-2", "6-4, 6-2", "6-4  6-2"
+    sets = re.split(r'[,\s]+', score_string)
+
+    winner_sets = 0
+    loser_sets = 0
+
+    for set_score in sets:
+        # Match pattern like "6-4", "7-6", "6-7"
+        match = re.match(r'(\d+)-(\d+)', set_score.strip())
+        if match:
+            g1, g2 = int(match.group(1)), int(match.group(2))
+
+            # Determine set winner
+            if g1 > g2:
+                winner_sets += 1
+            else:
+                loser_sets += 1
+
+    return (winner_sets, loser_sets) if (winner_sets + loser_sets) > 0 else None
+
+
+def calculate_service_dominance_gap(match_row) -> float:
+    """
+    Calculate the service dominance differential - key predictor of set margins
+
+    Service dominance = (Aces + Service Winners) / Total Service Points
+    Gap = Winner's dominance - Loser's dominance
+    """
+    # Winner's service dominance
+    winner_aces = getattr(match_row, 'winner_aces', 0) or 0
+    winner_serve_pts = getattr(match_row, 'winner_serve_pts', 80) or 80
+    winner_service_winners = getattr(match_row, 'winner_service_winners', winner_aces * 1.5) or winner_aces * 1.5
+
+    winner_dominance = (winner_aces + winner_service_winners) / winner_serve_pts if winner_serve_pts > 0 else 0.1
+
+    # Loser's service dominance
+    loser_aces = getattr(match_row, 'loser_aces', 0) or 0
+    loser_serve_pts = getattr(match_row, 'loser_serve_pts', 80) or 80
+    loser_service_winners = getattr(match_row, 'loser_service_winners', loser_aces * 1.5) or loser_aces * 1.5
+
+    loser_dominance = (loser_aces + loser_service_winners) / loser_serve_pts if loser_serve_pts > 0 else 0.1
+
+    return winner_dominance - loser_dominance
+
+
+def calculate_break_point_efficiency(match_row, player_prefix: str) -> float:
+    """
+    Calculate break point conversion/save rate - critical for set scores
+    """
+    if player_prefix == 'winner':
+        # Break points converted (return game)
+        bp_converted = getattr(match_row, 'winner_bp_converted', 0) or 0
+        bp_opportunities = getattr(match_row, 'winner_bp_opportunities', 0) or 0
+
+        if bp_opportunities > 0:
+            return bp_converted / bp_opportunities
+        else:
+            # Estimate from return points won
+            return_pts_won = getattr(match_row, 'winner_return_pts_won', 25) or 25
+            return_pts_total = getattr(match_row, 'winner_return_pts', 75) or 75
+            return return_pts_won / return_pts_total if return_pts_total > 0 else 0.33
+
+    else:  # loser
+        # Break points saved (service game)
+        bp_saved = getattr(match_row, 'loser_bp_saved', 0) or 0
+        bp_faced = getattr(match_row, 'loser_bp_faced', 0) or 0
+
+        if bp_faced > 0:
+            return bp_saved / bp_faced
+        else:
+            # Estimate from service points won
+            serve_pts_won = getattr(match_row, 'loser_serve_pts_won', 50) or 50
+            serve_pts_total = getattr(match_row, 'loser_serve_pts', 80) or 80
+            return serve_pts_won / serve_pts_total if serve_pts_total > 0 else 0.65
+
+
+def get_real_elo_diff(match_row) -> float:
+    """
+    Get actual ELO difference - FIXED VERSION
+    TODO: Replace with Tennis Abstract ELO scraping
+    """
+    # Current broken version uses random numbers
+    fake_elo_diff = getattr(match_row, 'elo_diff', 0)
+
+    # Use ranking as ELO proxy for now (will be replaced)
+    winner_rank = getattr(match_row, 'WRank', None) or getattr(match_row, 'p1_ranking', 50)
+    loser_rank = getattr(match_row, 'LRank', None) or getattr(match_row, 'p2_ranking', 50)
+
+    if winner_rank and loser_rank:
+        # Convert ranking difference to ELO difference approximation
+        rank_diff = loser_rank - winner_rank  # Higher rank = lower number
+        # Rough conversion: 10 ranking positions ≈ 25 ELO points
+        elo_diff_estimate = rank_diff * 2.5
+        return elo_diff_estimate
+
+    return fake_elo_diff
+
+
+def calculate_recent_form_variance(match_row) -> float:
+    """
+    Calculate form consistency - affects set score predictability
+    Lower variance = more predictable outcomes
+    """
+    # Use available recent performance indicators
+    winner_last10 = getattr(match_row, 'winner_last10_wins', 5) or 5
+    loser_last10 = getattr(match_row, 'loser_last10_wins', 5) or 5
+
+    # Convert to win percentages
+    winner_form = winner_last10 / 10
+    loser_form = loser_last10 / 10
+
+    # Form variance (higher = less predictable)
+    # Perfect form (1.0 or 0.0) = low variance, mixed form (0.5) = high variance
+    winner_variance = 4 * winner_form * (1 - winner_form)  # Max at 0.5
+    loser_variance = 4 * loser_form * (1 - loser_form)
+
+    return (winner_variance + loser_variance) / 2
+
+
+def extract_set_score_features(historical_data: pd.DataFrame, jeff_data: dict = None) -> pd.DataFrame:
+    """
+    Convert existing tennis_updated data into set-score-predictive features
+
+    Returns:
+        DataFrame with columns: match_id, service_gap, elo_diff, break_point_diff,
+                               form_variance, actual_set_outcome, surface, etc.
+    """
+    print(f"Extracting set score features from {len(historical_data)} matches...")
+
+    set_features = []
+    processed = 0
+    errors = 0
+
+    for idx, match_row in historical_data.iterrows():
+        try:
+            # Core set-predictive features
+            service_gap = calculate_service_dominance_gap(match_row)
+            elo_diff = get_real_elo_diff(match_row)
+
+            # Break point differentials
+            winner_bp_efficiency = calculate_break_point_efficiency(match_row, 'winner')
+            loser_bp_efficiency = calculate_break_point_efficiency(match_row, 'loser')
+            break_point_diff = winner_bp_efficiency - (1 - loser_bp_efficiency)
+
+            # Form and predictability
+            form_variance = calculate_recent_form_variance(match_row)
+
+            # Match context
+            surface = getattr(match_row, 'surface', 'Hard') or 'Hard'
+            best_of = 3  # Default, could extract from tournament info
+
+            # H2H dominance
+            h2h_win_pct = getattr(match_row, 'p1_h2h_win_pct', 0.5) or 0.5
+            h2h_dominance = abs(h2h_win_pct - 0.5)
+
+            # Parse actual set outcome if available
+            actual_sets = None
+            score_column = getattr(match_row, 'Score', None) or getattr(match_row, 'score', None)
+            if score_column:
+                actual_sets = parse_set_score(score_column)
+
+            # Data quality indicators
+            source_rank = getattr(match_row, 'source_rank', 3)
+            data_completeness = calculate_data_completeness(match_row)
+
+            feature_dict = {
+                'match_id': getattr(match_row, 'composite_id', f'match_{idx}'),
+                'service_gap': service_gap,
+                'elo_diff': elo_diff,
+                'break_point_diff': break_point_diff,
+                'form_variance': form_variance,
+                'h2h_dominance': h2h_dominance,
+                'surface': surface,
+                'best_of': best_of,
+                'source_rank': source_rank,
+                'data_completeness': data_completeness,
+                'actual_set_outcome': actual_sets,
+
+                # Store raw match data for reference
+                'winner_name': getattr(match_row, 'Winner', ''),
+                'loser_name': getattr(match_row, 'Loser', ''),
+                'date': getattr(match_row, 'date', None),
+                'tournament': getattr(match_row, 'tournament_name', ''),
+
+                # Additional predictive features
+                'winner_aces_per_set': getattr(match_row, 'winner_aces', 5) / 2,  # Assume 2 sets avg
+                'loser_aces_per_set': getattr(match_row, 'loser_aces', 3) / 2,
+                'winner_df_per_set': getattr(match_row, 'winner_dfs', 2) / 2,
+                'loser_df_per_set': getattr(match_row, 'loser_dfs', 3) / 2
+            }
+
+            set_features.append(feature_dict)
+            processed += 1
+
+            if processed % 1000 == 0:
+                print(f"  Processed {processed}/{len(historical_data)} matches...")
+
+        except Exception as e:
+            errors += 1
+            if errors < 5:  # Show first few errors
+                print(f"  Error processing match {idx}: {e}")
+            continue
+
+    result_df = pd.DataFrame(set_features)
+
+    print(f"✓ Extracted features from {processed} matches ({errors} errors)")
+    print(f"✓ Found {result_df['actual_set_outcome'].notna().sum()} matches with set scores")
+
+    # Surface encoding for ML models
+    result_df['surface_hard'] = (result_df['surface'] == 'Hard').astype(int)
+    result_df['surface_clay'] = (result_df['surface'] == 'Clay').astype(int)
+    result_df['surface_grass'] = (result_df['surface'] == 'Grass').astype(int)
+
+    return result_df
+
+
+def calculate_data_completeness(match_row) -> float:
+    """
+    Score the completeness of match data (0-1)
+    Higher score = more reliable for set score prediction
+    """
+    required_fields = [
+        'winner_aces', 'loser_aces', 'winner_serve_pts', 'loser_serve_pts',
+        'winner_return_pts_won', 'loser_return_pts_won', 'WRank', 'LRank'
+    ]
+
+    present_fields = 0
+    for field in required_fields:
+        value = getattr(match_row, field, None)
+        if value is not None and not pd.isna(value) and value != 0:
+            present_fields += 1
+
+    return present_fields / len(required_fields)
+
+
+# ============================================================================
+# INTEGRATION FUNCTIONS
+# ============================================================================
+
+def enhance_historical_data_for_set_scores(cache_reload=False):
+    """
+    Main function to load existing data and enhance it for set score prediction
+    """
+    print("=== PHASE 1: ENHANCING DATA FOR SET SCORE PREDICTION ===")
+
+    # Load existing data - avoid calling functions defined later in file
+    hist = None
+    jeff_data = None
+    defaults = None
+
+    if cache_reload:
+        print("Cache reload requested - generating fresh data...")
+        # This function call will work if it's defined earlier in the file
+        try:
+            hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
+        except NameError:
+            print("generate_comprehensive_historical_data not available - check cache instead")
+
+    # Try to load from cache directly
+    if hist is None:
+        try:
+            if os.path.exists(HD_PATH):
+                print("Loading historical data from cache...")
+                hist = pd.read_parquet(HD_PATH)
+
+                # Load Jeff data if available
+                if os.path.exists(JEFF_PATH):
+                    with open(JEFF_PATH, "rb") as f:
+                        jeff_data = pickle.load(f)
+
+                # Load defaults if available
+                if os.path.exists(DEF_PATH):
+                    with open(DEF_PATH, "rb") as f:
+                        defaults = pickle.load(f)
+
+            else:
+                print("No cache found. Need to generate data first.")
+                print("Run: python tennis_updated.py --generate-data")
+                return None, None, None
+
+        except Exception as e:
+            print(f"Error loading cached data: {e}")
+            return None, None, None
+
+    if hist is None or hist.empty:
+        print("No historical data available. Run data generation first.")
+        return None, None, None
+
+    print(f"Loaded {len(hist)} historical matches")
+
+    # Extract set score features
+    set_features_df = extract_set_score_features(hist, jeff_data)
+
+    # Save enhanced dataset
+    enhanced_cache_path = os.path.join(CACHE_DIR, "set_score_features.parquet")
+    set_features_df.to_parquet(enhanced_cache_path, index=False)
+    print(f"✓ Saved enhanced set score features to {enhanced_cache_path}")
+
+    return hist, set_features_df, jeff_data
+
+
+def validate_set_score_extraction():
+    """
+    Test the set score parsing and feature extraction
+    """
+    print("=== VALIDATING SET SCORE EXTRACTION ===")
+
+    # Test set score parsing
+    test_scores = [
+        "6-4 6-2",  # → (2, 0)
+        "4-6 6-3 6-4",  # → (2, 1)
+        "6-7 6-4 3-6",  # → (1, 2)
+        "6-0 6-1",  # → (2, 0)
+        "7-6 6-7 6-3"  # → (2, 1)
+    ]
+
+    for score in test_scores:
+        result = parse_set_score(score)
+        print(f"'{score}' → {result}")
+
+    # Test with actual data if available
+    try:
+        # Try to load cached data - functions defined later in file
+        if os.path.exists(HD_PATH):
+            hist = pd.read_parquet(HD_PATH)
+            if hist is not None and not hist.empty:
+                sample = hist.head(5)
+                features = extract_set_score_features(sample)
+                print(f"\nSample features shape: {features.shape}")
+                print(f"Sample features columns: {list(features.columns)}")
+                print(f"\nSample data:")
+                print(features[['match_id', 'service_gap', 'elo_diff', 'actual_set_outcome']].head())
+            else:
+                print("No cached data found for testing")
+        else:
+            print("No cache file exists yet - run data generation first")
+    except Exception as e:
+        print(f"Could not test with real data: {e}")
+
+
+if __name__ == "__main__":
+    # Only run validation, not the full enhancement (to avoid function call issues)
+    validate_set_score_extraction()
+
+    print("\nTo run full enhancement:")
+    print("1. Ensure cache exists: Run main tennis prediction pipeline first")
+    print("2. Then call: enhance_historical_data_for_set_scores()")
+
+    # Uncomment below after cache functions are defined later in file:
+    # hist, set_features, jeff_data = enhance_historical_data_for_set_scores()
 
 # ============================================================================
 # FEATURE EXTRACTION HELPERS
