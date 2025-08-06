@@ -537,63 +537,388 @@ def extract_serve_basics_features(player_canonical, gender, jeff_data):
 
     return features
 
+
 def extract_key_points_serve_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 35+ features from KeyPointsServe pressure serving (was 4 basic)"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'key_points_serve' not in jeff_data[gender_key]:
         return {}
 
     df = jeff_data[gender_key]['key_points_serve']
-    player_data = df[df['Player_canonical'] == player_canonical]
+
+    # Handle name mapping - use contains for partial matching
+    if 'Player_canonical' in df.columns:
+        player_data = df[df['Player_canonical'] == player_canonical]
+    else:
+        # Extract surname from canonical format for matching
+        if player_canonical == 'sinner_j':
+            search_name = 'Sinner'
+        elif player_canonical == 'alcaraz_c':
+            search_name = 'Alcaraz'
+        elif player_canonical == 'djokovic_n':
+            search_name = 'Djokovic'
+        else:
+            # Generic extraction: take part before underscore, capitalize
+            search_name = player_canonical.split('_')[0].capitalize()
+
+        player_data = df[df['player'].str.contains(search_name, case=False, na=False)]
 
     if player_data.empty:
         return {}
 
-    total_data = player_data[player_data['row'] == 'STotal']
-    if total_data.empty:
-        return {}
-
-    totals = total_data[['pts', 'pts_won', 'aces', 'svc_winners']].sum()
-
     features = {}
-    if totals['pts'] > 0:
-        features['kps_pts'] = float(totals['pts'])
-        features['kps_pts_won'] = float(totals['pts_won'])
-        features['kps_aces'] = float(totals['aces'])
-        features['kps_win_pct'] = features['kps_pts_won'] / features['kps_pts']
+
+    # === BREAK POINT PERFORMANCE (BP row) ===
+    bp_data = player_data[player_data['row'] == 'BP']
+    if not bp_data.empty:
+        bp_totals = bp_data[['pts', 'pts_won', 'first_in', 'aces', 'svc_winners',
+                             'rally_winners', 'rally_forced', 'unforced', 'dfs']].sum()
+
+        bp_pts = bp_totals['pts']
+        if bp_pts > 0:
+            # Raw break point data (9 features)
+            features['kps_bp_pts'] = float(bp_pts)
+            features['kps_bp_pts_won'] = float(bp_totals['pts_won'])
+            features['kps_bp_first_in'] = float(bp_totals['first_in'])
+            features['kps_bp_aces'] = float(bp_totals['aces'])
+            features['kps_bp_svc_winners'] = float(bp_totals['svc_winners'])
+            features['kps_bp_rally_winners'] = float(bp_totals['rally_winners'])
+            features['kps_bp_rally_forced'] = float(bp_totals['rally_forced'])
+            features['kps_bp_unforced'] = float(bp_totals['unforced'])
+            features['kps_bp_dfs'] = float(bp_totals['dfs'])
+
+            # Break point percentages (6 features)
+            features['kps_bp_save_pct'] = features['kps_bp_pts_won'] / bp_pts
+            features['kps_bp_first_serve_pct'] = features['kps_bp_first_in'] / bp_pts
+            features['kps_bp_ace_rate'] = features['kps_bp_aces'] / bp_pts
+            features['kps_bp_service_winner_rate'] = features['kps_bp_svc_winners'] / bp_pts
+            features['kps_bp_error_rate'] = features['kps_bp_unforced'] / bp_pts
+            features['kps_bp_df_rate'] = features['kps_bp_dfs'] / bp_pts
+
+            # Break point tactical metrics (3 features)
+            total_winners = features['kps_bp_aces'] + features['kps_bp_svc_winners'] + features['kps_bp_rally_winners']
+            features['kps_bp_total_winners'] = total_winners
+            features['kps_bp_winner_rate'] = total_winners / bp_pts
+            features['kps_bp_dominance'] = (total_winners + features['kps_bp_rally_forced']) / bp_pts
+
+    # === GAME POINT PERFORMANCE (GP row) ===
+    gp_data = player_data[player_data['row'] == 'GP']
+    if not gp_data.empty:
+        gp_totals = gp_data[['pts', 'pts_won', 'first_in', 'aces', 'svc_winners',
+                             'rally_winners', 'rally_forced', 'unforced', 'dfs']].sum()
+
+        gp_pts = gp_totals['pts']
+        if gp_pts > 0:
+            # Raw game point data (9 features)
+            features['kps_gp_pts'] = float(gp_pts)
+            features['kps_gp_pts_won'] = float(gp_totals['pts_won'])
+            features['kps_gp_first_in'] = float(gp_totals['first_in'])
+            features['kps_gp_aces'] = float(gp_totals['aces'])
+            features['kps_gp_svc_winners'] = float(gp_totals['svc_winners'])
+            features['kps_gp_rally_winners'] = float(gp_totals['rally_winners'])
+            features['kps_gp_rally_forced'] = float(gp_totals['rally_forced'])
+            features['kps_gp_unforced'] = float(gp_totals['unforced'])
+            features['kps_gp_dfs'] = float(gp_totals['dfs'])
+
+            # Game point percentages (6 features)
+            features['kps_gp_conversion_pct'] = features['kps_gp_pts_won'] / gp_pts
+            features['kps_gp_first_serve_pct'] = features['kps_gp_first_in'] / gp_pts
+            features['kps_gp_ace_rate'] = features['kps_gp_aces'] / gp_pts
+            features['kps_gp_service_winner_rate'] = features['kps_gp_svc_winners'] / gp_pts
+            features['kps_gp_error_rate'] = features['kps_gp_unforced'] / gp_pts
+            features['kps_gp_df_rate'] = features['kps_gp_dfs'] / gp_pts
+
+    # === DEUCE PERFORMANCE (Deuce row) ===
+    deuce_data = player_data[player_data['row'] == 'Deuce']
+    if not deuce_data.empty:
+        deuce_totals = deuce_data[['pts', 'pts_won', 'first_in', 'aces', 'svc_winners',
+                                   'rally_winners', 'rally_forced', 'unforced', 'dfs']].sum()
+
+        deuce_pts = deuce_totals['pts']
+        if deuce_pts > 0:
+            # Raw deuce data (9 features)
+            features['kps_deuce_pts'] = float(deuce_pts)
+            features['kps_deuce_pts_won'] = float(deuce_totals['pts_won'])
+            features['kps_deuce_first_in'] = float(deuce_totals['first_in'])
+            features['kps_deuce_aces'] = float(deuce_totals['aces'])
+            features['kps_deuce_svc_winners'] = float(deuce_totals['svc_winners'])
+            features['kps_deuce_rally_winners'] = float(deuce_totals['rally_winners'])
+            features['kps_deuce_rally_forced'] = float(deuce_totals['rally_forced'])
+            features['kps_deuce_unforced'] = float(deuce_totals['unforced'])
+            features['kps_deuce_dfs'] = float(deuce_totals['dfs'])
+
+            # Deuce percentages (6 features)
+            features['kps_deuce_win_pct'] = features['kps_deuce_pts_won'] / deuce_pts
+            features['kps_deuce_first_serve_pct'] = features['kps_deuce_first_in'] / deuce_pts
+            features['kps_deuce_ace_rate'] = features['kps_deuce_aces'] / deuce_pts
+            features['kps_deuce_service_winner_rate'] = features['kps_deuce_svc_winners'] / deuce_pts
+            features['kps_deuce_error_rate'] = features['kps_deuce_unforced'] / deuce_pts
+            features['kps_deuce_df_rate'] = features['kps_deuce_dfs'] / deuce_pts
+
+    # === OVERALL KEY POINT PERFORMANCE (STotal row) ===
+    total_data = player_data[player_data['row'] == 'STotal']
+    if not total_data.empty:
+        totals = total_data[['pts', 'pts_won', 'first_in', 'aces', 'svc_winners',
+                             'rally_winners', 'rally_forced', 'unforced', 'dfs']].sum()
+
+        total_pts = totals['pts']
+        if total_pts > 0:
+            # Overall key point data (original 4 + 5 new = 9 features)
+            features['kps_total_pts'] = float(total_pts)
+            features['kps_total_pts_won'] = float(totals['pts_won'])
+            features['kps_total_aces'] = float(totals['aces'])
+            features['kps_total_win_pct'] = features['kps_total_pts_won'] / total_pts
+            features['kps_total_first_in'] = float(totals['first_in'])
+            features['kps_total_svc_winners'] = float(totals['svc_winners'])
+            features['kps_total_rally_winners'] = float(totals['rally_winners'])
+            features['kps_total_unforced'] = float(totals['unforced'])
+            features['kps_total_dfs'] = float(totals['dfs'])
+
+            # Overall tactical metrics (6 features)
+            features['kps_total_first_serve_pct'] = features['kps_total_first_in'] / total_pts
+            features['kps_total_ace_rate'] = features['kps_total_aces'] / total_pts
+            total_service_winners = features['kps_total_aces'] + features['kps_total_svc_winners']
+            features['kps_total_service_dominance'] = total_service_winners / total_pts
+            features['kps_total_rally_effectiveness'] = features['kps_total_rally_winners'] / total_pts
+            features['kps_total_error_rate'] = features['kps_total_unforced'] / total_pts
+            features['kps_total_winner_error_ratio'] = (total_service_winners + features['kps_total_rally_winners']) / \
+                                                       features['kps_total_unforced'] if features[
+                                                                                             'kps_total_unforced'] > 0 else 10.0
+
+    # === COMPARATIVE PRESSURE METRICS (8 features) ===
+    bp_save_pct = features.get('kps_bp_save_pct', 0)
+    gp_conversion_pct = features.get('kps_gp_conversion_pct', 0)
+    deuce_win_pct = features.get('kps_deuce_win_pct', 0)
+    total_win_pct = features.get('kps_total_win_pct', 0)
+
+    if bp_save_pct > 0 and gp_conversion_pct > 0:
+        features['kps_pressure_differential'] = gp_conversion_pct - bp_save_pct
+        features['kps_clutch_consistency'] = min(bp_save_pct, gp_conversion_pct) / max(bp_save_pct,
+                                                                                       gp_conversion_pct) if max(
+            bp_save_pct, gp_conversion_pct) > 0 else 0
+
+    if deuce_win_pct > 0 and total_win_pct > 0:
+        features['kps_deuce_vs_average'] = deuce_win_pct - total_win_pct
+
+    # Pressure situation variety (how many different pressure contexts player faced)
+    pressure_contexts = sum([1 for x in [bp_save_pct, gp_conversion_pct, deuce_win_pct] if x > 0])
+    features['kps_pressure_experience'] = pressure_contexts
+
+    # Overall clutch performance index
+    if pressure_contexts > 0:
+        clutch_scores = [x for x in [bp_save_pct, gp_conversion_pct, deuce_win_pct] if x > 0]
+        features['kps_average_clutch_performance'] = sum(clutch_scores) / len(clutch_scores)
+        features['kps_clutch_floor'] = min(clutch_scores)
+        features['kps_clutch_ceiling'] = max(clutch_scores)
+        features['kps_clutch_range'] = features['kps_clutch_ceiling'] - features['kps_clutch_floor']
 
     return features
 
 
 def extract_key_points_return_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 35+ features from KeyPointsReturn pressure returning (was 6 basic)"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'key_points_return' not in jeff_data[gender_key]:
         return {}
 
     df = jeff_data[gender_key]['key_points_return']
-    player_data = df[df['Player_canonical'] == player_canonical]
+
+    # Handle name mapping - use contains for partial matching
+    if 'Player_canonical' in df.columns:
+        player_data = df[df['Player_canonical'] == player_canonical]
+    else:
+        # Extract surname from canonical format for matching
+        if player_canonical == 'sinner_j':
+            search_name = 'Sinner'
+        elif player_canonical == 'alcaraz_c':
+            search_name = 'Alcaraz'
+        elif player_canonical == 'djokovic_n':
+            search_name = 'Djokovic'
+        else:
+            # Generic extraction: take part before underscore, capitalize
+            search_name = player_canonical.split('_')[0].capitalize()
+
+        player_data = df[df['player'].str.contains(search_name, case=False, na=False)]
 
     if player_data.empty:
         return {}
 
-    # FIXED: key_points_return uses 'RTotal'
-    total_data = player_data[player_data['row'] == 'RTotal']
-    if total_data.empty:
-        return {}
-
-    totals = total_data[['pts', 'pts_won']].sum()
-
     features = {}
-    if totals['pts'] > 0:
-        features['kpr_pts'] = float(totals['pts'])
-        features['kpr_pts_won'] = float(totals['pts_won'])
-        features['kpr_win_pct'] = features['kpr_pts_won'] / features['kpr_pts']
+
+    # === BREAK POINT OPPORTUNITIES (BPO row) - Creating break points ===
+    bpo_data = player_data[player_data['row'] == 'BPO']
+    if not bpo_data.empty:
+        bpo_totals = bpo_data[['pts', 'pts_won', 'rally_winners', 'rally_forced', 'unforced']].sum()
+
+        bpo_pts = bpo_totals['pts']
+        if bpo_pts > 0:
+            # Raw break point opportunity data (5 features)
+            features['kpr_bpo_pts'] = float(bpo_pts)
+            features['kpr_bpo_pts_won'] = float(bpo_totals['pts_won'])
+            features['kpr_bpo_rally_winners'] = float(bpo_totals['rally_winners'])
+            features['kpr_bpo_rally_forced'] = float(bpo_totals['rally_forced'])
+            features['kpr_bpo_unforced'] = float(bpo_totals['unforced'])
+
+            # Break point conversion percentages (4 features)
+            features['kpr_bpo_conversion_pct'] = features['kpr_bpo_pts_won'] / bpo_pts
+            features['kpr_bpo_winner_rate'] = features['kpr_bpo_rally_winners'] / bpo_pts
+            features['kpr_bpo_forced_error_rate'] = features['kpr_bpo_rally_forced'] / bpo_pts
+            features['kpr_bpo_error_rate'] = features['kpr_bpo_unforced'] / bpo_pts
+
+            # Break point tactical metrics (3 features)
+            total_positive = features['kpr_bpo_rally_winners'] + features['kpr_bpo_rally_forced']
+            features['kpr_bpo_total_positive'] = total_positive
+            features['kpr_bpo_positive_rate'] = total_positive / bpo_pts
+            features['kpr_bpo_aggression_ratio'] = features['kpr_bpo_rally_winners'] / features['kpr_bpo_unforced'] if \
+            features['kpr_bpo_unforced'] > 0 else 10.0
+
+    # === GAME POINT FACED (GPF row) - Defending against game points ===
+    gpf_data = player_data[player_data['row'] == 'GPF']
+    if not gpf_data.empty:
+        gpf_totals = gpf_data[['pts', 'pts_won', 'rally_winners', 'rally_forced', 'unforced']].sum()
+
+        gpf_pts = gpf_totals['pts']
+        if gpf_pts > 0:
+            # Raw game point defense data (5 features)
+            features['kpr_gpf_pts'] = float(gpf_pts)
+            features['kpr_gpf_pts_won'] = float(gpf_totals['pts_won'])
+            features['kpr_gpf_rally_winners'] = float(gpf_totals['rally_winners'])
+            features['kpr_gpf_rally_forced'] = float(gpf_totals['rally_forced'])
+            features['kpr_gpf_unforced'] = float(gpf_totals['unforced'])
+
+            # Game point defense percentages (4 features)
+            features['kpr_gpf_defense_pct'] = features['kpr_gpf_pts_won'] / gpf_pts
+            features['kpr_gpf_winner_rate'] = features['kpr_gpf_rally_winners'] / gpf_pts
+            features['kpr_gpf_forced_error_rate'] = features['kpr_gpf_rally_forced'] / gpf_pts
+            features['kpr_gpf_error_rate'] = features['kpr_gpf_unforced'] / gpf_pts
+
+            # Game point defense tactical metrics (3 features)
+            total_defensive_positive = features['kpr_gpf_rally_winners'] + features['kpr_gpf_rally_forced']
+            features['kpr_gpf_total_positive'] = total_defensive_positive
+            features['kpr_gpf_positive_rate'] = total_defensive_positive / gpf_pts
+            features['kpr_gpf_defense_quality'] = (features['kpr_gpf_pts_won'] + total_defensive_positive) / gpf_pts
+
+    # === DEUCE RETURN (DeuceR row) - Return games in deuce situations ===
+    deuce_data = player_data[player_data['row'] == 'DeuceR']
+    if not deuce_data.empty:
+        deuce_totals = deuce_data[['pts', 'pts_won', 'rally_winners', 'rally_forced', 'unforced']].sum()
+
+        deuce_pts = deuce_totals['pts']
+        if deuce_pts > 0:
+            # Raw deuce return data (5 features)
+            features['kpr_deuce_pts'] = float(deuce_pts)
+            features['kpr_deuce_pts_won'] = float(deuce_totals['pts_won'])
+            features['kpr_deuce_rally_winners'] = float(deuce_totals['rally_winners'])
+            features['kpr_deuce_rally_forced'] = float(deuce_totals['rally_forced'])
+            features['kpr_deuce_unforced'] = float(deuce_totals['unforced'])
+
+            # Deuce return percentages (4 features)
+            features['kpr_deuce_win_pct'] = features['kpr_deuce_pts_won'] / deuce_pts
+            features['kpr_deuce_winner_rate'] = features['kpr_deuce_rally_winners'] / deuce_pts
+            features['kpr_deuce_forced_error_rate'] = features['kpr_deuce_rally_forced'] / deuce_pts
+            features['kpr_deuce_error_rate'] = features['kpr_deuce_unforced'] / deuce_pts
+
+            # Deuce return tactical metrics (3 features)
+            deuce_positive = features['kpr_deuce_rally_winners'] + features['kpr_deuce_rally_forced']
+            features['kpr_deuce_total_positive'] = deuce_positive
+            features['kpr_deuce_positive_rate'] = deuce_positive / deuce_pts
+            features['kpr_deuce_effectiveness'] = (features['kpr_deuce_pts_won'] + deuce_positive) / deuce_pts
+
+    # === OVERALL RETURN PERFORMANCE (RTotal row) ===
+    total_data = player_data[player_data['row'] == 'RTotal']
+    if not total_data.empty:
+        totals = total_data[['pts', 'pts_won', 'rally_winners', 'rally_forced', 'unforced']].sum()
+
+        total_pts = totals['pts']
+        if total_pts > 0:
+            # Overall return key point data (original + new = 5 features)
+            features['kpr_total_pts'] = float(total_pts)
+            features['kpr_total_pts_won'] = float(totals['pts_won'])
+            features['kpr_total_rally_winners'] = float(totals['rally_winners'])
+            features['kpr_total_rally_forced'] = float(totals['rally_forced'])
+            features['kpr_total_unforced'] = float(totals['unforced'])
+
+            # Overall return tactical metrics (6 features)
+            features['kpr_total_win_pct'] = features['kpr_total_pts_won'] / total_pts
+            features['kpr_total_winner_rate'] = features['kpr_total_rally_winners'] / total_pts
+            features['kpr_total_forced_error_rate'] = features['kpr_total_rally_forced'] / total_pts
+            features['kpr_total_error_rate'] = features['kpr_total_unforced'] / total_pts
+            total_return_positive = features['kpr_total_rally_winners'] + features['kpr_total_rally_forced']
+            features['kpr_total_positive_rate'] = total_return_positive / total_pts
+            features['kpr_total_winner_error_ratio'] = features['kpr_total_rally_winners'] / features[
+                'kpr_total_unforced'] if features['kpr_total_unforced'] > 0 else 10.0
+
+    # === COMPARATIVE RETURN PRESSURE METRICS (8 features) ===
+    bpo_conversion = features.get('kpr_bpo_conversion_pct', 0)
+    gpf_defense = features.get('kpr_gpf_defense_pct', 0)
+    deuce_win = features.get('kpr_deuce_win_pct', 0)
+    total_win = features.get('kpr_total_win_pct', 0)
+
+    if bpo_conversion > 0 and gpf_defense > 0:
+        # Attack vs defense differential - how much better at creating breaks vs defending game points
+        features['kpr_attack_defense_differential'] = bpo_conversion - gpf_defense
+        features['kpr_pressure_versatility'] = min(bpo_conversion, gpf_defense) / max(bpo_conversion,
+                                                                                      gpf_defense) if max(
+            bpo_conversion, gpf_defense) > 0 else 0
+
+    if deuce_win > 0 and total_win > 0:
+        features['kpr_deuce_vs_average'] = deuce_win - total_win
+
+    # Return pressure situation variety (how many different pressure contexts player faced)
+    pressure_contexts = sum([1 for x in [bpo_conversion, gpf_defense, deuce_win] if x > 0])
+    features['kpr_pressure_experience'] = pressure_contexts
+
+    # Overall return pressure performance index
+    if pressure_contexts > 0:
+        pressure_scores = [x for x in [bpo_conversion, gpf_defense, deuce_win] if x > 0]
+        features['kpr_average_pressure_performance'] = sum(pressure_scores) / len(pressure_scores)
+        features['kpr_pressure_floor'] = min(pressure_scores)
+        features['kpr_pressure_ceiling'] = max(pressure_scores)
+        features['kpr_pressure_range'] = features['kpr_pressure_ceiling'] - features['kpr_pressure_floor']
+
+    # === RETURN AGGRESSION ANALYSIS (6 features) ===
+    # Analyze aggressive return patterns across pressure situations
+    bpo_winner_rate = features.get('kpr_bpo_winner_rate', 0)
+    gpf_winner_rate = features.get('kpr_gpf_winner_rate', 0)
+    deuce_winner_rate = features.get('kpr_deuce_winner_rate', 0)
+    total_winner_rate = features.get('kpr_total_winner_rate', 0)
+
+    winner_rates = [x for x in [bpo_winner_rate, gpf_winner_rate, deuce_winner_rate] if x > 0]
+    if winner_rates:
+        features['kpr_average_aggression'] = sum(winner_rates) / len(winner_rates)
+        features['kpr_clutch_aggression'] = max(winner_rates)  # Peak aggression in pressure
+
+        # Situational aggression adaptation
+        if bpo_winner_rate > 0 and gpf_winner_rate > 0:
+            features[
+                'kpr_aggression_adaptation'] = bpo_winner_rate - gpf_winner_rate  # Should be positive (more aggressive on break points)
+
+    # Error discipline under pressure
+    bpo_error_rate = features.get('kpr_bpo_error_rate', 0)
+    gpf_error_rate = features.get('kpr_gpf_error_rate', 0)
+    deuce_error_rate = features.get('kpr_deuce_error_rate', 0)
+
+    error_rates = [x for x in [bpo_error_rate, gpf_error_rate, deuce_error_rate] if x > 0]
+    if error_rates:
+        features['kpr_average_error_discipline'] = 1 - (
+                    sum(error_rates) / len(error_rates))  # Inverted so higher is better
+        features['kpr_pressure_discipline'] = 1 - max(error_rates)  # Best discipline in worst situation
+
+        # Pressure error control differential
+        if bpo_error_rate > 0 and gpf_error_rate > 0:
+            features[
+                'kpr_situational_discipline'] = gpf_error_rate - bpo_error_rate  # Should be negative (fewer errors when attacking)
 
     return features
 
 
 def extract_net_points_features(player_canonical, gender, jeff_data):
+    """
+    EXPANDED: Extract 35+ features from NetPoints comprehensive net game analysis (was 7 basic)
+    Analyzes net point effectiveness, approach shots, passing shot defense, and net positioning
+    """
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'net_points' not in jeff_data[gender_key]:
@@ -605,23 +930,161 @@ def extract_net_points_features(player_canonical, gender, jeff_data):
     if player_data.empty:
         return {}
 
-    # FIXED: net_points uses 'NetPoints' not 'STotal'
-    total_data = player_data[player_data['row'] == 'NetPoints']
-    if total_data.empty:
-        return {}
-
-    totals = total_data[['net_pts', 'pts_won']].sum()
-
     features = {}
-    if totals['net_pts'] > 0:
-        features['np_net_pts'] = float(totals['net_pts'])
-        features['np_pts_won'] = float(totals['pts_won'])
-        features['np_win_pct'] = features['np_pts_won'] / features['np_net_pts']
+
+    # OVERALL NET POINT PERFORMANCE (NetPoints row)
+    netpoints_data = player_data[player_data['row'] == 'NetPoints']
+    if not netpoints_data.empty:
+        np_row = netpoints_data.iloc[0]
+
+        # Raw net point data (6 features)
+        features['np_total_attempts'] = float(np_row['net_pts'])
+        features['np_points_won'] = float(np_row['pts_won'])
+        features['np_net_winners'] = float(np_row['net_winner'])
+        features['np_induced_forced'] = float(np_row['induced_forced'])
+        features['np_unforced_errors'] = float(np_row['net_unforced'])
+        features['np_passed_at_net'] = float(np_row['passed_at_net'])
+
+        # Net point success rates (5 features)
+        if features['np_total_attempts'] > 0:
+            features['np_success_rate'] = (features['np_points_won'] / features['np_total_attempts']) * 100
+            features['np_winner_rate'] = (features['np_net_winners'] / features['np_total_attempts']) * 100
+            features['np_error_rate'] = (features['np_unforced_errors'] / features['np_total_attempts']) * 100
+            features['np_passed_rate'] = (features['np_passed_at_net'] / features['np_total_attempts']) * 100
+            features['np_pressure_rate'] = (features['np_induced_forced'] / features['np_total_attempts']) * 100
+        else:
+            features['np_success_rate'] = 0
+            features['np_winner_rate'] = 0
+            features['np_error_rate'] = 0
+            features['np_passed_rate'] = 0
+            features['np_pressure_rate'] = 0
+
+    # APPROACH SHOT ANALYSIS (Approach row)
+    approach_data = player_data[player_data['row'] == 'Approach']
+    if not approach_data.empty:
+        app_row = approach_data.iloc[0]
+
+        # Raw approach shot data (6 features)
+        features['np_approach_attempts'] = float(app_row['net_pts'])
+        features['np_approach_won'] = float(app_row['pts_won'])
+        features['np_approach_winners'] = float(app_row['net_winner'])
+        features['np_approach_forced'] = float(app_row['induced_forced'])
+        features['np_approach_errors'] = float(app_row['net_unforced'])
+        features['np_approach_passed'] = float(app_row['passed_at_net'])
+
+        # Approach effectiveness rates (4 features)
+        if features['np_approach_attempts'] > 0:
+            features['np_approach_success_rate'] = (features['np_approach_won'] / features[
+                'np_approach_attempts']) * 100
+            features['np_approach_winner_rate'] = (features['np_approach_winners'] / features[
+                'np_approach_attempts']) * 100
+            features['np_approach_error_rate'] = (features['np_approach_errors'] / features[
+                'np_approach_attempts']) * 100
+            features['np_approach_passed_rate'] = (features['np_approach_passed'] / features[
+                'np_approach_attempts']) * 100
+        else:
+            features['np_approach_success_rate'] = 0
+            features['np_approach_winner_rate'] = 0
+            features['np_approach_error_rate'] = 0
+            features['np_approach_passed_rate'] = 0
+
+    # RALLY NET POINTS ANALYSIS (NetPointsRallies vs NetPoints comparison)
+    rally_netpoints_data = player_data[player_data['row'] == 'NetPointsRallies']
+    if not rally_netpoints_data.empty:
+        rally_np_row = rally_netpoints_data.iloc[0]
+
+        # Rally net point raw data (3 features)
+        features['np_rally_attempts'] = float(rally_np_row['net_pts'])
+        features['np_rally_won'] = float(rally_np_row['pts_won'])
+        features['np_rally_winners'] = float(rally_np_row['net_winner'])
+
+        # Rally vs total comparison (2 features)
+        if features.get('np_total_attempts', 0) > 0:
+            features['np_rally_percentage'] = (features['np_rally_attempts'] / features['np_total_attempts']) * 100
+        else:
+            features['np_rally_percentage'] = 0
+
+        if features['np_rally_attempts'] > 0:
+            features['np_rally_success_rate'] = (features['np_rally_won'] / features['np_rally_attempts']) * 100
+        else:
+            features['np_rally_success_rate'] = 0
+
+    # APPROACH RALLY ANALYSIS (ApproachRallies)
+    rally_approach_data = player_data[player_data['row'] == 'ApproachRallies']
+    if not rally_approach_data.empty:
+        rally_app_row = rally_approach_data.iloc[0]
+
+        # Rally approach raw data (2 features)
+        features['np_approach_rally_attempts'] = float(rally_app_row['net_pts'])
+        features['np_approach_rally_won'] = float(rally_app_row['pts_won'])
+
+        # Rally approach effectiveness (1 feature)
+        if features['np_approach_rally_attempts'] > 0:
+            features['np_approach_rally_success_rate'] = (features['np_approach_rally_won'] / features[
+                'np_approach_rally_attempts']) * 100
+        else:
+            features['np_approach_rally_success_rate'] = 0
+
+    # TACTICAL NET GAME METRICS (6 features)
+    # Net game dominance (winners vs errors)
+    net_winners = features.get('np_net_winners', 0)
+    net_errors = features.get('np_unforced_errors', 0)
+    if net_errors > 0:
+        features['np_winner_error_ratio'] = net_winners / net_errors
+    else:
+        features['np_winner_error_ratio'] = net_winners
+
+    # Net aggression index (winners + pressure created)
+    total_attempts = features.get('np_total_attempts', 0)
+    if total_attempts > 0:
+        aggression_points = net_winners + features.get('np_induced_forced', 0)
+        features['np_aggression_index'] = (aggression_points / total_attempts) * 100
+    else:
+        features['np_aggression_index'] = 0
+
+    # Passing shot defense effectiveness
+    passed = features.get('np_passed_at_net', 0)
+    if total_attempts > 0:
+        features['np_passing_defense_rate'] = ((total_attempts - passed) / total_attempts) * 100
+    else:
+        features['np_passing_defense_rate'] = 0
+
+    # Net positioning quality (approach conversion rate)
+    approach_attempts = features.get('np_approach_attempts', 0)
+    approach_won = features.get('np_approach_won', 0)
+    if approach_attempts > 0:
+        features['np_positioning_quality'] = (approach_won / approach_attempts) * 100
+    else:
+        features['np_positioning_quality'] = 0
+
+    # Net game efficiency (points won per total shots)
+    total_shots = 0
+    points_won = features.get('np_points_won', 0)
+
+    # Calculate total shots if available in any row
+    for _, row in player_data.iterrows():
+        if pd.notna(row['total_shots']) and row['total_shots'] > total_shots:
+            total_shots = float(row['total_shots'])
+
+    if total_shots > 0 and points_won > 0:
+        features['np_shot_efficiency'] = points_won / (total_shots / points_won) if points_won > 0 else 0
+    else:
+        features['np_shot_efficiency'] = 0
+
+    # Overall net game effectiveness
+    success_rate = features.get('np_success_rate', 0)
+    winner_rate = features.get('np_winner_rate', 0)
+    error_rate = features.get('np_error_rate', 0)
+    features['np_overall_effectiveness'] = (success_rate + winner_rate - error_rate) / 2
 
     return features
 
 
 def extract_rally_features(player_canonical, gender, jeff_data):
+    """
+    EXPANDED: Extract 35+ features from Rally comprehensive rally length analysis (was 10 basic)
+    Analyzes rally performance by length, serving/returning effectiveness, and tactical patterns
+    """
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'rally' not in jeff_data[gender_key]:
@@ -629,42 +1092,158 @@ def extract_rally_features(player_canonical, gender, jeff_data):
 
     df = jeff_data[gender_key]['rally']
 
-    # Extract surname from canonical format
+    # Extract surname from canonical format for matching
     if player_canonical == 'djokovic_n':
         search_name = 'Djokovic'
     elif player_canonical == 'federer_r':
         search_name = 'Federer'
     elif player_canonical == 'nadal_r':
         search_name = 'Nadal'
+    elif player_canonical == 'sinner_j':
+        search_name = 'Sinner'
+    elif player_canonical == 'alcaraz_c':
+        search_name = 'Alcaraz'
     else:
         # Generic extraction: take part before underscore, capitalize
         search_name = player_canonical.split('_')[0].capitalize()
 
-    player_server = df[df['server'].str.contains(search_name, case=False, na=False)]
-    player_returner = df[df['returner'].str.contains(search_name, case=False, na=False)]
+    # Find player as server or returner
+    player_as_server = df[df['server'].str.contains(search_name, case=False, na=False)]
+    player_as_returner = df[df['returner'].str.contains(search_name, case=False, na=False)]
 
     features = {}
 
-    # Server stats
-    server_total = player_server[player_server['row'] == 'Total']
-    if not server_total.empty:
-        server_totals = server_total[['pts', 'pl1_won', 'pl1_winners', 'pl1_forced', 'pl1_unforced']].sum()
-        if server_totals['pts'] > 0:
-            features['rally_serve_win_pct'] = float(server_totals['pl1_won'] / server_totals['pts'])
-            features['rally_serve_winner_pct'] = float(server_totals['pl1_winners'] / server_totals['pts'])
-            features['rally_serve_error_pct'] = float(server_totals['pl1_unforced'] / server_totals['pts'])
+    # OVERALL RALLY PERFORMANCE (Total row)
+    total_as_server = player_as_server[player_as_server['row'] == 'Total']
+    total_as_returner = player_as_returner[player_as_returner['row'] == 'Total']
 
-    # Returner stats
-    returner_total = player_returner[player_returner['row'] == 'Total']
-    if not returner_total.empty:
-        returner_totals = returner_total[['pts', 'pl2_won', 'pl2_winners', 'pl2_forced', 'pl2_unforced']].sum()
-        if returner_totals['pts'] > 0:
-            features['rally_return_win_pct'] = float(returner_totals['pl2_won'] / returner_totals['pts'])
-            features['rally_return_winner_pct'] = float(returner_totals['pl2_winners'] / returner_totals['pts'])
-            features['rally_return_error_pct'] = float(returner_totals['pl2_unforced'] / returner_totals['pts'])
+    if not total_as_server.empty:
+        server_total = total_as_server.iloc[0]
+
+        # Raw serving rally data (6 features)
+        features['rally_serve_total_pts'] = float(server_total['pts'])
+        features['rally_serve_pts_won'] = float(server_total['pl1_won'])  # pl1 is server
+        features['rally_serve_winners'] = float(server_total['pl1_winners'])
+        features['rally_serve_forced'] = float(server_total['pl1_forced'])
+        features['rally_serve_unforced'] = float(server_total['pl1_unforced'])
+        features['rally_serve_win_pct'] = (features['rally_serve_pts_won'] / features['rally_serve_total_pts'] * 100) if \
+        features['rally_serve_total_pts'] > 0 else 0
+
+    if not total_as_returner.empty:
+        returner_total = total_as_returner.iloc[0]
+
+        # Raw returning rally data (6 features)
+        features['rally_return_total_pts'] = float(returner_total['pts'])
+        features['rally_return_pts_won'] = float(returner_total['pl2_won'])  # pl2 is returner
+        features['rally_return_winners'] = float(returner_total['pl2_winners'])
+        features['rally_return_forced'] = float(returner_total['pl2_forced'])
+        features['rally_return_unforced'] = float(returner_total['pl2_unforced'])
+        features['rally_return_win_pct'] = (
+                    features['rally_return_pts_won'] / features['rally_return_total_pts'] * 100) if features[
+                                                                                                        'rally_return_total_pts'] > 0 else 0
+
+    # RALLY LENGTH PERFORMANCE ANALYSIS
+    rally_categories = ['1-3', '4-6', '7-9', '10']
+    rally_names = ['short', 'medium', 'long', 'very_long']
+
+    for i, (category, name) in enumerate(zip(rally_categories, rally_names)):
+
+        # SERVING PERFORMANCE BY RALLY LENGTH
+        serve_data = player_as_server[player_as_server['row'] == category]
+        if not serve_data.empty:
+            serve_row = serve_data.iloc[0]
+
+            # Raw data (3 features per category)
+            features[f'rally_serve_{name}_pts'] = float(serve_row['pts'])
+            features[f'rally_serve_{name}_won'] = float(serve_row['pl1_won'])
+            features[f'rally_serve_{name}_winners'] = float(serve_row['pl1_winners'])
+
+            # Win percentage (1 feature per category)
+            if features[f'rally_serve_{name}_pts'] > 0:
+                features[f'rally_serve_{name}_win_pct'] = (features[f'rally_serve_{name}_won'] / features[
+                    f'rally_serve_{name}_pts']) * 100
+            else:
+                features[f'rally_serve_{name}_win_pct'] = 0
+
+        # RETURNING PERFORMANCE BY RALLY LENGTH
+        return_data = player_as_returner[player_as_returner['row'] == category]
+        if not return_data.empty:
+            return_row = return_data.iloc[0]
+
+            # Raw data (3 features per category)
+            features[f'rally_return_{name}_pts'] = float(return_row['pts'])
+            features[f'rally_return_{name}_won'] = float(return_row['pl2_won'])
+            features[f'rally_return_{name}_winners'] = float(return_row['pl2_winners'])
+
+            # Win percentage (1 feature per category)
+            if features[f'rally_return_{name}_pts'] > 0:
+                features[f'rally_return_{name}_win_pct'] = (features[f'rally_return_{name}_won'] / features[
+                    f'rally_return_{name}_pts']) * 100
+            else:
+                features[f'rally_return_{name}_win_pct'] = 0
+
+    # TACTICAL RALLY METRICS (8+ features)
+
+    # Rally length preferences (serving)
+    serve_total = features.get('rally_serve_total_pts', 0)
+    if serve_total > 0:
+        features['rally_serve_short_pct'] = (features.get('rally_serve_short_pts', 0) / serve_total) * 100
+        features['rally_serve_long_pct'] = ((features.get('rally_serve_long_pts', 0) + features.get(
+            'rally_serve_very_long_pts', 0)) / serve_total) * 100
+
+    # Rally length preferences (returning)
+    return_total = features.get('rally_return_total_pts', 0)
+    if return_total > 0:
+        features['rally_return_short_pct'] = (features.get('rally_return_short_pts', 0) / return_total) * 100
+        features['rally_return_long_pct'] = ((features.get('rally_return_long_pts', 0) + features.get(
+            'rally_return_very_long_pts', 0)) / return_total) * 100
+
+    # Rally endurance comparison (long rally effectiveness)
+    long_serve_win = features.get('rally_serve_long_win_pct', 0)
+    long_return_win = features.get('rally_return_long_win_pct', 0)
+    short_serve_win = features.get('rally_serve_short_win_pct', 0)
+    short_return_win = features.get('rally_return_short_win_pct', 0)
+
+    features['rally_endurance_advantage'] = ((long_serve_win + long_return_win) / 2) - (
+                (short_serve_win + short_return_win) / 2)
+
+    # Rally adaptability (performance consistency across lengths)
+    serve_win_rates = [features.get(f'rally_serve_{name}_win_pct', 0) for name in rally_names if
+                       features.get(f'rally_serve_{name}_win_pct', 0) > 0]
+    return_win_rates = [features.get(f'rally_return_{name}_win_pct', 0) for name in rally_names if
+                        features.get(f'rally_return_{name}_win_pct', 0) > 0]
+
+    if serve_win_rates:
+        features['rally_serve_consistency'] = min(serve_win_rates) / max(serve_win_rates) if max(
+            serve_win_rates) > 0 else 0
+    else:
+        features['rally_serve_consistency'] = 0
+
+    if return_win_rates:
+        features['rally_return_consistency'] = min(return_win_rates) / max(return_win_rates) if max(
+            return_win_rates) > 0 else 0
+    else:
+        features['rally_return_consistency'] = 0
+
+    # Overall rally dominance
+    overall_serve_win = features.get('rally_serve_win_pct', 0)
+    overall_return_win = features.get('rally_return_win_pct', 0)
+    features['rally_overall_dominance'] = (overall_serve_win + overall_return_win) / 2
+
+    # Rally aggression index (winners per rally)
+    serve_winners = features.get('rally_serve_winners', 0)
+    return_winners = features.get('rally_return_winners', 0)
+    total_rally_pts = serve_total + return_total
+
+    if total_rally_pts > 0:
+        features['rally_aggression_index'] = ((serve_winners + return_winners) / total_rally_pts) * 100
+    else:
+        features['rally_aggression_index'] = 0
+
+    # Rally control differential (serving advantage over returning)
+    features['rally_serve_return_differential'] = overall_serve_win - overall_return_win
 
     return features
-
 
 def extract_serve_direction_features(player_canonical, gender, jeff_data):
     gender_key = 'men' if gender == 'M' else 'women'
@@ -706,10 +1285,6 @@ def extract_serve_direction_features(player_canonical, gender, jeff_data):
 
 
 def extract_return_outcomes_features(player_canonical, gender, jeff_data):
-    """
-    EXPANDED: Extract 30+ features from ReturnOutcomes (was 1 placeholder)
-    Uses ALL available columns and row types for comprehensive return analysis
-    """
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'return_outcomes' not in jeff_data[gender_key]:
@@ -855,7 +1430,6 @@ def extract_return_outcomes_features(player_canonical, gender, jeff_data):
     return features
 
 
-# Copy paste this test
 def extract_return_depth_features_test(player_canonical, gender, jeff_data):
     gender_key = 'men' if gender == 'M' else 'women'
     if gender_key not in jeff_data or 'return_depth' not in jeff_data[gender_key]:
@@ -1145,11 +1719,8 @@ def extract_shot_direction_features(player_canonical, gender, jeff_data):
     return features
 
 
-def extract_shot_dir_outcomes_features(player_canonical, gender, jeff_data):
-    """
-    EXPANDED: Extract 40+ features from ShotDirOutcomes (was 1 placeholder)
-    Analyzes shot outcomes by type (F/B/S) and direction (XC/DTM/DTL/IO) combinations
-    """
+def extract_shot_dir_outcomes_features_fixed(player_canonical, gender, jeff_data):
+    """FIXED: Extract 40+ features from ShotDirOutcomes with proper data aggregation"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'shot_dir_outcomes' not in jeff_data[gender_key]:
@@ -1163,100 +1734,136 @@ def extract_shot_dir_outcomes_features(player_canonical, gender, jeff_data):
 
     features = {}
 
-    # AGGREGATE BY SHOT TYPE (F, B, S)
-    shot_types = ['F', 'B', 'S']
-    for shot_type in shot_types:
-        shot_data = player_data[player_data['row'].str.startswith(shot_type)]
+    # Aggregate across all matches for this player
+    aggregated = player_data.groupby('row')[
+        ['shots', 'pt_ending', 'winners', 'induced_forced', 'unforced', 'shots_in_pts_won', 'shots_in_pts_lost']].sum()
 
-        if not shot_data.empty:
-            totals = shot_data[['shots', 'pt_ending', 'winners', 'induced_forced', 'unforced', 'shots_in_pts_won',
-                                'shots_in_pts_lost']].sum()
+    # Shot type aggregations (F, B, S)
+    shot_types = {'F': 'forehand', 'B': 'backhand', 'S': 'slice'}
+    for shot_prefix, shot_name in shot_types.items():
+        # Get all rows starting with this shot type
+        shot_rows = [row for row in aggregated.index if row.startswith(f'{shot_prefix}-')]
+        if shot_rows:
+            shot_totals = aggregated.loc[shot_rows].sum()
 
-            total_shots = totals['shots']
+            total_shots = shot_totals['shots']
             if total_shots > 0:
-                prefix = f'sdo_{shot_type.lower()}'
-
-                # Raw counts
-                features[f'{prefix}_shots'] = float(total_shots)
-                features[f'{prefix}_pt_ending'] = float(totals['pt_ending'])
-                features[f'{prefix}_winners'] = float(totals['winners'])
-                features[f'{prefix}_unforced'] = float(totals['unforced'])
+                features[f'sdo_{shot_name}_shots'] = int(total_shots)
+                features[f'sdo_{shot_name}_winners'] = int(shot_totals['winners'])
+                features[f'sdo_{shot_name}_errors'] = int(shot_totals['unforced'])
+                features[f'sdo_{shot_name}_pt_ending'] = int(shot_totals['pt_ending'])
 
                 # Effectiveness metrics
-                features[f'{prefix}_winner_rate'] = totals['winners'] / total_shots
-                features[f'{prefix}_error_rate'] = totals['unforced'] / total_shots
-                features[f'{prefix}_pt_ending_rate'] = totals['pt_ending'] / total_shots
-                features[f'{prefix}_effectiveness'] = (totals['winners'] - totals['unforced']) / total_shots
+                features[f'sdo_{shot_name}_winner_rate'] = (shot_totals['winners'] / total_shots) * 100
+                features[f'sdo_{shot_name}_error_rate'] = (shot_totals['unforced'] / total_shots) * 100
+                features[f'sdo_{shot_name}_pt_ending_rate'] = (shot_totals['pt_ending'] / total_shots) * 100
+                features[f'sdo_{shot_name}_effectiveness'] = ((shot_totals['winners'] - shot_totals[
+                    'unforced']) / total_shots) * 100
 
-                # Point outcome efficiency
-                total_outcome_shots = totals['shots_in_pts_won'] + totals['shots_in_pts_lost']
+                # Win efficiency
+                total_outcome_shots = shot_totals['shots_in_pts_won'] + shot_totals['shots_in_pts_lost']
                 if total_outcome_shots > 0:
-                    features[f'{prefix}_win_efficiency'] = totals['shots_in_pts_won'] / total_outcome_shots
+                    features[f'sdo_{shot_name}_win_efficiency'] = (shot_totals[
+                                                                       'shots_in_pts_won'] / total_outcome_shots) * 100
 
-    # AGGREGATE BY DIRECTION (XC, DTM, DTL, IO)
-    directions = ['XC', 'DTM', 'DTL', 'IO']
-    for direction in directions:
-        dir_data = player_data[player_data['row'].str.endswith(direction)]
+    # Direction aggregations (XC, DTL, DTM, IO, II)
+    directions = {'XC': 'crosscourt', 'DTL': 'down_line', 'DTM': 'down_middle', 'IO': 'inside_out', 'II': 'inside_in'}
+    for dir_suffix, dir_name in directions.items():
+        # Get all rows ending with this direction
+        dir_rows = [row for row in aggregated.index if row.endswith(f'-{dir_suffix}')]
+        if dir_rows:
+            dir_totals = aggregated.loc[dir_rows].sum()
 
-        if not dir_data.empty:
-            totals = dir_data[['shots', 'pt_ending', 'winners', 'induced_forced', 'unforced', 'shots_in_pts_won',
-                               'shots_in_pts_lost']].sum()
-
-            total_shots = totals['shots']
+            total_shots = dir_totals['shots']
             if total_shots > 0:
-                prefix = f'sdo_{direction.lower()}'
-
-                # Raw counts
-                features[f'{prefix}_shots'] = float(total_shots)
-                features[f'{prefix}_winners'] = float(totals['winners'])
-                features[f'{prefix}_unforced'] = float(totals['unforced'])
+                features[f'sdo_{dir_name}_shots'] = int(total_shots)
+                features[f'sdo_{dir_name}_winners'] = int(dir_totals['winners'])
+                features[f'sdo_{dir_name}_errors'] = int(dir_totals['unforced'])
 
                 # Effectiveness metrics
-                features[f'{prefix}_winner_rate'] = totals['winners'] / total_shots
-                features[f'{prefix}_error_rate'] = totals['unforced'] / total_shots
-                features[f'{prefix}_effectiveness'] = (totals['winners'] - totals['unforced']) / total_shots
+                features[f'sdo_{dir_name}_winner_rate'] = (dir_totals['winners'] / total_shots) * 100
+                features[f'sdo_{dir_name}_error_rate'] = (dir_totals['unforced'] / total_shots) * 100
+                features[f'sdo_{dir_name}_effectiveness'] = ((dir_totals['winners'] - dir_totals[
+                    'unforced']) / total_shots) * 100
 
-    # SPECIFIC HIGH-VALUE COMBINATIONS
+    # Specific combinations
     key_combinations = ['F-XC', 'F-DTL', 'F-IO', 'B-XC', 'B-DTL']
     for combo in key_combinations:
-        combo_data = player_data[player_data['row'] == combo]
-
-        if not combo_data.empty:
-            row = combo_data.iloc[0]
-            shots = row['shots']
+        if combo in aggregated.index:
+            combo_data = aggregated.loc[combo]
+            shots = combo_data['shots']
 
             if shots > 0:
-                prefix = f'sdo_{combo.lower().replace("-", "_")}'
+                combo_key = combo.lower().replace('-', '_')
+                features[f'sdo_{combo_key}_shots'] = int(shots)
+                features[f'sdo_{combo_key}_winners'] = int(combo_data['winners'])
+                features[f'sdo_{combo_key}_errors'] = int(combo_data['unforced'])
+                features[f'sdo_{combo_key}_winner_rate'] = (combo_data['winners'] / shots) * 100
+                features[f'sdo_{combo_key}_error_rate'] = (combo_data['unforced'] / shots) * 100
+                features[f'sdo_{combo_key}_effectiveness'] = ((combo_data['winners'] - combo_data[
+                    'unforced']) / shots) * 100
 
-                features[f'{prefix}_winner_rate'] = row['winners'] / shots
-                features[f'{prefix}_error_rate'] = row['unforced'] / shots
-                features[f'{prefix}_effectiveness'] = (row['winners'] - row['unforced']) / shots
+    # Overall metrics
+    total_shots = aggregated['shots'].sum()
+    total_winners = aggregated['winners'].sum()
+    total_errors = aggregated['unforced'].sum()
 
-    # TACTICAL COMPARISONS
-    if 'sdo_f_shots' in features and 'sdo_b_shots' in features:
-        # Forehand vs Backhand effectiveness
-        fh_eff = features.get('sdo_f_effectiveness', 0)
-        bh_eff = features.get('sdo_b_effectiveness', 0)
-        features['sdo_fh_vs_bh_effectiveness'] = fh_eff - bh_eff
+    if total_shots > 0:
+        features['sdo_total_shots'] = int(total_shots)
+        features['sdo_total_winners'] = int(total_winners)
+        features['sdo_total_errors'] = int(total_errors)
+        features['sdo_overall_winner_rate'] = (total_winners / total_shots) * 100
+        features['sdo_overall_error_rate'] = (total_errors / total_shots) * 100
+        features['sdo_overall_effectiveness'] = ((total_winners - total_errors) / total_shots) * 100
+        features['sdo_winner_error_ratio'] = total_winners / total_errors if total_errors > 0 else total_winners
 
-        # Shot distribution
-        total_groundstrokes = features['sdo_f_shots'] + features['sdo_b_shots']
-        features['sdo_fh_shot_preference'] = features['sdo_f_shots'] / total_groundstrokes
+    # Shot distribution
+    fh_shots = features.get('sdo_forehand_shots', 0)
+    bh_shots = features.get('sdo_backhand_shots', 0)
+    total_groundstrokes = fh_shots + bh_shots
 
-    # DIRECTION PREFERENCES
-    if 'sdo_xc_shots' in features and 'sdo_dtl_shots' in features:
-        xc_shots = features['sdo_xc_shots']
-        dtl_shots = features['sdo_dtl_shots']
-        total_directional = xc_shots + dtl_shots + features.get('sdo_dtm_shots', 0) + features.get('sdo_io_shots', 0)
+    if total_groundstrokes > 0:
+        features['sdo_fh_shot_preference'] = (fh_shots / total_groundstrokes) * 100
+        features['sdo_fh_vs_bh_effectiveness'] = features.get('sdo_forehand_effectiveness', 0) - features.get(
+            'sdo_backhand_effectiveness', 0)
 
-        if total_directional > 0:
-            features['sdo_crosscourt_preference'] = xc_shots / total_directional
-            features['sdo_attacking_shot_rate'] = (dtl_shots + features.get('sdo_io_shots', 0)) / total_directional
+    # Direction preferences
+    xc_shots = features.get('sdo_crosscourt_shots', 0)
+    dtl_shots = features.get('sdo_down_line_shots', 0)
+    dtm_shots = features.get('sdo_down_middle_shots', 0)
+    io_shots = features.get('sdo_inside_out_shots', 0)
 
-    # OVERALL METRICS
-    all_shots = sum([features.get(f'sdo_{st.lower()}_shots', 0) for st in shot_types])
-    all_winners = sum([features.get(f'sdo_{st.lower()}_winners', 0) for st in shot_types])
-    all_errors = sum([features.get(f'sdo_{st.lo
+    total_directional = xc_shots + dtl_shots + dtm_shots + io_shots
+    if total_directional > 0:
+        features['sdo_crosscourt_preference'] = (xc_shots / total_directional) * 100
+        features['sdo_attacking_shot_rate'] = ((dtl_shots + io_shots) / total_directional) * 100
+        features['sdo_conservative_shot_rate'] = ((xc_shots + dtm_shots) / total_directional) * 100
+
+    return features
+
+
+# Test the fixed function
+jeff_data = load_jeff_comprehensive_data()
+
+for player_canonical, gender, name in [('djokovic_n', 'M', 'Djokovic'), ('sabalenka_a', 'W', 'Sabalenka')]:
+    print(f"--- {name} ShotDirOutcomes FIXED ---")
+    features = extract_shot_dir_outcomes_features_fixed(player_canonical, gender, jeff_data)
+    print(f"Features extracted: {len(features)}")
+
+    if features:
+        # Key tactical metrics
+        print(f"Total shots: {features.get('sdo_total_shots', 0)}")
+        print(f"Overall effectiveness: {features.get('sdo_overall_effectiveness', 0):.1f}%")
+        print(f"FH vs BH effectiveness: {features.get('sdo_fh_vs_bh_effectiveness', 0):.1f}%")
+        print(f"Crosscourt preference: {features.get('sdo_crosscourt_preference', 0):.1f}%")
+        print(f"Attacking shot rate: {features.get('sdo_attacking_shot_rate', 0):.1f}%")
+        print(f"Winner/Error ratio: {features.get('sdo_winner_error_ratio', 0):.2f}")
+        print(f"FH shot preference: {features.get('sdo_fh_shot_preference', 0):.1f}%")
+
+        print(f"All features: {sorted(features.keys())}")
+    else:
+        print("No ShotDirOutcomes data found")
+    print()
 
 
 def extract_shot_types_features(player_canonical, gender, jeff_data):
@@ -2222,6 +2829,151 @@ def extract_matches_features(player_canonical, gender, jeff_data):
     features['matches_experience_diversity'] = (surface_diversity + round_diversity + tournament_diversity) / 3
 
     return features
+
+
+def extract_overview_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 25+ features from Overview match statistics (was missing entirely)"""
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'overview' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['overview']
+
+    # Map canonical name back to full name for matching
+    # djokovic_n -> look for "Djokovic" in player names
+    if player_canonical == 'djokovic_n':
+        player_data = df[df['player'].str.contains('Djokovic', case=False, na=False)]
+    elif player_canonical == 'sinner_j':
+        player_data = df[df['player'].str.contains('Sinner', case=False, na=False)]
+    elif player_canonical == 'alcaraz_c':
+        player_data = df[df['player'].str.contains('Alcaraz', case=False, na=False)]
+    elif player_canonical == 'sabalenka_a':
+        player_data = df[df['player'].str.contains('Sabalenka', case=False, na=False)]
+    else:
+        # Generic mapping: extract surname from canonical name
+        surname = player_canonical.split('_')[0].capitalize()
+        player_data = df[df['player'].str.contains(surname, case=False, na=False)]
+
+    if player_data.empty:
+        return {}
+
+    # Get only Total rows (aggregate across all matches)
+    total_data = player_data[player_data['set'] == 'Total']
+    if total_data.empty:
+        return {}
+
+    # Sum across all Total rows for this player
+    aggregated = total_data[['serve_pts', 'aces', 'dfs', 'first_in', 'first_won', 'second_won',
+                             'bk_pts', 'bp_saved', 'return_pts', 'return_pts_won', 'winners',
+                             'winners_fh', 'winners_bh', 'unforced', 'unforced_fh', 'unforced_bh']].sum()
+
+    features = {}
+
+    # Serve statistics
+    serve_pts = aggregated['serve_pts']
+    if serve_pts > 0:
+        features['ov_serve_pts'] = int(serve_pts)
+        features['ov_aces'] = int(aggregated['aces'])
+        features['ov_double_faults'] = int(aggregated['dfs'])
+        features['ov_first_in'] = int(aggregated['first_in'])
+        features['ov_first_won'] = int(aggregated['first_won'])
+        features['ov_second_won'] = int(aggregated['second_won'])
+
+        # Serve percentages
+        features['ov_ace_rate'] = (aggregated['aces'] / serve_pts) * 100
+        features['ov_df_rate'] = (aggregated['dfs'] / serve_pts) * 100
+        features['ov_first_serve_pct'] = (aggregated['first_in'] / serve_pts) * 100
+        features['ov_first_serve_win_pct'] = (aggregated['first_won'] / aggregated['first_in']) * 100 if aggregated[
+                                                                                                             'first_in'] > 0 else 0
+
+        second_serves = serve_pts - aggregated['first_in']
+        features['ov_second_serve_win_pct'] = (aggregated[
+                                                   'second_won'] / second_serves) * 100 if second_serves > 0 else 0
+        features['ov_serve_dominance'] = ((aggregated['aces'] + aggregated['first_won'] + aggregated[
+            'second_won']) / serve_pts) * 100
+
+    # Return statistics
+    return_pts = aggregated['return_pts']
+    if return_pts > 0:
+        features['ov_return_pts'] = int(return_pts)
+        features['ov_return_pts_won'] = int(aggregated['return_pts_won'])
+        features['ov_return_win_pct'] = (aggregated['return_pts_won'] / return_pts) * 100
+
+    # Winners and errors
+    total_winners = aggregated['winners']
+    total_errors = aggregated['unforced']
+
+    features['ov_winners_total'] = int(total_winners)
+    features['ov_winners_fh'] = int(aggregated['winners_fh'])
+    features['ov_winners_bh'] = int(aggregated['winners_bh'])
+    features['ov_unforced_total'] = int(total_errors)
+    features['ov_unforced_fh'] = int(aggregated['unforced_fh'])
+    features['ov_unforced_bh'] = int(aggregated['unforced_bh'])
+
+    # Shot distribution
+    if total_winners > 0:
+        features['ov_fh_winner_pct'] = (aggregated['winners_fh'] / total_winners) * 100
+        features['ov_bh_winner_pct'] = (aggregated['winners_bh'] / total_winners) * 100
+
+    if total_errors > 0:
+        features['ov_fh_error_pct'] = (aggregated['unforced_fh'] / total_errors) * 100
+        features['ov_bh_error_pct'] = (aggregated['unforced_bh'] / total_errors) * 100
+
+    # Effectiveness ratios
+    if total_errors > 0:
+        features['ov_winner_error_ratio'] = total_winners / total_errors
+
+    if aggregated['unforced_fh'] > 0:
+        features['ov_fh_effectiveness'] = aggregated['winners_fh'] / aggregated['unforced_fh']
+
+    if aggregated['unforced_bh'] > 0:
+        features['ov_bh_effectiveness'] = aggregated['winners_bh'] / aggregated['unforced_bh']
+
+    # Break point performance (using correct column name bk_pts)
+    bk_pts = aggregated['bk_pts']  # break points faced
+    if bk_pts > 0:
+        features['ov_bp_saved'] = int(aggregated['bp_saved'])
+        features['ov_bp_faced'] = int(bk_pts)
+        features['ov_bp_save_pct'] = (aggregated['bp_saved'] / bk_pts) * 100
+
+    # Overall tactical metrics
+    total_points = serve_pts + return_pts
+    if total_points > 0:
+        total_points_won = aggregated['first_won'] + aggregated['second_won'] + aggregated['return_pts_won']
+        features['ov_total_points'] = int(total_points)
+        features['ov_total_points_won'] = int(total_points_won)
+        features['ov_point_win_pct'] = (total_points_won / total_points) * 100
+
+    return features
+
+
+# Test the fixed Overview function
+jeff_data = load_jeff_comprehensive_data()
+
+for player_canonical, gender, name in [('djokovic_n', 'M', 'Djokovic'), ('sinner_j', 'M', 'Sinner'),
+                                       ('alcaraz_c', 'M', 'Alcaraz')]:
+    print(f"--- {name} Overview ---")
+    features = extract_overview_features(player_canonical, gender, jeff_data)
+    print(f"Features extracted: {len(features)}")
+
+    if features:
+        print(f"Total points: {features.get('ov_total_points', 0)}")
+        print(f"Ace rate: {features.get('ov_ace_rate', 0):.1f}%")
+        print(f"First serve %: {features.get('ov_first_serve_pct', 0):.1f}%")
+        print(f"Return win %: {features.get('ov_return_win_pct', 0):.1f}%")
+        print(f"Winner/Error ratio: {features.get('ov_winner_error_ratio', 0):.2f}")
+        print(f"Break point save %: {features.get('ov_bp_save_pct', 0):.1f}%")
+        print(f"Point win %: {features.get('ov_point_win_pct', 0):.1f}%")
+
+        print(f"All features: {sorted(features.keys())}")
+    else:
+        print("No Overview data found")
+    print()
+
+
+
+
 
 def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, weighted_defaults=None):
     """Enhanced feature extraction with ALL Jeff data files"""
