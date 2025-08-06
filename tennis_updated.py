@@ -493,11 +493,8 @@ def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
 # JEFF FILES EXTRACTION
 # ============================================================================
 
-# ============================================================================
-# ADD THEM IN THE "JEFF FILE EXTRACTION FUNCTIONS" SECTION
-# ============================================================================
-
 def extract_serve_basics_features(player_canonical, gender, jeff_data):
+    """Extract 16 ServeBasics features (expanded from 6)"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'serve_basics' not in jeff_data[gender_key]:
@@ -509,12 +506,13 @@ def extract_serve_basics_features(player_canonical, gender, jeff_data):
     if player_data.empty:
         return {}
 
-    # FIXED: serve_basics uses 'Total' not 'STotal'
+    # ServeBasics uses 'Total' row for aggregation
     total_data = player_data[player_data['row'] == 'Total']
     if total_data.empty:
         return {}
 
-    totals = total_data[['pts', 'pts_won', 'aces', 'unret', 'wide', 'body', 't']].sum()
+    # THIS IS THE MISSING PART - DEFINE TOTALS
+    totals = total_data[['pts', 'pts_won', 'aces', 'unret', 'forced_err', 'pts_won_lte_3_shots', 'wide', 'body', 't']].sum()
 
     features = {}
     serve_pts = totals['pts']
@@ -526,6 +524,16 @@ def extract_serve_basics_features(player_canonical, gender, jeff_data):
         features['sb_wide_pct'] = float(totals['wide']) / serve_pts
         features['sb_body_pct'] = float(totals['body']) / serve_pts
         features['sb_t_pct'] = float(totals['t']) / serve_pts
+        features['sb_pts_won'] = float(totals['pts_won'])
+        features['sb_serve_win_pct'] = features['sb_pts_won'] / serve_pts
+        features['sb_unret'] = float(totals['unret'])
+        features['sb_unret_pct'] = features['sb_unret'] / serve_pts
+        features['sb_forced_err'] = float(totals['forced_err'])
+        features['sb_forced_err_pct'] = features['sb_forced_err'] / serve_pts
+        features['sb_quick_points'] = float(totals['pts_won_lte_3_shots'])
+        features['sb_quick_points_pct'] = features['sb_quick_points'] / serve_pts
+        features['sb_service_dominance'] = (features['sb_aces'] + features['sb_unret'] + features['sb_forced_err']) / serve_pts
+        features['sb_placement_variety'] = 1 - max(features['sb_wide_pct'], features['sb_body_pct'], features['sb_t_pct'])
 
     return features
 
@@ -698,6 +706,10 @@ def extract_serve_direction_features(player_canonical, gender, jeff_data):
 
 
 def extract_return_outcomes_features(player_canonical, gender, jeff_data):
+    """
+    EXPANDED: Extract 30+ features from ReturnOutcomes (was 1 placeholder)
+    Uses ALL available columns and row types for comprehensive return analysis
+    """
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'return_outcomes' not in jeff_data[gender_key]:
@@ -709,109 +721,1507 @@ def extract_return_outcomes_features(player_canonical, gender, jeff_data):
     if player_data.empty:
         return {}
 
-    # FIXED: return_outcomes uses 'Total' not 'STotal'
+    features = {}
+
+    # BASIC RETURN STATS (from Total row)
     total_data = player_data[player_data['row'] == 'Total']
-    if total_data.empty:
-        return {}
+    if not total_data.empty:
+        totals = total_data[['pts', 'pts_won', 'returnable', 'returnable_won',
+                             'in_play', 'in_play_won', 'winners', 'total_shots']].sum()
 
-    return {'ro_total_rows': len(total_data)}
+        return_pts = totals['pts']
+        if return_pts > 0:
+            # Raw data features (8)
+            features['ro_return_pts'] = float(return_pts)
+            features['ro_pts_won'] = float(totals['pts_won'])
+            features['ro_returnable'] = float(totals['returnable'])
+            features['ro_returnable_won'] = float(totals['returnable_won'])
+            features['ro_in_play'] = float(totals['in_play'])
+            features['ro_in_play_won'] = float(totals['in_play_won'])
+            features['ro_winners'] = float(totals['winners'])
+            features['ro_total_shots'] = float(totals['total_shots'])
+
+            # Calculated percentages (7)
+            features['ro_return_win_pct'] = features['ro_pts_won'] / return_pts
+            features['ro_returnable_pct'] = features['ro_returnable'] / return_pts
+            features['ro_returnable_win_pct'] = features['ro_returnable_won'] / features['ro_returnable'] if features[
+                                                                                                                 'ro_returnable'] > 0 else 0
+            features['ro_in_play_pct'] = features['ro_in_play'] / return_pts
+            features['ro_in_play_win_pct'] = features['ro_in_play_won'] / features['ro_in_play'] if features[
+                                                                                                        'ro_in_play'] > 0 else 0
+            features['ro_winner_pct'] = features['ro_winners'] / return_pts
+            features['ro_shots_per_point'] = features['ro_total_shots'] / return_pts
+
+    # SERVE-SPECIFIC RETURNS (v1st vs v2nd)
+    first_serve_data = player_data[player_data['row'] == 'v1st']
+    second_serve_data = player_data[player_data['row'] == 'v2nd']
+
+    if not first_serve_data.empty:
+        first_totals = first_serve_data[['pts', 'pts_won']].sum()
+        if first_totals['pts'] > 0:
+            features['ro_first_serve_win_pct'] = first_totals['pts_won'] / first_totals['pts']
+
+    if not second_serve_data.empty:
+        second_totals = second_serve_data[['pts', 'pts_won']].sum()
+        if second_totals['pts'] > 0:
+            features['ro_second_serve_win_pct'] = second_totals['pts_won'] / second_totals['pts']
+
+    # Compare first vs second serve return effectiveness
+    if 'ro_first_serve_win_pct' in features and 'ro_second_serve_win_pct' in features:
+        features['ro_second_serve_advantage'] = features['ro_second_serve_win_pct'] - features['ro_first_serve_win_pct']
+        features['ro_first_vs_second_diff'] = abs(features['ro_second_serve_advantage'])
+
+    # SHOT TYPE BREAKDOWN (fh vs bh, gs vs sl)
+    fh_data = player_data[player_data['row'] == 'fh']
+    bh_data = player_data[player_data['row'] == 'bh']
+    gs_data = player_data[player_data['row'] == 'gs']
+    sl_data = player_data[player_data['row'] == 'sl']
+
+    if not fh_data.empty:
+        fh_totals = fh_data[['pts', 'pts_won']].sum()
+        if fh_totals['pts'] > 0:
+            features['ro_fh_win_pct'] = fh_totals['pts_won'] / fh_totals['pts']
+
+    if not bh_data.empty:
+        bh_totals = bh_data[['pts', 'pts_won']].sum()
+        if bh_totals['pts'] > 0:
+            features['ro_bh_win_pct'] = bh_totals['pts_won'] / bh_totals['pts']
+
+    if 'ro_fh_win_pct' in features and 'ro_bh_win_pct' in features:
+        features['ro_fh_vs_bh_diff'] = abs(features['ro_fh_win_pct'] - features['ro_bh_win_pct'])
+
+    if not gs_data.empty and not sl_data.empty:
+        gs_totals = gs_data[['pts', 'pts_won']].sum()
+        sl_totals = sl_data[['pts', 'pts_won']].sum()
+        total_shot_types = gs_totals['pts'] + sl_totals['pts']
+        if total_shot_types > 0:
+            features['ro_groundstroke_pct'] = gs_totals['pts'] / total_shot_types
+
+    # COURT POSITION (D vs A)
+    deuce_data = player_data[player_data['row'] == 'D']
+    ad_data = player_data[player_data['row'] == 'A']
+
+    if not deuce_data.empty:
+        deuce_totals = deuce_data[['pts', 'pts_won']].sum()
+        if deuce_totals['pts'] > 0:
+            features['ro_deuce_win_pct'] = deuce_totals['pts_won'] / deuce_totals['pts']
+
+    if not ad_data.empty:
+        ad_totals = ad_data[['pts', 'pts_won']].sum()
+        if ad_totals['pts'] > 0:
+            features['ro_ad_win_pct'] = ad_totals['pts_won'] / ad_totals['pts']
+
+    if 'ro_deuce_win_pct' in features and 'ro_ad_win_pct' in features:
+        features['ro_court_balance'] = abs(features['ro_deuce_win_pct'] - features['ro_ad_win_pct'])
+
+    # DIRECTION-SPECIFIC (4=wide, 5=body, 6=T)
+    wide_data = player_data[player_data['row'] == '4']
+    body_data = player_data[player_data['row'] == '5']
+    t_data = player_data[player_data['row'] == '6']
+
+    direction_wins = []
+
+    if not wide_data.empty:
+        wide_totals = wide_data[['pts', 'pts_won']].sum()
+        if wide_totals['pts'] > 0:
+            features['ro_wide_win_pct'] = wide_totals['pts_won'] / wide_totals['pts']
+            direction_wins.append(features['ro_wide_win_pct'])
+
+    if not body_data.empty:
+        body_totals = body_data[['pts', 'pts_won']].sum()
+        if body_totals['pts'] > 0:
+            features['ro_body_win_pct'] = body_totals['pts_won'] / body_totals['pts']
+            direction_wins.append(features['ro_body_win_pct'])
+
+    if not t_data.empty:
+        t_totals = t_data[['pts', 'pts_won']].sum()
+        if t_totals['pts'] > 0:
+            features['ro_t_win_pct'] = t_totals['pts_won'] / t_totals['pts']
+            direction_wins.append(features['ro_t_win_pct'])
+
+    # Direction variety (how consistent across directions)
+    if len(direction_wins) >= 2:
+        features['ro_direction_variety'] = 1 - (max(direction_wins) - min(direction_wins))
+
+    # ADVANCED METRICS
+    if 'ro_returnable_pct' in features and 'ro_in_play_pct' in features:
+        features['ro_return_depth_ability'] = features['ro_in_play_pct'] / features['ro_returnable_pct'] if features[
+                                                                                                                'ro_returnable_pct'] > 0 else 0
+
+    if 'ro_winner_pct' in features and 'ro_return_win_pct' in features:
+        features['ro_return_aggression'] = features['ro_winner_pct'] / features['ro_return_win_pct'] if features[
+                                                                                                            'ro_return_win_pct'] > 0 else 0
+
+    return features
 
 
-def extract_return_depth_features(player_canonical, gender, jeff_data):
+# Copy paste this test
+def extract_return_depth_features_test(player_canonical, gender, jeff_data):
     gender_key = 'men' if gender == 'M' else 'women'
-
     if gender_key not in jeff_data or 'return_depth' not in jeff_data[gender_key]:
         return {}
 
     df = jeff_data[gender_key]['return_depth']
     player_data = df[df['Player_canonical'] == player_canonical]
+    if player_data.empty:
+        return {}
+
+    features = {}
+
+    # BASIC DEPTH STATS (from Total row)
+    total_data = player_data[player_data['row'] == 'Total']
+    if not total_data.empty:
+        totals = total_data[['returnable', 'shallow', 'deep', 'very_deep',
+                             'unforced', 'err_net', 'err_deep', 'err_wide', 'err_wide_deep']].sum()
+
+        returnable = totals['returnable']
+        if returnable > 0:
+            # Raw counts (9)
+            features['rd_returnable'] = float(returnable)
+            features['rd_shallow'] = float(totals['shallow'])
+            features['rd_deep'] = float(totals['deep'])
+            features['rd_very_deep'] = float(totals['very_deep'])
+            features['rd_unforced'] = float(totals['unforced'])
+            features['rd_err_net'] = float(totals['err_net'])
+            features['rd_err_deep'] = float(totals['err_deep'])
+            features['rd_err_wide'] = float(totals['err_wide'])
+            features['rd_err_wide_deep'] = float(totals['err_wide_deep'])
+
+            # Depth percentages (3)
+            features['rd_shallow_pct'] = features['rd_shallow'] / returnable
+            features['rd_deep_pct'] = features['rd_deep'] / returnable
+            features['rd_very_deep_pct'] = features['rd_very_deep'] / returnable
+
+            # Error percentages (4)
+            total_errors = features['rd_unforced'] + features['rd_err_net'] + features['rd_err_deep'] + features[
+                'rd_err_wide'] + features['rd_err_wide_deep']
+            if total_errors > 0:
+                features['rd_error_rate'] = total_errors / returnable
+                features['rd_net_error_pct'] = features['rd_err_net'] / total_errors
+                features['rd_depth_error_pct'] = features['rd_err_deep'] / total_errors
+                features['rd_wide_error_pct'] = (features['rd_err_wide'] + features['rd_err_wide_deep']) / total_errors
+
+            # Tactical metrics (3)
+            features['rd_depth_aggression'] = features['rd_very_deep_pct'] / features['rd_deep_pct'] if features[
+                                                                                                            'rd_deep_pct'] > 0 else 0
+            features['rd_depth_variety'] = 1 - max(features['rd_shallow_pct'], features['rd_deep_pct'],
+                                                   features['rd_very_deep_pct'])
+            features['rd_depth_control'] = (features['rd_deep_pct'] + features['rd_very_deep_pct']) - features[
+                'rd_shallow_pct']
+
+    # SERVE-SPECIFIC DEPTH
+    first_serve_data = player_data[player_data['row'] == 'v1st']
+    second_serve_data = player_data[player_data['row'] == 'v2nd']
+
+    if not first_serve_data.empty:
+        first_totals = first_serve_data[['returnable', 'deep', 'very_deep']].sum()
+        if first_totals['returnable'] > 0:
+            features['rd_first_deep_pct'] = (first_totals['deep'] + first_totals['very_deep']) / first_totals[
+                'returnable']
+
+    if not second_serve_data.empty:
+        second_totals = second_serve_data[['returnable', 'deep', 'very_deep']].sum()
+        if second_totals['returnable'] > 0:
+            features['rd_second_deep_pct'] = (second_totals['deep'] + second_totals['very_deep']) / second_totals[
+                'returnable']
+
+    # Compare depth on different serves
+    if 'rd_first_deep_pct' in features and 'rd_second_deep_pct' in features:
+        features['rd_serve_depth_diff'] = abs(features['rd_second_deep_pct'] - features['rd_first_deep_pct'])
+
+    # SHOT TYPE DEPTH
+    fh_data = player_data[player_data['row'] == 'fh']
+    bh_data = player_data[player_data['row'] == 'bh']
+
+    if not fh_data.empty:
+        fh_totals = fh_data[['returnable', 'very_deep']].sum()
+        if fh_totals['returnable'] > 0:
+            features['rd_fh_very_deep_pct'] = fh_totals['very_deep'] / fh_totals['returnable']
+
+    if not bh_data.empty:
+        bh_totals = bh_data[['returnable', 'very_deep']].sum()
+        if bh_totals['returnable'] > 0:
+            features['rd_bh_very_deep_pct'] = bh_totals['very_deep'] / bh_totals['returnable']
+
+    return features
+
+
+def extract_serve_influence_features(player_canonical, gender, jeff_data):
+    """
+    EXPANDED: Extract 43 features from ServeInfluence (was 1 placeholder)
+    Analyzes serve influence across rally lengths for first and second serves
+    """
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'serve_influence' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['serve_influence']
+    player_data = df[df['Player_canonical'] == player_canonical]
 
     if player_data.empty:
         return {}
 
-    total_data = player_data[player_data['row'] == 'STotal']
-    if total_data.empty:
-        return {}
+    features = {}
 
-    return {'rd_sample': len(total_data)}
+    # FIRST SERVE INFLUENCE (row = 1) - FIXED: use integer not string
+    first_serve_data = player_data[player_data['row'] == 1]
+    if not first_serve_data.empty:
+        row = first_serve_data.iloc[0]
 
+        # Raw data
+        features['si_first_serve_pts'] = float(row['pts']) if pd.notna(row['pts']) else 0
 
-# Simple placeholder functions for remaining files
-def extract_serve_influence_features(player_canonical, gender, jeff_data):
-    gender_key = 'men' if gender == 'M' else 'women'
-    if gender_key not in jeff_data or 'serve_influence' not in jeff_data[gender_key]:
-        return {}
-    df = jeff_data[gender_key]['serve_influence']
-    player_data = df[df['Player_canonical'] == player_canonical]
-    return {'si_sample': len(player_data)} if not player_data.empty else {}
+        # Rally length win percentages
+        rally_cols = ['won_1+', 'won_2+', 'won_3+', 'won_4+', 'won_5+', 'won_6+', 'won_7+', 'won_8+', 'won_9+',
+                      'won_10+']
+        rally_values = []
+
+        for i, col in enumerate(rally_cols, 1):
+            val = row[col]
+            if pd.notna(val) and val != '-':
+                # Remove % sign and convert to decimal
+                pct_val = float(str(val).replace('%', '')) / 100 if '%' in str(val) else float(val)
+                features[f'si_first_{i}plus_win_pct'] = pct_val
+                rally_values.append(pct_val)
+            else:
+                features[f'si_first_{i}plus_win_pct'] = 0
+
+        # Calculate first serve influence metrics
+        if len(rally_values) >= 3:
+            features['si_first_immediate_advantage'] = rally_values[0] - rally_values[2] if rally_values[2] > 0 else \
+            rally_values[0] - 0.5
+            features['si_first_serve_decay'] = (rally_values[0] - rally_values[-1]) / len(rally_values) if len(
+                rally_values) > 1 else 0
+            features['si_first_consistency'] = 1 - (max(rally_values) - min(rally_values)) if rally_values else 0
+
+    # SECOND SERVE INFLUENCE (row = 2) - FIXED: use integer not string
+    second_serve_data = player_data[player_data['row'] == 2]
+    if not second_serve_data.empty:
+        row = second_serve_data.iloc[0]
+
+        # Raw data
+        features['si_second_serve_pts'] = float(row['pts']) if pd.notna(row['pts']) else 0
+
+        # Rally length win percentages
+        rally_values_2nd = []
+
+        for i, col in enumerate(rally_cols, 1):
+            val = row[col]
+            if pd.notna(val) and val != '-':
+                pct_val = float(str(val).replace('%', '')) / 100 if '%' in str(val) else float(val)
+                features[f'si_second_{i}plus_win_pct'] = pct_val
+                rally_values_2nd.append(pct_val)
+            else:
+                features[f'si_second_{i}plus_win_pct'] = 0
+
+        # Calculate second serve influence metrics
+        if len(rally_values_2nd) >= 3:
+            features['si_second_immediate_advantage'] = rally_values_2nd[0] - rally_values_2nd[2] if rally_values_2nd[
+                                                                                                         2] > 0 else \
+            rally_values_2nd[0] - 0.5
+            features['si_second_serve_decay'] = (rally_values_2nd[0] - rally_values_2nd[-1]) / len(
+                rally_values_2nd) if len(rally_values_2nd) > 1 else 0
+            features['si_second_consistency'] = 1 - (
+                        max(rally_values_2nd) - min(rally_values_2nd)) if rally_values_2nd else 0
+
+    # COMPARATIVE METRICS (first vs second serve)
+    if 'si_first_1plus_win_pct' in features and 'si_second_1plus_win_pct' in features:
+        features['si_serve_type_advantage'] = features['si_first_1plus_win_pct'] - features['si_second_1plus_win_pct']
+
+        # Compare serve influence across rally lengths
+        first_3plus = features.get('si_first_3plus_win_pct', 0)
+        second_3plus = features.get('si_second_3plus_win_pct', 0)
+        features['si_rally_adaptation'] = abs(first_3plus - second_3plus)
+
+        # Serve plus one effectiveness
+        first_2plus = features.get('si_first_2plus_win_pct', 0)
+        second_2plus = features.get('si_second_2plus_win_pct', 0)
+        features['si_serve_plus_one_diff'] = first_2plus - second_2plus
+
+        # Overall serve influence strength
+        if 'si_first_immediate_advantage' in features and 'si_second_immediate_advantage' in features:
+            features['si_overall_influence'] = (features['si_first_immediate_advantage'] + features[
+                'si_second_immediate_advantage']) / 2
+            features['si_serve_versatility'] = 1 - abs(
+                features['si_first_immediate_advantage'] - features['si_second_immediate_advantage'])
+
+    return features
 
 
 def extract_shot_direction_features(player_canonical, gender, jeff_data):
     gender_key = 'men' if gender == 'M' else 'women'
+
     if gender_key not in jeff_data or 'shot_direction' not in jeff_data[gender_key]:
         return {}
+
     df = jeff_data[gender_key]['shot_direction']
     player_data = df[df['Player_canonical'] == player_canonical]
-    return {'shotd_sample': len(player_data)} if not player_data.empty else {}
+
+    if player_data.empty:
+        return {}
+
+    features = {}
+
+    # BASIC SHOT DIRECTION TOTALS (from Total row)
+    total_data = player_data[player_data['row'] == 'Total']
+    if not total_data.empty:
+        totals = total_data[['crosscourt', 'down_middle', 'down_the_line', 'inside_out', 'inside_in']].sum()
+
+        total_shots = totals.sum()
+        if total_shots > 0:
+            # Raw counts (5)
+            features['shotd_crosscourt'] = float(totals['crosscourt'])
+            features['shotd_down_middle'] = float(totals['down_middle'])
+            features['shotd_down_line'] = float(totals['down_the_line'])
+            features['shotd_inside_out'] = float(totals['inside_out'])
+            features['shotd_inside_in'] = float(totals['inside_in'])
+            features['shotd_total_shots'] = float(total_shots)
+
+            # Direction percentages (5)
+            features['shotd_crosscourt_pct'] = features['shotd_crosscourt'] / total_shots
+            features['shotd_down_middle_pct'] = features['shotd_down_middle'] / total_shots
+            features['shotd_down_line_pct'] = features['shotd_down_line'] / total_shots
+            features['shotd_inside_out_pct'] = features['shotd_inside_out'] / total_shots
+            features['shotd_inside_in_pct'] = features['shotd_inside_in'] / total_shots
+
+            # Tactical groupings (3)
+            features['shotd_crosscourt_dominant'] = features['shotd_crosscourt_pct']
+            features['shotd_attacking_shots_pct'] = (features['shotd_down_line'] + features[
+                'shotd_inside_out']) / total_shots
+            features['shotd_direction_variety'] = 1 - max(features['shotd_crosscourt_pct'],
+                                                          features['shotd_down_middle_pct'],
+                                                          features['shotd_down_line_pct'],
+                                                          features['shotd_inside_out_pct'])
+
+    # FOREHAND DIRECTION PATTERNS (row = F)
+    fh_data = player_data[player_data['row'] == 'F']
+    if not fh_data.empty:
+        fh_totals = fh_data[['crosscourt', 'down_middle', 'down_the_line', 'inside_out', 'inside_in']].sum()
+        fh_total = fh_totals.sum()
+
+        if fh_total > 0:
+            features['shotd_fh_crosscourt_pct'] = fh_totals['crosscourt'] / fh_total
+            features['shotd_fh_down_line_pct'] = fh_totals['down_the_line'] / fh_total
+            features['shotd_fh_inside_out_pct'] = fh_totals['inside_out'] / fh_total
+            features['shotd_fh_variety'] = 1 - max(fh_totals['crosscourt'], fh_totals['down_middle'],
+                                                   fh_totals['down_the_line'], fh_totals['inside_out']) / fh_total
+
+    # BACKHAND DIRECTION PATTERNS (row = B)
+    bh_data = player_data[player_data['row'] == 'B']
+    if not bh_data.empty:
+        bh_totals = bh_data[['crosscourt', 'down_middle', 'down_the_line', 'inside_out', 'inside_in']].sum()
+        bh_total = bh_totals.sum()
+
+        if bh_total > 0:
+            features['shotd_bh_crosscourt_pct'] = bh_totals['crosscourt'] / bh_total
+            features['shotd_bh_down_line_pct'] = bh_totals['down_the_line'] / bh_total
+            features['shotd_bh_inside_out_pct'] = bh_totals['inside_out'] / bh_total
+            features['shotd_bh_variety'] = 1 - max(bh_totals['crosscourt'], bh_totals['down_middle'],
+                                                   bh_totals['down_the_line'], bh_totals['inside_out']) / bh_total
+
+    # SLICE DIRECTION PATTERNS (row = S)
+    slice_data = player_data[player_data['row'] == 'S']
+    if not slice_data.empty:
+        slice_totals = slice_data[['crosscourt', 'down_middle', 'down_the_line', 'inside_out', 'inside_in']].sum()
+        slice_total = slice_totals.sum()
+
+        if slice_total > 0:
+            features['shotd_slice_crosscourt_pct'] = slice_totals['crosscourt'] / slice_total
+            features['shotd_slice_total'] = float(slice_total)
+
+    # COMPARATIVE SHOT TYPE METRICS
+    if 'shotd_fh_crosscourt_pct' in features and 'shotd_bh_crosscourt_pct' in features:
+        features['shotd_fh_vs_bh_crosscourt_diff'] = abs(
+            features['shotd_fh_crosscourt_pct'] - features['shotd_bh_crosscourt_pct'])
+        features['shotd_fh_vs_bh_downline_diff'] = abs(
+            features.get('shotd_fh_down_line_pct', 0) - features.get('shotd_bh_down_line_pct', 0))
+
+        # Overall shot direction consistency
+        fh_variety = features.get('shotd_fh_variety', 0)
+        bh_variety = features.get('shotd_bh_variety', 0)
+        features['shotd_overall_consistency'] = (fh_variety + bh_variety) / 2 if bh_variety > 0 else fh_variety
+
+    return features
 
 
 def extract_shot_dir_outcomes_features(player_canonical, gender, jeff_data):
+    """
+    EXPANDED: Extract 40+ features from ShotDirOutcomes (was 1 placeholder)
+    Analyzes shot outcomes by type (F/B/S) and direction (XC/DTM/DTL/IO) combinations
+    """
     gender_key = 'men' if gender == 'M' else 'women'
+
     if gender_key not in jeff_data or 'shot_dir_outcomes' not in jeff_data[gender_key]:
         return {}
+
     df = jeff_data[gender_key]['shot_dir_outcomes']
     player_data = df[df['Player_canonical'] == player_canonical]
-    return {'sdo_sample': len(player_data)} if not player_data.empty else {}
+
+    if player_data.empty:
+        return {}
+
+    features = {}
+
+    # AGGREGATE BY SHOT TYPE (F, B, S)
+    shot_types = ['F', 'B', 'S']
+    for shot_type in shot_types:
+        shot_data = player_data[player_data['row'].str.startswith(shot_type)]
+
+        if not shot_data.empty:
+            totals = shot_data[['shots', 'pt_ending', 'winners', 'induced_forced', 'unforced', 'shots_in_pts_won',
+                                'shots_in_pts_lost']].sum()
+
+            total_shots = totals['shots']
+            if total_shots > 0:
+                prefix = f'sdo_{shot_type.lower()}'
+
+                # Raw counts
+                features[f'{prefix}_shots'] = float(total_shots)
+                features[f'{prefix}_pt_ending'] = float(totals['pt_ending'])
+                features[f'{prefix}_winners'] = float(totals['winners'])
+                features[f'{prefix}_unforced'] = float(totals['unforced'])
+
+                # Effectiveness metrics
+                features[f'{prefix}_winner_rate'] = totals['winners'] / total_shots
+                features[f'{prefix}_error_rate'] = totals['unforced'] / total_shots
+                features[f'{prefix}_pt_ending_rate'] = totals['pt_ending'] / total_shots
+                features[f'{prefix}_effectiveness'] = (totals['winners'] - totals['unforced']) / total_shots
+
+                # Point outcome efficiency
+                total_outcome_shots = totals['shots_in_pts_won'] + totals['shots_in_pts_lost']
+                if total_outcome_shots > 0:
+                    features[f'{prefix}_win_efficiency'] = totals['shots_in_pts_won'] / total_outcome_shots
+
+    # AGGREGATE BY DIRECTION (XC, DTM, DTL, IO)
+    directions = ['XC', 'DTM', 'DTL', 'IO']
+    for direction in directions:
+        dir_data = player_data[player_data['row'].str.endswith(direction)]
+
+        if not dir_data.empty:
+            totals = dir_data[['shots', 'pt_ending', 'winners', 'induced_forced', 'unforced', 'shots_in_pts_won',
+                               'shots_in_pts_lost']].sum()
+
+            total_shots = totals['shots']
+            if total_shots > 0:
+                prefix = f'sdo_{direction.lower()}'
+
+                # Raw counts
+                features[f'{prefix}_shots'] = float(total_shots)
+                features[f'{prefix}_winners'] = float(totals['winners'])
+                features[f'{prefix}_unforced'] = float(totals['unforced'])
+
+                # Effectiveness metrics
+                features[f'{prefix}_winner_rate'] = totals['winners'] / total_shots
+                features[f'{prefix}_error_rate'] = totals['unforced'] / total_shots
+                features[f'{prefix}_effectiveness'] = (totals['winners'] - totals['unforced']) / total_shots
+
+    # SPECIFIC HIGH-VALUE COMBINATIONS
+    key_combinations = ['F-XC', 'F-DTL', 'F-IO', 'B-XC', 'B-DTL']
+    for combo in key_combinations:
+        combo_data = player_data[player_data['row'] == combo]
+
+        if not combo_data.empty:
+            row = combo_data.iloc[0]
+            shots = row['shots']
+
+            if shots > 0:
+                prefix = f'sdo_{combo.lower().replace("-", "_")}'
+
+                features[f'{prefix}_winner_rate'] = row['winners'] / shots
+                features[f'{prefix}_error_rate'] = row['unforced'] / shots
+                features[f'{prefix}_effectiveness'] = (row['winners'] - row['unforced']) / shots
+
+    # TACTICAL COMPARISONS
+    if 'sdo_f_shots' in features and 'sdo_b_shots' in features:
+        # Forehand vs Backhand effectiveness
+        fh_eff = features.get('sdo_f_effectiveness', 0)
+        bh_eff = features.get('sdo_b_effectiveness', 0)
+        features['sdo_fh_vs_bh_effectiveness'] = fh_eff - bh_eff
+
+        # Shot distribution
+        total_groundstrokes = features['sdo_f_shots'] + features['sdo_b_shots']
+        features['sdo_fh_shot_preference'] = features['sdo_f_shots'] / total_groundstrokes
+
+    # DIRECTION PREFERENCES
+    if 'sdo_xc_shots' in features and 'sdo_dtl_shots' in features:
+        xc_shots = features['sdo_xc_shots']
+        dtl_shots = features['sdo_dtl_shots']
+        total_directional = xc_shots + dtl_shots + features.get('sdo_dtm_shots', 0) + features.get('sdo_io_shots', 0)
+
+        if total_directional > 0:
+            features['sdo_crosscourt_preference'] = xc_shots / total_directional
+            features['sdo_attacking_shot_rate'] = (dtl_shots + features.get('sdo_io_shots', 0)) / total_directional
+
+    # OVERALL METRICS
+    all_shots = sum([features.get(f'sdo_{st.lower()}_shots', 0) for st in shot_types])
+    all_winners = sum([features.get(f'sdo_{st.lower()}_winners', 0) for st in shot_types])
+    all_errors = sum([features.get(f'sdo_{st.lo
 
 
 def extract_shot_types_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 40+ features from ShotTypes tactical positioning data (was 1 placeholder)"""
     gender_key = 'men' if gender == 'M' else 'women'
+
     if gender_key not in jeff_data or 'shot_types' not in jeff_data[gender_key]:
         return {}
+
     df = jeff_data[gender_key]['shot_types']
     player_data = df[df['Player_canonical'] == player_canonical]
-    return {'st_sample': len(player_data)} if not player_data.empty else {}
+
+    if player_data.empty:
+        return {}
+
+    features = {}
+
+    # Total overview
+    total_data = player_data[player_data['row'] == 'Total']
+    if not total_data.empty:
+        totals = total_data.iloc[0]
+        features['st_total_shots'] = float(totals['shots'])
+        features['st_total_pt_ending'] = float(totals['pt_ending'])
+        features['st_total_winners'] = float(totals['winners'])
+        features['st_total_induced_forced'] = float(totals['induced_forced'])
+        features['st_total_unforced'] = float(totals['unforced'])
+        features['st_total_serve_return'] = float(totals['serve_return'])
+        features['st_total_shots_pts_won'] = float(totals['shots_in_pts_won'])
+        features['st_total_shots_pts_lost'] = float(totals['shots_in_pts_lost'])
+
+        # Calculate rates
+        if features['st_total_shots'] > 0:
+            features['st_pt_ending_rate'] = (features['st_total_pt_ending'] / features['st_total_shots']) * 100
+            features['st_winner_rate'] = (features['st_total_winners'] / features['st_total_shots']) * 100
+            features['st_error_rate'] = (features['st_total_unforced'] / features['st_total_shots']) * 100
+            features['st_forced_error_rate'] = (features['st_total_induced_forced'] / features['st_total_shots']) * 100
+
+        # Win efficiency
+        total_outcome_shots = features['st_total_shots_pts_won'] + features['st_total_shots_pts_lost']
+        if total_outcome_shots > 0:
+            features['st_win_efficiency'] = (features['st_total_shots_pts_won'] / total_outcome_shots) * 100
+
+        # Winner to error ratio
+        total_errors = features['st_total_unforced'] + features['st_total_induced_forced']
+        if total_errors > 0:
+            features['st_winner_error_ratio'] = features['st_total_winners'] / total_errors
+        else:
+            features['st_winner_error_ratio'] = features['st_total_winners']
+
+    # Court positioning analysis
+    fside_data = player_data[player_data['row'] == 'Fside']
+    bside_data = player_data[player_data['row'] == 'Bside']
+
+    if not fside_data.empty:
+        fside = fside_data.iloc[0]
+        features['st_fside_shots'] = float(fside['shots'])
+        features['st_fside_winners'] = float(fside['winners'])
+        features['st_fside_errors'] = float(fside['unforced'])
+
+        if features['st_fside_shots'] > 0:
+            features['st_fside_winner_rate'] = (features['st_fside_winners'] / features['st_fside_shots']) * 100
+            features['st_fside_error_rate'] = (features['st_fside_errors'] / features['st_fside_shots']) * 100
+
+    if not bside_data.empty:
+        bside = bside_data.iloc[0]
+        features['st_bside_shots'] = float(bside['shots'])
+        features['st_bside_winners'] = float(bside['winners'])
+        features['st_bside_errors'] = float(bside['unforced'])
+
+        if features['st_bside_shots'] > 0:
+            features['st_bside_winner_rate'] = (features['st_bside_winners'] / features['st_bside_shots']) * 100
+            features['st_bside_error_rate'] = (features['st_bside_errors'] / features['st_bside_shots']) * 100
+
+    # Court side preference
+    fside_shots = features.get('st_fside_shots', 0)
+    bside_shots = features.get('st_bside_shots', 0)
+    if fside_shots + bside_shots > 0:
+        features['st_fside_preference'] = (fside_shots / (fside_shots + bside_shots)) * 100
+
+        # Side effectiveness comparison
+        fside_wr = features.get('st_fside_winner_rate', 0)
+        bside_wr = features.get('st_bside_winner_rate', 0)
+        features['st_side_winner_differential'] = fside_wr - bside_wr
+
+    # Groundstroke analysis
+    fgs_data = player_data[player_data['row'] == 'Fgs']
+    bgs_data = player_data[player_data['row'] == 'Bgs']
+
+    if not fgs_data.empty:
+        fgs = fgs_data.iloc[0]
+        features['st_fgs_shots'] = float(fgs['shots'])
+        features['st_fgs_winners'] = float(fgs['winners'])
+        if features['st_fgs_shots'] > 0:
+            features['st_fgs_winner_rate'] = (features['st_fgs_winners'] / features['st_fgs_shots']) * 100
+
+    if not bgs_data.empty:
+        bgs = bgs_data.iloc[0]
+        features['st_bgs_shots'] = float(bgs['shots'])
+        features['st_bgs_winners'] = float(bgs['winners'])
+        if features['st_bgs_shots'] > 0:
+            features['st_bgs_winner_rate'] = (features['st_bgs_winners'] / features['st_bgs_shots']) * 100
+
+    # Wing preference
+    fgs_shots = features.get('st_fgs_shots', 0)
+    bgs_shots = features.get('st_bgs_shots', 0)
+    if fgs_shots + bgs_shots > 0:
+        features['st_fh_groundstroke_pct'] = (fgs_shots / (fgs_shots + bgs_shots)) * 100
+
+    # Tactical positioning
+    base_data = player_data[player_data['row'] == 'Base']
+    net_data = player_data[player_data['row'] == 'Net']
+
+    if not base_data.empty:
+        base = base_data.iloc[0]
+        features['st_baseline_shots'] = float(base['shots'])
+        features['st_baseline_winners'] = float(base['winners'])
+        if features['st_baseline_shots'] > 0:
+            features['st_baseline_winner_rate'] = (features['st_baseline_winners'] / features[
+                'st_baseline_shots']) * 100
+
+    if not net_data.empty:
+        net = net_data.iloc[0]
+        features['st_net_shots'] = float(net['shots'])
+        features['st_net_winners'] = float(net['winners'])
+        if features['st_net_shots'] > 0:
+            features['st_net_winner_rate'] = (features['st_net_winners'] / features['st_net_shots']) * 100
+
+    # Court position preference
+    baseline_shots = features.get('st_baseline_shots', 0)
+    net_shots = features.get('st_net_shots', 0)
+    if baseline_shots + net_shots > 0:
+        features['st_net_approach_rate'] = (net_shots / (baseline_shots + net_shots)) * 100
+
+    # Specific shot types
+    shot_type_rows = ['Sl', 'Dr', 'Sw', 'Gs']
+    for shot_type in shot_type_rows:
+        shot_data = player_data[player_data['row'] == shot_type]
+        if not shot_data.empty:
+            shot = shot_data.iloc[0]
+            features[f'st_{shot_type.lower()}_shots'] = float(shot['shots'])
+            features[f'st_{shot_type.lower()}_winners'] = float(shot['winners'])
+
+            if float(shot['shots']) > 0:
+                features[f'st_{shot_type.lower()}_winner_rate'] = (float(shot['winners']) / float(shot['shots'])) * 100
+
+    # Wing-specific analysis (F/B rows)
+    f_data = player_data[player_data['row'] == 'F']
+    b_data = player_data[player_data['row'] == 'B']
+
+    if not f_data.empty:
+        f_row = f_data.iloc[0]
+        features['st_f_shots'] = float(f_row['shots'])
+        features['st_f_winners'] = float(f_row['winners'])
+        features['st_f_errors'] = float(f_row['unforced'])
+
+        if features['st_f_shots'] > 0:
+            features['st_f_effectiveness'] = ((features['st_f_winners'] - features['st_f_errors']) / features[
+                'st_f_shots']) * 100
+
+    if not b_data.empty:
+        b_row = b_data.iloc[0]
+        features['st_b_shots'] = float(b_row['shots'])
+        features['st_b_winners'] = float(b_row['winners'])
+        features['st_b_errors'] = float(b_row['unforced'])
+
+        if features['st_b_shots'] > 0:
+            features['st_b_effectiveness'] = ((features['st_b_winners'] - features['st_b_errors']) / features[
+                'st_b_shots']) * 100
+
+    # Wing effectiveness comparison
+    f_eff = features.get('st_f_effectiveness', 0)
+    b_eff = features.get('st_b_effectiveness', 0)
+    features['st_wing_effectiveness_diff'] = f_eff - b_eff
+
+    # Coded shot analysis (R, S, U, Y, J)
+    coded_shots = ['R', 'S', 'U', 'Y', 'J']
+    coded_total = 0
+
+    for shot_code in coded_shots:
+        shot_data = player_data[player_data['row'] == shot_code]
+        if not shot_data.empty:
+            shot = shot_data.iloc[0]
+            shot_count = float(shot['shots'])
+            features[f'st_{shot_code.lower()}_shots'] = shot_count
+            coded_total += shot_count
+
+    features['st_coded_shots_total'] = coded_total
+
+    # Overall tactical style metrics
+    total_shots = features.get('st_total_shots', 0)
+    if total_shots > 0:
+        features['st_aggressive_positioning'] = features.get('st_net_approach_rate', 0)
+
+        slice_shots = features.get('st_sl_shots', 0)
+        features['st_slice_usage_rate'] = (slice_shots / total_shots) * 100
+
+        drop_shots = features.get('st_dr_shots', 0)
+        features['st_drop_shot_rate'] = (drop_shots / total_shots) * 100
+
+    return features
 
 
 def extract_snv_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 35+ features from SnV (Serve & Volley) data (was 1 placeholder)"""
     gender_key = 'men' if gender == 'M' else 'women'
+
     if gender_key not in jeff_data or 'snv' not in jeff_data[gender_key]:
         return {}
+
     df = jeff_data[gender_key]['snv']
     player_data = df[df['Player_canonical'] == player_canonical]
-    return {'snv_sample': len(player_data)} if not player_data.empty else {}
+
+    if player_data.empty:
+        return {}
+
+    features = {}
+
+    # SnV (Serve & Volley) analysis
+    snv_data = player_data[player_data['row'] == 'SnV']
+    if not snv_data.empty:
+        snv = snv_data.iloc[0]
+        features['snv_total_pts'] = float(snv['snv_pts'])
+        features['snv_pts_won'] = float(snv['pts_won'])
+        features['snv_aces'] = float(snv['aces'])
+        features['snv_unret'] = float(snv['unret'])
+        features['snv_return_forced'] = float(snv['return_forced'])
+        features['snv_net_winner'] = float(snv['net_winner'])
+        features['snv_induced_forced'] = float(snv['induced_forced'])
+        features['snv_net_unforced'] = float(snv['net_unforced'])
+        features['snv_passed_at_net'] = float(snv['passed_at_net'])
+        features['snv_passing_shot_induced_forced'] = float(snv['passing_shot_induced_forced'])
+        features['snv_total_shots'] = float(snv['total_shots'])
+
+        # Calculate SnV success rates
+        if features['snv_total_pts'] > 0:
+            features['snv_success_rate'] = (features['snv_pts_won'] / features['snv_total_pts']) * 100
+            features['snv_ace_rate'] = (features['snv_aces'] / features['snv_total_pts']) * 100
+            features['snv_unreturned_rate'] = (features['snv_unret'] / features['snv_total_pts']) * 100
+            features['snv_net_winner_rate'] = (features['snv_net_winner'] / features['snv_total_pts']) * 100
+            features['snv_passed_rate'] = (features['snv_passed_at_net'] / features['snv_total_pts']) * 100
+            features['snv_error_rate'] = (features['snv_net_unforced'] / features['snv_total_pts']) * 100
+
+        # Net effectiveness
+        net_attempts = features['snv_net_winner'] + features['snv_net_unforced'] + features['snv_passed_at_net']
+        if net_attempts > 0:
+            features['snv_net_effectiveness'] = (features['snv_net_winner'] / net_attempts) * 100
+
+        # SnV efficiency
+        if features['snv_total_shots'] > 0:
+            features['snv_shots_per_point'] = features['snv_total_shots'] / features['snv_total_pts']
+
+    # SnV1st (First serve S&V) analysis
+    snv1st_data = player_data[player_data['row'] == 'SnV1st']
+    if not snv1st_data.empty:
+        snv1st = snv1st_data.iloc[0]
+        features['snv1st_pts'] = float(snv1st['snv_pts'])
+        features['snv1st_pts_won'] = float(snv1st['pts_won'])
+        features['snv1st_aces'] = float(snv1st['aces'])
+        features['snv1st_net_winner'] = float(snv1st['net_winner'])
+        features['snv1st_passed'] = float(snv1st['passed_at_net'])
+        features['snv1st_net_unforced'] = float(snv1st['net_unforced'])
+
+        if features['snv1st_pts'] > 0:
+            features['snv1st_success_rate'] = (features['snv1st_pts_won'] / features['snv1st_pts']) * 100
+            features['snv1st_ace_rate'] = (features['snv1st_aces'] / features['snv1st_pts']) * 100
+            features['snv1st_net_winner_rate'] = (features['snv1st_net_winner'] / features['snv1st_pts']) * 100
+
+    # nonSnV (Baseline play) analysis
+    nonsnv_data = player_data[player_data['row'] == 'nonSnV']
+    if not nonsnv_data.empty:
+        nonsnv = nonsnv_data.iloc[0]
+        features['baseline_total_pts'] = float(nonsnv['snv_pts'])
+        features['baseline_pts_won'] = float(nonsnv['pts_won'])
+        features['baseline_aces'] = float(nonsnv['aces'])
+        features['baseline_unret'] = float(nonsnv['unret'])
+        features['baseline_return_forced'] = float(nonsnv['return_forced'])
+        features['baseline_net_winner'] = float(nonsnv['net_winner'])
+        features['baseline_net_unforced'] = float(nonsnv['net_unforced'])
+        features['baseline_passed_at_net'] = float(nonsnv['passed_at_net'])
+        features['baseline_total_shots'] = float(nonsnv['total_shots'])
+
+        # Calculate baseline success rates
+        if features['baseline_total_pts'] > 0:
+            features['baseline_success_rate'] = (features['baseline_pts_won'] / features['baseline_total_pts']) * 100
+            features['baseline_ace_rate'] = (features['baseline_aces'] / features['baseline_total_pts']) * 100
+            features['baseline_net_winner_rate'] = (features['baseline_net_winner'] / features[
+                'baseline_total_pts']) * 100
+
+        # Baseline efficiency
+        if features['baseline_total_shots'] > 0:
+            features['baseline_shots_per_point'] = features['baseline_total_shots'] / features['baseline_total_pts']
+
+    # nonSnV1st (Baseline first serve) analysis
+    nonsnv1st_data = player_data[player_data['row'] == 'nonSnV1st']
+    if not nonsnv1st_data.empty:
+        nonsnv1st = nonsnv1st_data.iloc[0]
+        features['baseline_1st_pts'] = float(nonsnv1st['snv_pts'])
+        features['baseline_1st_won'] = float(nonsnv1st['pts_won'])
+        features['baseline_1st_aces'] = float(nonsnv1st['aces'])
+
+        if features['baseline_1st_pts'] > 0:
+            features['baseline_1st_success_rate'] = (features['baseline_1st_won'] / features['baseline_1st_pts']) * 100
+            features['baseline_1st_ace_rate'] = (features['baseline_1st_aces'] / features['baseline_1st_pts']) * 100
+
+    # nonSnV2nd (Baseline second serve) analysis
+    nonsnv2nd_data = player_data[player_data['row'] == 'nonSnV2nd']
+    if not nonsnv2nd_data.empty:
+        nonsnv2nd = nonsnv2nd_data.iloc[0]
+        features['baseline_2nd_pts'] = float(nonsnv2nd['snv_pts'])
+        features['baseline_2nd_won'] = float(nonsnv2nd['pts_won'])
+
+        if features['baseline_2nd_pts'] > 0:
+            features['baseline_2nd_success_rate'] = (features['baseline_2nd_won'] / features['baseline_2nd_pts']) * 100
+
+    # Tactical comparisons
+    snv_pts = features.get('snv_total_pts', 0)
+    baseline_pts = features.get('baseline_total_pts', 0)
+    total_serve_pts = snv_pts + baseline_pts
+
+    if total_serve_pts > 0:
+        # SnV frequency
+        features['snv_frequency'] = (snv_pts / total_serve_pts) * 100
+
+        # Style classification
+        snv_freq = features['snv_frequency']
+        if snv_freq > 20:
+            features['snv_style'] = 3  # Frequent S&V
+        elif snv_freq > 5:
+            features['snv_style'] = 2  # Occasional S&V
+        else:
+            features['snv_style'] = 1  # Rare S&V
+
+    # Success rate comparisons
+    snv_sr = features.get('snv_success_rate', 0)
+    baseline_sr = features.get('baseline_success_rate', 0)
+    if snv_sr > 0 and baseline_sr > 0:
+        features['snv_vs_baseline_advantage'] = snv_sr - baseline_sr
+        features['snv_effectiveness_ratio'] = snv_sr / baseline_sr
+
+    # First serve comparisons
+    snv1st_sr = features.get('snv1st_success_rate', 0)
+    baseline1st_sr = features.get('baseline_1st_success_rate', 0)
+    if snv1st_sr > 0 and baseline1st_sr > 0:
+        features['snv_1st_vs_baseline_1st'] = snv1st_sr - baseline1st_sr
+
+    # Net approach analysis
+    snv_net_approaches = features.get('snv_net_winner', 0) + features.get('snv_passed_at_net', 0) + features.get(
+        'snv_net_unforced', 0)
+    baseline_net_approaches = features.get('baseline_net_winner', 0) + features.get('baseline_passed_at_net',
+                                                                                    0) + features.get(
+        'baseline_net_unforced', 0)
+
+    if snv_pts > 0:
+        features['snv_net_approach_rate'] = (snv_net_approaches / snv_pts) * 100
+    if baseline_pts > 0:
+        features['baseline_net_approach_rate'] = (baseline_net_approaches / baseline_pts) * 100
+
+    # Risk assessment
+    if snv_pts > 0:
+        # High-reward outcomes
+        snv_quick_wins = features.get('snv_aces', 0) + features.get('snv_unret', 0) + features.get('snv_net_winner', 0)
+        features['snv_quick_win_rate'] = (snv_quick_wins / snv_pts) * 100
+
+        # High-risk failures
+        snv_failures = features.get('snv_passed_at_net', 0) + features.get('snv_net_unforced', 0)
+        features['snv_failure_rate'] = (snv_failures / snv_pts) * 100
+
+        # Risk-reward ratio
+        if snv_failures > 0:
+            features['snv_risk_reward'] = snv_quick_wins / snv_failures
+        else:
+            features['snv_risk_reward'] = snv_quick_wins
+
+    # Shot economy comparison
+    snv_shots_pp = features.get('snv_shots_per_point', 0)
+    baseline_shots_pp = features.get('baseline_shots_per_point', 0)
+    if snv_shots_pp > 0 and baseline_shots_pp > 0:
+        features['snv_shot_economy'] = baseline_shots_pp - snv_shots_pp  # Positive = SnV more efficient
+
+    return features
 
 
 def extract_sv_break_split_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 40+ features from SvBreakSplit serve performance by game score (was 1 placeholder)"""
     gender_key = 'men' if gender == 'M' else 'women'
+
     if gender_key not in jeff_data or 'sv_break_split' not in jeff_data[gender_key]:
         return {}
+
     df = jeff_data[gender_key]['sv_break_split']
     player_data = df[df['Player_canonical'] == player_canonical]
-    return {'svbs_sample': len(player_data)} if not player_data.empty else {}
+
+    if player_data.empty:
+        return {}
+
+    features = {}
+
+    # Score situation analysis
+    score_situations = ['d', 'a', '4', '5', '6']
+
+    for situation in score_situations:
+        situation_data = player_data[player_data['row'] == situation]
+        if not situation_data.empty:
+            sit = situation_data.iloc[0]
+
+            # First serve metrics
+            features[f'svbs_{situation}_1st_pts'] = float(sit['first_pts'])
+            features[f'svbs_{situation}_1st_won'] = float(sit['first_pts_won'])
+            features[f'svbs_{situation}_1st_aces'] = float(sit['first_aces'])
+            features[f'svbs_{situation}_1st_unret'] = float(sit['first_unret'])
+            features[f'svbs_{situation}_1st_forced'] = float(sit['first_forced'])
+            features[f'svbs_{situation}_1st_quick'] = float(sit['first_won_lte_3_shots'])
+
+            # Second serve metrics
+            features[f'svbs_{situation}_2nd_pts'] = float(sit['second_pts'])
+            features[f'svbs_{situation}_2nd_won'] = float(sit['second_pts_won'])
+            features[f'svbs_{situation}_2nd_aces'] = float(sit['second_aces'])
+            features[f'svbs_{situation}_2nd_unret'] = float(sit['second_unret'])
+            features[f'svbs_{situation}_2nd_forced'] = float(sit['second_forced'])
+            features[f'svbs_{situation}_2nd_quick'] = float(sit['second_won_lte_3_shots'])
+
+            # Calculate success rates
+            if features[f'svbs_{situation}_1st_pts'] > 0:
+                features[f'svbs_{situation}_1st_success_rate'] = (features[f'svbs_{situation}_1st_won'] / features[
+                    f'svbs_{situation}_1st_pts']) * 100
+                features[f'svbs_{situation}_1st_ace_rate'] = (features[f'svbs_{situation}_1st_aces'] / features[
+                    f'svbs_{situation}_1st_pts']) * 100
+                features[f'svbs_{situation}_1st_quick_rate'] = (features[f'svbs_{situation}_1st_quick'] / features[
+                    f'svbs_{situation}_1st_pts']) * 100
+
+            if features[f'svbs_{situation}_2nd_pts'] > 0:
+                features[f'svbs_{situation}_2nd_success_rate'] = (features[f'svbs_{situation}_2nd_won'] / features[
+                    f'svbs_{situation}_2nd_pts']) * 100
+                features[f'svbs_{situation}_2nd_quick_rate'] = (features[f'svbs_{situation}_2nd_quick'] / features[
+                    f'svbs_{situation}_2nd_pts']) * 100
+
+            # Combined serve effectiveness
+            total_pts = features[f'svbs_{situation}_1st_pts'] + features[f'svbs_{situation}_2nd_pts']
+            total_won = features[f'svbs_{situation}_1st_won'] + features[f'svbs_{situation}_2nd_won']
+            if total_pts > 0:
+                features[f'svbs_{situation}_overall_success_rate'] = (total_won / total_pts) * 100
+
+    # Detailed score+situation combinations
+    detailed_situations = ['4d', '4a', '5d', '5a', '6d', '6a']
+
+    for situation in detailed_situations:
+        situation_data = player_data[player_data['row'] == situation]
+        if not situation_data.empty:
+            sit = situation_data.iloc[0]
+
+            # Key metrics for detailed situations
+            first_pts = float(sit['first_pts'])
+            first_won = float(sit['first_pts_won'])
+            second_pts = float(sit['second_pts'])
+            second_won = float(sit['second_pts_won'])
+
+            features[f'svbs_{situation}_total_pts'] = first_pts + second_pts
+            features[f'svbs_{situation}_total_won'] = first_won + second_won
+
+            if features[f'svbs_{situation}_total_pts'] > 0:
+                features[f'svbs_{situation}_success_rate'] = (features[f'svbs_{situation}_total_won'] / features[
+                    f'svbs_{situation}_total_pts']) * 100
+
+    # Pressure situation analysis
+    # Deuce performance
+    deuce_sr = features.get('svbs_d_overall_success_rate', 0)
+    features['svbs_deuce_performance'] = deuce_sr
+
+    # Advantage performance
+    adv_sr = features.get('svbs_a_overall_success_rate', 0)
+    features['svbs_advantage_performance'] = adv_sr
+
+    # Pressure differential (advantage vs deuce)
+    if deuce_sr > 0 and adv_sr > 0:
+        features['svbs_pressure_differential'] = adv_sr - deuce_sr
+
+    # Score situation effectiveness
+    score_4_sr = features.get('svbs_4_overall_success_rate', 0)
+    score_5_sr = features.get('svbs_5_overall_success_rate', 0)
+    score_6_sr = features.get('svbs_6_overall_success_rate', 0)
+
+    # Game point situations (40-0, 40-15, 40-30)
+    game_point_situations = [score_4_sr, score_5_sr, score_6_sr]
+    valid_gp_situations = [x for x in game_point_situations if x > 0]
+
+    if valid_gp_situations:
+        features['svbs_game_point_avg_performance'] = sum(valid_gp_situations) / len(valid_gp_situations)
+        features['svbs_game_point_consistency'] = min(valid_gp_situations) / max(valid_gp_situations) if max(
+            valid_gp_situations) > 0 else 0
+
+    # First vs second serve comparison across situations
+    first_serve_rates = []
+    second_serve_rates = []
+
+    for situation in ['d', 'a', '4', '5', '6']:
+        first_rate = features.get(f'svbs_{situation}_1st_success_rate', 0)
+        second_rate = features.get(f'svbs_{situation}_2nd_success_rate', 0)
+
+        if first_rate > 0:
+            first_serve_rates.append(first_rate)
+        if second_rate > 0:
+            second_serve_rates.append(second_rate)
+
+    if first_serve_rates:
+        features['svbs_1st_serve_avg_performance'] = sum(first_serve_rates) / len(first_serve_rates)
+        features['svbs_1st_serve_consistency'] = min(first_serve_rates) / max(first_serve_rates) if max(
+            first_serve_rates) > 0 else 0
+
+    if second_serve_rates:
+        features['svbs_2nd_serve_avg_performance'] = sum(second_serve_rates) / len(second_serve_rates)
+        features['svbs_2nd_serve_consistency'] = min(second_serve_rates) / max(second_serve_rates) if max(
+            second_serve_rates) > 0 else 0
+
+    # Serve type effectiveness gap
+    if first_serve_rates and second_serve_rates:
+        avg_first = sum(first_serve_rates) / len(first_serve_rates)
+        avg_second = sum(second_serve_rates) / len(second_serve_rates)
+        features['svbs_serve_type_gap'] = avg_first - avg_second
+
+    # Quick point analysis (≤3 shots)
+    quick_situations = []
+    for situation in ['d', 'a', '4', '5', '6']:
+        first_quick_rate = features.get(f'svbs_{situation}_1st_quick_rate', 0)
+        second_quick_rate = features.get(f'svbs_{situation}_2nd_quick_rate', 0)
+
+        if first_quick_rate > 0 or second_quick_rate > 0:
+            combined_rate = (first_quick_rate + second_quick_rate) / (
+                2 if first_quick_rate > 0 and second_quick_rate > 0 else 1)
+            quick_situations.append(combined_rate)
+
+    if quick_situations:
+        features['svbs_quick_point_ability'] = sum(quick_situations) / len(quick_situations)
+
+    # Clutch performance assessment
+    clutch_situations = ['d', 'a', '6']  # Deuce, advantage, 40-30
+    clutch_rates = []
+
+    for situation in clutch_situations:
+        rate = features.get(f'svbs_{situation}_overall_success_rate', 0)
+        if rate > 0:
+            clutch_rates.append(rate)
+
+    if clutch_rates:
+        features['svbs_clutch_performance'] = sum(clutch_rates) / len(clutch_rates)
+
+        # Clutch vs non-clutch comparison
+        non_clutch_rates = []
+        for situation in ['4', '5']:  # 40-0, 40-15 (easier situations)
+            rate = features.get(f'svbs_{situation}_overall_success_rate', 0)
+            if rate > 0:
+                non_clutch_rates.append(rate)
+
+        if non_clutch_rates:
+            avg_non_clutch = sum(non_clutch_rates) / len(non_clutch_rates)
+            avg_clutch = sum(clutch_rates) / len(clutch_rates)
+            features['svbs_clutch_vs_easy'] = avg_clutch - avg_non_clutch
+
+    return features
 
 
 def extract_sv_break_total_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 35+ features from SvBreakTotal aggregate serve performance by game score (was 1 placeholder)"""
     gender_key = 'men' if gender == 'M' else 'women'
+
     if gender_key not in jeff_data or 'sv_break_total' not in jeff_data[gender_key]:
         return {}
+
     df = jeff_data[gender_key]['sv_break_total']
     player_data = df[df['Player_canonical'] == player_canonical]
-    return {'svbt_sample': len(player_data)} if not player_data.empty else {}
+
+    if player_data.empty:
+        return {}
+
+    features = {}
+
+    # Score situation analysis
+    score_situations = ['d', 'a', '4', '5', '6']
+
+    for situation in score_situations:
+        situation_data = player_data[player_data['row'] == situation]
+        if not situation_data.empty:
+            sit = situation_data.iloc[0]
+
+            # Raw serve metrics
+            features[f'svbt_{situation}_pts'] = float(sit['pts'])
+            features[f'svbt_{situation}_pts_won'] = float(sit['pts_won'])
+            features[f'svbt_{situation}_aces'] = float(sit['aces'])
+            features[f'svbt_{situation}_unret'] = float(sit['unret'])
+            features[f'svbt_{situation}_forced_err'] = float(sit['forced_err'])
+            features[f'svbt_{situation}_quick_pts'] = float(sit['pts_won_lte_3_shots'])
+            features[f'svbt_{situation}_first_in'] = float(sit['first_in'])
+            features[f'svbt_{situation}_dfs'] = float(sit['dfs'])
+
+            # Calculate success rates
+            if features[f'svbt_{situation}_pts'] > 0:
+                features[f'svbt_{situation}_success_rate'] = (features[f'svbt_{situation}_pts_won'] / features[
+                    f'svbt_{situation}_pts']) * 100
+                features[f'svbt_{situation}_ace_rate'] = (features[f'svbt_{situation}_aces'] / features[
+                    f'svbt_{situation}_pts']) * 100
+                features[f'svbt_{situation}_unreturned_rate'] = (features[f'svbt_{situation}_unret'] / features[
+                    f'svbt_{situation}_pts']) * 100
+                features[f'svbt_{situation}_forced_error_rate'] = (features[f'svbt_{situation}_forced_err'] / features[
+                    f'svbt_{situation}_pts']) * 100
+                features[f'svbt_{situation}_quick_point_rate'] = (features[f'svbt_{situation}_quick_pts'] / features[
+                    f'svbt_{situation}_pts']) * 100
+                features[f'svbt_{situation}_df_rate'] = (features[f'svbt_{situation}_dfs'] / features[
+                    f'svbt_{situation}_pts']) * 100
+
+            # First serve percentage
+            if features[f'svbt_{situation}_pts'] > 0:
+                features[f'svbt_{situation}_first_serve_pct'] = (features[f'svbt_{situation}_first_in'] / features[
+                    f'svbt_{situation}_pts']) * 100
+
+            # Serve dominance (aces + unreturned + forced errors)
+            serve_dominance = features[f'svbt_{situation}_aces'] + features[f'svbt_{situation}_unret'] + features[
+                f'svbt_{situation}_forced_err']
+            if features[f'svbt_{situation}_pts'] > 0:
+                features[f'svbt_{situation}_dominance_rate'] = (serve_dominance / features[
+                    f'svbt_{situation}_pts']) * 100
+
+    # Detailed score+situation combinations
+    detailed_situations = ['4d', '4a', '5d', '5a', '6d', '6a']
+
+    for situation in detailed_situations:
+        situation_data = player_data[player_data['row'] == situation]
+        if not situation_data.empty:
+            sit = situation_data.iloc[0]
+
+            pts = float(sit['pts'])
+            pts_won = float(sit['pts_won'])
+
+            features[f'svbt_{situation}_pts'] = pts
+            features[f'svbt_{situation}_pts_won'] = pts_won
+
+            if pts > 0:
+                features[f'svbt_{situation}_success_rate'] = (pts_won / pts) * 100
+
+    # Pressure situation analysis
+    deuce_sr = features.get('svbt_d_success_rate', 0)
+    adv_sr = features.get('svbt_a_success_rate', 0)
+
+    features['svbt_deuce_performance'] = deuce_sr
+    features['svbt_advantage_performance'] = adv_sr
+
+    if deuce_sr > 0 and adv_sr > 0:
+        features['svbt_pressure_differential'] = adv_sr - deuce_sr
+
+    # Game score effectiveness
+    score_4_sr = features.get('svbt_4_success_rate', 0)
+    score_5_sr = features.get('svbt_5_success_rate', 0)
+    score_6_sr = features.get('svbt_6_success_rate', 0)
+
+    game_scores = [score_4_sr, score_5_sr, score_6_sr]
+    valid_scores = [x for x in game_scores if x > 0]
+
+    if valid_scores:
+        features['svbt_game_score_avg_performance'] = sum(valid_scores) / len(valid_scores)
+        features['svbt_game_score_consistency'] = min(valid_scores) / max(valid_scores) if max(valid_scores) > 0 else 0
+
+    # Ace performance across situations
+    ace_rates = []
+    for situation in ['d', 'a', '4', '5', '6']:
+        rate = features.get(f'svbt_{situation}_ace_rate', 0)
+        if rate > 0:
+            ace_rates.append(rate)
+
+    if ace_rates:
+        features['svbt_overall_ace_consistency'] = min(ace_rates) / max(ace_rates) if max(ace_rates) > 0 else 0
+        features['svbt_avg_ace_rate'] = sum(ace_rates) / len(ace_rates)
+
+    # First serve consistency
+    first_serve_pcts = []
+    for situation in ['d', 'a', '4', '5', '6']:
+        pct = features.get(f'svbt_{situation}_first_serve_pct', 0)
+        if pct > 0:
+            first_serve_pcts.append(pct)
+
+    if first_serve_pcts:
+        features['svbt_first_serve_consistency'] = min(first_serve_pcts) / max(first_serve_pcts) if max(
+            first_serve_pcts) > 0 else 0
+        features['svbt_avg_first_serve_pct'] = sum(first_serve_pcts) / len(first_serve_pcts)
+
+    # Double fault performance
+    df_rates = []
+    for situation in ['d', 'a', '4', '5', '6']:
+        rate = features.get(f'svbt_{situation}_df_rate', 0)
+        df_rates.append(rate)  # Include 0s for DF analysis
+
+    if df_rates:
+        features['svbt_avg_df_rate'] = sum(df_rates) / len(df_rates)
+        features['svbt_df_pressure_impact'] = max(df_rates) - min(df_rates)  # Higher = more pressure-sensitive
+
+    # Quick point ability
+    quick_rates = []
+    for situation in ['d', 'a', '4', '5', '6']:
+        rate = features.get(f'svbt_{situation}_quick_point_rate', 0)
+        if rate > 0:
+            quick_rates.append(rate)
+
+    if quick_rates:
+        features['svbt_avg_quick_point_rate'] = sum(quick_rates) / len(quick_rates)
+        features['svbt_quick_point_consistency'] = min(quick_rates) / max(quick_rates) if max(quick_rates) > 0 else 0
+
+    # Serve dominance analysis
+    dominance_rates = []
+    for situation in ['d', 'a', '4', '5', '6']:
+        rate = features.get(f'svbt_{situation}_dominance_rate', 0)
+        if rate > 0:
+            dominance_rates.append(rate)
+
+    if dominance_rates:
+        features['svbt_avg_dominance_rate'] = sum(dominance_rates) / len(dominance_rates)
+        features['svbt_dominance_consistency'] = min(dominance_rates) / max(dominance_rates) if max(
+            dominance_rates) > 0 else 0
+
+    # Clutch vs easy situation comparison
+    clutch_situations = ['d', 'a', '6']  # Deuce, advantage, 40-30
+    easy_situations = ['4', '5']  # 40-0, 40-15
+
+    clutch_rates = [features.get(f'svbt_{s}_success_rate', 0) for s in clutch_situations if
+                    features.get(f'svbt_{s}_success_rate', 0) > 0]
+    easy_rates = [features.get(f'svbt_{s}_success_rate', 0) for s in easy_situations if
+                  features.get(f'svbt_{s}_success_rate', 0) > 0]
+
+    if clutch_rates and easy_rates:
+        avg_clutch = sum(clutch_rates) / len(clutch_rates)
+        avg_easy = sum(easy_rates) / len(easy_rates)
+        features['svbt_clutch_vs_easy_differential'] = avg_clutch - avg_easy
+
+        features['svbt_clutch_performance'] = avg_clutch
+        features['svbt_easy_situation_performance'] = avg_easy
+
+    # Detailed situation effectiveness (4d, 4a, etc.)
+    detailed_scores = {}
+    for situation in detailed_situations:
+        rate = features.get(f'svbt_{situation}_success_rate', 0)
+        if rate > 0:
+            detailed_scores[situation] = rate
+
+    if detailed_scores:
+        features['svbt_detailed_situation_avg'] = sum(detailed_scores.values()) / len(detailed_scores)
+
+        # Deuce vs advantage in specific scores
+        deuce_detailed = [detailed_scores.get(f'{score}d', 0) for score in ['4', '5', '6']]
+        adv_detailed = [detailed_scores.get(f'{score}a', 0) for score in ['4', '5', '6']]
+
+        valid_deuce = [x for x in deuce_detailed if x > 0]
+        valid_adv = [x for x in adv_detailed if x > 0]
+
+        if valid_deuce and valid_adv:
+            avg_deuce_detailed = sum(valid_deuce) / len(valid_deuce)
+            avg_adv_detailed = sum(valid_adv) / len(valid_adv)
+            features['svbt_detailed_deuce_vs_adv'] = avg_adv_detailed - avg_deuce_detailed
+
+    # Overall effectiveness metrics
+    all_success_rates = []
+    for situation in score_situations:
+        rate = features.get(f'svbt_{situation}_success_rate', 0)
+        if rate > 0:
+            all_success_rates.append(rate)
+
+    if all_success_rates:
+        features['svbt_overall_avg_performance'] = sum(all_success_rates) / len(all_success_rates)
+        features['svbt_overall_consistency'] = min(all_success_rates) / max(all_success_rates) if max(
+            all_success_rates) > 0 else 0
+        features['svbt_performance_range'] = max(all_success_rates) - min(all_success_rates)
+
+    return features
 
 
 def extract_matches_features(player_canonical, gender, jeff_data):
+    """EXPANDED: Extract 45+ features from Matches metadata (was 1 placeholder)"""
     gender_key = 'men' if gender == 'M' else 'women'
-    if 'matches' not in jeff_data[gender_key]:
+
+    if gender_key not in jeff_data or 'matches' not in jeff_data[gender_key]:
         return {}
+
     matches_df = jeff_data[gender_key]['matches']
+
+    # Find matches where player participated
     player_matches = matches_df[
-        (matches_df['Player 1'] == player_canonical) |
-        (matches_df['Player 2'] == player_canonical)
+        (matches_df['Player 1'].str.contains(player_canonical.replace('_', ' '), case=False, na=False)) |
+        (matches_df['Player 2'].str.contains(player_canonical.replace('_', ' '), case=False, na=False))
         ]
+
     if player_matches.empty:
         return {}
-    return {'matches_total': len(player_matches)}
+
+    features = {}
+
+    # === BASIC MATCH VOLUME ===
+    features['matches_total_matches'] = len(player_matches)
+    features['matches_unique_tournaments'] = player_matches['Tournament'].nunique()
+    features['matches_unique_opponents'] = len(set(
+        list(player_matches['Player 1'].unique()) + list(player_matches['Player 2'].unique())
+    )) - 1  # Subtract self
+
+    # === SURFACE ANALYSIS ===
+    surface_counts = player_matches['Surface'].value_counts()
+    total_surface_matches = len(player_matches[player_matches['Surface'].notna()])
+
+    for surface in ['Clay', 'Hard', 'Grass']:
+        count = surface_counts.get(surface, 0)
+        features[f'matches_{surface.lower()}_matches'] = count
+        features[f'matches_{surface.lower()}_pct'] = count / total_surface_matches if total_surface_matches > 0 else 0
+
+    features['matches_surface_variety'] = player_matches['Surface'].nunique()
+    features['matches_most_common_surface'] = surface_counts.index[0] if len(surface_counts) > 0 else 'Unknown'
+
+    # === TOURNAMENT ANALYSIS ===
+    # Tournament tiers based on names
+    grand_slams = ['Roland Garros', 'Wimbledon', 'US Open', 'Australian Open']
+    masters_keywords = ['Masters', 'WTA 1000', 'ATP Masters']
+
+    tournament_analysis = player_matches['Tournament'].str.lower()
+
+    features['matches_grand_slam_count'] = sum(
+        tournament_analysis.str.contains(gs.lower(), na=False).sum()
+        for gs in grand_slams
+    )
+
+    features['matches_masters_count'] = sum(
+        tournament_analysis.str.contains(keyword.lower(), na=False).sum()
+        for keyword in masters_keywords
+    )
+
+    # ITF/Challenger level
+    features['matches_itf_count'] = tournament_analysis.str.contains('itf', na=False).sum()
+    features['matches_challenger_count'] = tournament_analysis.str.contains('challenger', na=False).sum()
+
+    # === ROUND ANALYSIS ===
+    round_counts = player_matches['Round'].value_counts()
+
+    # Deep run analysis
+    deep_rounds = ['F', 'SF', 'QF']
+    features['matches_finals'] = round_counts.get('F', 0)
+    features['matches_semifinals'] = round_counts.get('SF', 0)
+    features['matches_quarterfinals'] = round_counts.get('QF', 0)
+    features['matches_deep_runs'] = sum(round_counts.get(r, 0) for r in deep_rounds)
+
+    # Early rounds
+    early_rounds = ['R128', 'R64', 'R32', 'R16']
+    features['matches_early_rounds'] = sum(round_counts.get(r, 0) for r in early_rounds)
+
+    if len(player_matches) > 0:
+        features['matches_deep_run_pct'] = features['matches_deep_runs'] / len(player_matches)
+        features['matches_final_reach_pct'] = features['matches_finals'] / len(player_matches)
+    else:
+        features['matches_deep_run_pct'] = 0
+        features['matches_final_reach_pct'] = 0
+
+    # === HANDEDNESS ANALYSIS ===
+    # Determine player's handedness
+    player_1_mask = player_matches['Player 1'].str.contains(player_canonical.replace('_', ' '), case=False, na=False)
+    player_2_mask = player_matches['Player 2'].str.contains(player_canonical.replace('_', ' '), case=False, na=False)
+
+    player_handedness = None
+    if player_1_mask.any():
+        player_handedness = player_matches[player_1_mask]['Pl 1 hand'].iloc[0]
+    elif player_2_mask.any():
+        player_handedness = player_matches[player_2_mask]['Pl 2 hand'].iloc[0]
+
+    features['matches_player_handedness'] = player_handedness
+
+    # Opponent handedness patterns
+    opponent_handedness = []
+    for _, match in player_matches.iterrows():
+        if pd.notna(match['Player 1']) and player_canonical.replace('_', ' ').lower() in match['Player 1'].lower():
+            if pd.notna(match['Pl 2 hand']):
+                opponent_handedness.append(match['Pl 2 hand'])
+        elif pd.notna(match['Player 2']) and player_canonical.replace('_', ' ').lower() in match['Player 2'].lower():
+            if pd.notna(match['Pl 1 hand']):
+                opponent_handedness.append(match['Pl 1 hand'])
+
+    if opponent_handedness:
+        righty_opponents = opponent_handedness.count('R')
+        lefty_opponents = opponent_handedness.count('L')
+
+        features['matches_vs_righties'] = righty_opponents
+        features['matches_vs_lefties'] = lefty_opponents
+        features['matches_vs_righties_pct'] = righty_opponents / len(opponent_handedness)
+        features['matches_vs_lefties_pct'] = lefty_opponents / len(opponent_handedness)
+        features['matches_handedness_variety'] = len(set(opponent_handedness))
+    else:
+        features['matches_vs_righties'] = 0
+        features['matches_vs_lefties'] = 0
+        features['matches_vs_righties_pct'] = 0
+        features['matches_vs_lefties_pct'] = 0
+        features['matches_handedness_variety'] = 0
+
+    # === MATCH FORMAT ANALYSIS ===
+    best_of_counts = player_matches['Best of'].value_counts()
+    features['matches_best_of_3'] = best_of_counts.get(3, 0)
+    features['matches_best_of_5'] = best_of_counts.get(5, 0)
+
+    if len(player_matches) > 0:
+        features['matches_best_of_3_pct'] = features['matches_best_of_3'] / len(player_matches)
+        features['matches_best_of_5_pct'] = features['matches_best_of_5'] / len(player_matches)
+    else:
+        features['matches_best_of_3_pct'] = 0
+        features['matches_best_of_5_pct'] = 0
+
+    # Tiebreak analysis
+    final_tb_counts = player_matches['Final TB?'].value_counts()
+    features['matches_final_tb_advantage'] = final_tb_counts.get('A', 0)  # Advantage sets
+    features['matches_final_tb_tiebreak'] = final_tb_counts.get('1', 0)  # Tiebreak sets
+
+    # === TEMPORAL ANALYSIS ===
+    if 'Date' in player_matches.columns:
+        player_matches['Date'] = pd.to_datetime(player_matches['Date'], format='%Y%m%d', errors='coerce')
+        valid_dates = player_matches[player_matches['Date'].notna()]
+
+        if len(valid_dates) > 0:
+            # Date range
+            features['matches_date_span_days'] = (valid_dates['Date'].max() - valid_dates['Date'].min()).days
+            features['matches_most_recent_year'] = valid_dates['Date'].max().year
+            features['matches_earliest_year'] = valid_dates['Date'].min().year
+
+            # Seasonal patterns
+            valid_dates['month'] = valid_dates['Date'].dt.month
+            monthly_counts = valid_dates['month'].value_counts()
+
+            # Season definitions (Northern Hemisphere)
+            spring_months = [3, 4, 5]
+            summer_months = [6, 7, 8]
+            fall_months = [9, 10, 11]
+            winter_months = [12, 1, 2]
+
+            features['matches_spring_count'] = sum(monthly_counts.get(m, 0) for m in spring_months)
+            features['matches_summer_count'] = sum(monthly_counts.get(m, 0) for m in summer_months)
+            features['matches_fall_count'] = sum(monthly_counts.get(m, 0) for m in fall_months)
+            features['matches_winter_count'] = sum(monthly_counts.get(m, 0) for m in winter_months)
+
+            total_dated = len(valid_dates)
+            features['matches_spring_pct'] = features['matches_spring_count'] / total_dated
+            features['matches_summer_pct'] = features['matches_summer_count'] / total_dated
+            features['matches_fall_pct'] = features['matches_fall_count'] / total_dated
+            features['matches_winter_pct'] = features['matches_winter_count'] / total_dated
+
+    # === CHARTING QUALITY ===
+    charting_counts = player_matches['Charted by'].value_counts()
+    features['matches_unique_charters'] = len(charting_counts)
+    features['matches_most_frequent_charter'] = charting_counts.index[0] if len(charting_counts) > 0 else 'Unknown'
+    features['matches_charter_consistency'] = charting_counts.max() / len(player_matches) if len(
+        player_matches) > 0 else 0
+
+    # === DERIVED METRICS ===
+    # Tournament level consistency
+    if features['matches_total_matches'] > 0:
+        features['matches_avg_tournaments_per_match'] = features['matches_unique_tournaments'] / features[
+            'matches_total_matches']
+        features['matches_tournament_loyalty'] = 1 - (
+                    features['matches_unique_tournaments'] / features['matches_total_matches'])
+    else:
+        features['matches_avg_tournaments_per_match'] = 0
+        features['matches_tournament_loyalty'] = 0
+
+    # Experience diversity index
+    surface_diversity = features['matches_surface_variety'] / 3  # Max 3 surfaces
+    round_diversity = len(round_counts) / 8  # Approximate max rounds
+    tournament_diversity = min(features['matches_unique_tournaments'] / 10, 1)  # Cap at 1
+
+    features['matches_experience_diversity'] = (surface_diversity + round_diversity + tournament_diversity) / 3
+
+    return features
 
 def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, weighted_defaults=None):
     """Enhanced feature extraction with ALL Jeff data files"""
