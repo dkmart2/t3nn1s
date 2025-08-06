@@ -126,6 +126,172 @@ def safe_int_convert(value):
         return None
 
 
+class DataIngestionError(Exception):
+    """Custom exception for data loading failures"""
+    pass
+
+
+def find_player_data(df, player_canonical):
+    """Find player data in Jeff's datasets using multiple matching strategies"""
+    if df.empty or pd.isna(player_canonical) or not player_canonical:
+        return pd.DataFrame()
+
+    # Strategy 1: Direct canonical match
+    if 'Player_canonical' in df.columns:
+        direct_match = df[df['Player_canonical'] == player_canonical]
+        if not direct_match.empty:
+            return direct_match
+
+    # Strategy 2: Extract surname for partial matching
+    surname = player_canonical.split('_')[0].capitalize()
+
+    # Check 'player' column
+    if 'player' in df.columns:
+        player_match = df[df['player'].str.contains(surname, case=False, na=False)]
+        if not player_match.empty:
+            return player_match
+
+    # Check 'server'/'returner' columns (for Rally data)
+    for col in ['server', 'returner']:
+        if col in df.columns:
+            col_match = df[df[col].str.contains(surname, case=False, na=False)]
+            if not col_match.empty:
+                return col_match
+
+    return pd.DataFrame()
+
+
+def generate_synthetic_match_data(n_matches=1000):
+    """Generate realistic synthetic tennis match data"""
+    np.random.seed(42)
+
+    # Player pools
+    men_players = ['djokovic_n', 'nadal_r', 'federer_r', 'murray_a', 'wawrinka_s',
+                   'del_potro_j', 'cilic_m', 'thiem_d', 'zverev_a', 'tsitsipas_s',
+                   'medvedev_d', 'rublev_a', 'alcaraz_c', 'sinner_j', 'ruud_c']
+
+    women_players = ['serena_w', 'osaka_n', 'halep_s', 'wozniacki_c', 'kvitova_p',
+                     'pliskova_k', 'kerber_a', 'muguruza_g', 'barty_a', 'swiatek_i',
+                     'sabalenka_a', 'rybakina_e', 'gauff_c', 'pegula_j', 'vondrousova_m']
+
+    surfaces = ['Hard', 'Clay', 'Grass']
+    surface_weights = [0.6, 0.3, 0.1]
+
+    tournaments = ['australian_open', 'french_open', 'wimbledon', 'us_open',
+                   'indian_wells', 'miami', 'madrid', 'rome', 'cincinnati']
+
+    data = []
+    start_date = date(2020, 1, 1)
+
+    for i in range(n_matches):
+        # Random date between 2020-2025
+        random_days = np.random.randint(0, (date(2025, 6, 1) - start_date).days)
+        match_date = start_date + timedelta(days=random_days)
+
+        # Gender and player selection
+        gender = np.random.choice(['M', 'W'], p=[0.6, 0.4])
+        players = men_players if gender == 'M' else women_players
+
+        winner, loser = np.random.choice(players, size=2, replace=False)
+        surface = np.random.choice(surfaces, p=surface_weights)
+        tournament = np.random.choice(tournaments)
+
+        # Build composite ID
+        comp_id = build_composite_id(match_date, tournament, winner, loser)
+
+        data.append({
+            'composite_id': comp_id,
+            'date': match_date,
+            'Date': pd.Timestamp(match_date),
+            'gender': gender,
+            'surface': surface,
+            'Surface': surface,
+            'Tournament': tournament.replace('_', ' ').title(),
+            'tournament_canonical': tournament,
+            'Winner': winner.replace('_', ' ').title(),
+            'Loser': loser.replace('_', ' ').title(),
+            'winner_canonical': winner,
+            'loser_canonical': loser,
+            'WRank': np.random.randint(1, 100),
+            'LRank': np.random.randint(1, 100),
+            'PSW': np.random.uniform(1.2, 3.0),
+            'PSL': np.random.uniform(1.2, 3.0),
+            'source_rank': 3
+        })
+
+    return pd.DataFrame(data)
+
+
+def generate_comprehensive_player_features(player_canonical, gender, surface):
+    """Generate realistic synthetic player features matching Jeff's schema"""
+    np.random.seed(hash(player_canonical) % 2 ** 32)  # Consistent per player
+
+    # Base serve stats
+    features = {
+        'serve_pts': np.random.randint(60, 120),
+        'aces': np.random.randint(3, 15),
+        'double_faults': np.random.randint(1, 8),
+        'first_serve_pct': np.random.uniform(0.55, 0.75),
+        'first_serve_won': np.random.randint(25, 45),
+        'second_serve_won': np.random.randint(12, 25),
+
+        # Return stats
+        'return_pts_won': np.random.randint(20, 40),
+        'winners_total': np.random.randint(15, 40),
+        'winners_fh': np.random.randint(8, 25),
+        'winners_bh': np.random.randint(5, 18),
+        'unforced_errors': np.random.randint(15, 35),
+        'unforced_fh': np.random.randint(8, 20),
+        'unforced_bh': np.random.randint(5, 18),
+
+        # Break points
+        'break_points_saved': np.random.randint(2, 8),
+
+        # Jeff ServeBasics features
+        'sb_ace_rate': np.random.uniform(0.05, 0.15),
+        'sb_serve_win_pct': np.random.uniform(0.55, 0.75),
+        'sb_wide_pct': np.random.uniform(0.25, 0.35),
+        'sb_body_pct': np.random.uniform(0.25, 0.35),
+        'sb_t_pct': np.random.uniform(0.30, 0.45),
+
+        # Jeff KeyPoints features
+        'kps_bp_save_pct': np.random.uniform(0.45, 0.75),
+        'kps_gp_conversion_pct': np.random.uniform(0.60, 0.85),
+        'kpr_bpo_conversion_pct': np.random.uniform(0.30, 0.55),
+
+        # Jeff NetPoints features
+        'np_success_rate': np.random.uniform(55, 75),
+        'np_winner_rate': np.random.uniform(25, 45),
+
+        # Jeff Rally features
+        'rally_serve_win_pct': np.random.uniform(55, 75),
+        'rally_return_win_pct': np.random.uniform(25, 45),
+
+        # Derived indices
+        'aggression_index': np.random.uniform(0.4, 0.7),
+        'consistency_index': np.random.uniform(0.4, 0.7),
+        'pressure_performance': np.random.uniform(0.4, 0.7),
+        'net_game_strength': np.random.uniform(0.4, 0.7)
+    }
+
+    # Surface adjustments
+    if surface == 'Clay':
+        features['rally_serve_win_pct'] *= 0.95
+        features['aces'] = int(features['aces'] * 0.7)
+        features['sb_ace_rate'] *= 0.7
+    elif surface == 'Grass':
+        features['aces'] = int(features['aces'] * 1.3)
+        features['sb_ace_rate'] *= 1.3
+        features['np_success_rate'] *= 1.1
+
+    # Gender adjustments
+    if gender == 'W':
+        features['aces'] = int(features['aces'] * 0.6)
+        features['sb_ace_rate'] *= 0.6
+        features['serve_pts'] = int(features['serve_pts'] * 0.9)
+
+    return features
+
 # ============================================================================
 # NAME NORMALIZATION FUNCTIONS
 # ============================================================================
@@ -6255,6 +6421,7 @@ def integrate_api_tennis_data_incremental(historical_data):
 
         atp_rankings = get_player_rankings(day, "ATP")
         wta_rankings = get_player_rankings(day, "WTA")
+
 
         all_fixtures = []
         for event_type_key in event_type_keys:
