@@ -2593,8 +2593,8 @@ def extract_matches_features(player_canonical, gender, jeff_data):
 
     # === MATCH FORMAT ANALYSIS ===
     best_of_counts = player_matches['Best of'].value_counts()
-    features['matches_best_of_3'] = best_of_counts.get(3, 0)
-    features['matches_best_of_5'] = best_of_counts.get(5, 0)
+    features['matches_best_of_3'] = best_of_counts.iloc[3] if len(best_of_counts) > 3 else 0
+    features['matches_best_of_5'] = best_of_counts.iloc[5] if len(best_of_counts) > 5 else 0
 
     if len(player_matches) > 0:
         features['matches_best_of_3_pct'] = features['matches_best_of_3'] / len(player_matches)
@@ -2610,6 +2610,7 @@ def extract_matches_features(player_canonical, gender, jeff_data):
 
     # === TEMPORAL ANALYSIS ===
     if 'Date' in player_matches.columns:
+        player_matches = player_matches.copy()
         player_matches['Date'] = pd.to_datetime(player_matches['Date'], format='%Y%m%d', errors='coerce')
         valid_dates = player_matches[player_matches['Date'].notna()]
 
@@ -2950,654 +2951,6 @@ def load_cached_scraped_data():
 
     print(f"Loaded {len(scraped_data)} cached Tennis Abstract records")
     return scraped_data
-
-
-#________________________________#
-
-import sys
-import os
-import traceback
-from collections import defaultdict
-
-# Add current directory to path for imports
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-
-def test_individual_functions():
-    """Test each extraction function individually"""
-
-    print("=== TESTING INDIVIDUAL EXTRACTION FUNCTIONS ===\n")
-
-    try:
-        from tennis_updated import load_jeff_comprehensive_data, canonical_player
-
-        # Import new extraction functions
-        from jeff_extraction_functions import (
-            extract_serve_basics_features,
-            extract_key_points_serve_features,
-            extract_key_points_return_features,
-            extract_net_points_features,
-            extract_rally_features,
-            extract_serve_direction_features,
-            extract_return_outcomes_features,
-            extract_return_depth_features,
-            extract_serve_influence_features,
-            extract_shot_direction_features,
-            extract_shot_dir_outcomes_features,
-            extract_shot_types_features,
-            extract_snv_features,
-            extract_sv_break_split_features,
-            extract_sv_break_total_features,
-            extract_matches_features
-        )
-
-        print("✅ All imports successful")
-
-    except ImportError as e:
-        print(f"❌ Import error: {e}")
-        return False
-
-    print("Loading Jeff data...")
-    jeff_data = load_jeff_comprehensive_data()
-    print(f"✅ Jeff data loaded successfully")
-
-    # Test functions
-    functions_to_test = [
-        ('ServeBasics', extract_serve_basics_features),
-        ('KeyPointsServe', extract_key_points_serve_features),
-        ('KeyPointsReturn', extract_key_points_return_features),
-        ('NetPoints', extract_net_points_features),
-        ('Rally', extract_rally_features),
-        ('ServeDirection', extract_serve_direction_features),
-        ('ReturnOutcomes', extract_return_outcomes_features),
-        ('ReturnDepth', extract_return_depth_features),
-        ('ServeInfluence', extract_serve_influence_features),
-        ('ShotDirection', extract_shot_direction_features),
-        ('ShotDirOutcomes', extract_shot_dir_outcomes_features),
-        ('ShotTypes', extract_shot_types_features),
-        ('ServeAndVolley', extract_snv_features),
-        ('SvBreakSplit', extract_sv_break_split_features),
-        ('SvBreakTotal', extract_sv_break_total_features),
-        ('Matches', extract_matches_features)
-    ]
-
-    # Test players
-    test_players = [
-        ('djokovic_n', 'M'),
-        ('federer_r', 'M'),
-        ('serena_w', 'W')
-    ]
-
-    results = defaultdict(dict)
-
-    for name, func in functions_to_test:
-        print(f"\n--- Testing {name} ---")
-
-        for player, gender in test_players:
-            try:
-                features = func(player, gender, jeff_data)
-                results[name][player] = len(features)
-
-                if features:
-                    sample_keys = list(features.keys())[:3]
-                    sample_values = [features[k] for k in sample_keys]
-                    print(f"  {player}: {len(features)} features - {dict(zip(sample_keys, sample_values))}")
-                else:
-                    print(f"  {player}: No features extracted (expected for some players)")
-
-            except Exception as e:
-                print(f"  ❌ {player}: Error - {e}")
-                results[name][player] = -1
-
-    # Summary
-    print(f"\n=== INDIVIDUAL FUNCTION TEST SUMMARY ===")
-
-    total_functions = len(functions_to_test)
-    successful_functions = 0
-
-    for name, func in functions_to_test:
-        player_results = results[name]
-        success_count = sum(1 for v in player_results.values() if v >= 0)
-        total_features = sum(v for v in player_results.values() if v > 0)
-
-        if success_count == len(test_players):
-            print(f"✅ {name}: All players successful, {total_features} total features")
-            successful_functions += 1
-        else:
-            print(f"❌ {name}: {success_count}/{len(test_players)} players successful")
-
-    print(f"\n✅ {successful_functions}/{total_functions} functions working correctly")
-    return successful_functions == total_functions
-
-
-def test_integration():
-    """Test integration with main pipeline"""
-
-    print("\n=== TESTING PIPELINE INTEGRATION ===\n")
-
-    try:
-        from tennis_updated import (
-            load_jeff_comprehensive_data,
-            extract_comprehensive_jeff_features,
-            canonical_player
-        )
-
-        print("✅ Main pipeline imports successful")
-
-    except ImportError as e:
-        print(f"❌ Pipeline import error: {e}")
-        return False
-
-    jeff_data = load_jeff_comprehensive_data()
-
-    # Test integrated extraction
-    test_players = [
-        ('djokovic_n', 'M'),
-        ('federer_r', 'M'),
-        ('nadal_r', 'M'),
-        ('serena_w', 'W')
-    ]
-
-    print("Testing integrated extraction...")
-
-    for player, gender in test_players:
-        try:
-            # Test original function (should include new extractions)
-            features = extract_comprehensive_jeff_features(player, gender, jeff_data)
-
-            # Count features by category
-            categories = {
-                'sb_': 'ServeBasics',
-                'kps_': 'KeyPointsServe',
-                'kpr_': 'KeyPointsReturn',
-                'np_': 'NetPoints',
-                'rally_': 'Rally',
-                'sd_': 'ServeDirection',
-                'ro_': 'ReturnOutcomes',
-                'rd_': 'ReturnDepth',
-                'si_': 'ServeInfluence',
-                'shotd_': 'ShotDirection',
-                'sdo_': 'ShotDirOutcomes',
-                'st_': 'ShotTypes',
-                'snv_': 'ServeAndVolley',
-                'svbs_': 'SvBreakSplit',
-                'svbt_': 'SvBreakTotal',
-                'matches_': 'Matches',
-                'jeff_': 'JeffNotation'
-            }
-
-            print(f"\n{player} ({gender}): {len(features)} total features")
-
-            category_counts = {}
-            for prefix, name in categories.items():
-                count = len([k for k in features.keys() if k.startswith(prefix)])
-                if count > 0:
-                    category_counts[name] = count
-                    print(f"  {name}: {count}")
-
-            # Verify we have features from multiple categories
-            if len(category_counts) >= 5:
-                print(f"  ✅ Multiple categories extracted successfully")
-            else:
-                print(f"  ⚠️  Only {len(category_counts)} categories with features")
-
-        except Exception as e:
-            print(f"❌ {player}: Integration error - {e}")
-            traceback.print_exc()
-            return False
-
-    print(f"\n✅ Pipeline integration test successful")
-    return True
-
-
-def test_data_quality():
-    """Test data quality and validation"""
-
-    print("\n=== TESTING DATA QUALITY ===\n")
-
-    try:
-        from tennis_updated import load_jeff_comprehensive_data
-        from jeff_extraction_functions import extract_all_jeff_features
-
-    except ImportError as e:
-        print(f"❌ Import error: {e}")
-        return False
-
-    jeff_data = load_jeff_comprehensive_data()
-
-    # Test data quality
-    test_player = 'djokovic_n'
-    features = extract_all_jeff_features(test_player, 'M', jeff_data)
-
-    print(f"Testing data quality for {test_player}...")
-
-    # Check for reasonable values
-    quality_checks = [
-        ('sb_first_serve_pct', 0.0, 1.0, 'First serve percentage'),
-        ('sb_ace_rate', 0.0, 0.5, 'Ace rate'),
-        ('kps_bp_save_pct', 0.0, 1.0, 'Break point save percentage'),
-        ('np_net_win_pct', 0.0, 1.0, 'Net win percentage'),
-        ('rally_short_pct', 0.0, 1.0, 'Short rally percentage'),
-        ('sd_placement_variety', 0.0, 1.0, 'Serve placement variety'),
-        ('ro_return_effectiveness', 0.0, 1.0, 'Return effectiveness'),
-        ('st_forehand_pct', 0.0, 1.0, 'Forehand percentage')
-    ]
-
-    passed_checks = 0
-    total_checks = 0
-
-    for feature_key, min_val, max_val, description in quality_checks:
-        if feature_key in features:
-            value = features[feature_key]
-            total_checks += 1
-
-            if min_val <= value <= max_val:
-                print(f"  ✅ {description}: {value:.3f} (valid range)")
-                passed_checks += 1
-            else:
-                print(f"  ❌ {description}: {value:.3f} (outside range {min_val}-{max_val})")
-        else:
-            print(f"  ⚠️  {description}: Not found in features")
-
-    # Check for NaN values
-    nan_count = sum(1 for v in features.values() if str(v).lower() == 'nan')
-    if nan_count == 0:
-        print(f"  ✅ No NaN values found")
-    else:
-        print(f"  ⚠️  {nan_count} NaN values found")
-
-    print(f"\n✅ Data quality: {passed_checks}/{total_checks} checks passed")
-    return passed_checks >= total_checks * 0.8  # 80% success rate
-
-
-def test_performance():
-    """Test extraction performance"""
-
-    print("\n=== TESTING PERFORMANCE ===\n")
-
-    import time
-
-    try:
-        from tennis_updated import load_jeff_comprehensive_data
-        from jeff_extraction_functions import extract_all_jeff_features
-
-    except ImportError as e:
-        print(f"❌ Import error: {e}")
-        return False
-
-    print("Loading data...")
-    start_time = time.time()
-    jeff_data = load_jeff_comprehensive_data()
-    load_time = time.time() - start_time
-    print(f"✅ Data loading: {load_time:.2f} seconds")
-
-    # Test extraction speed
-    test_player = 'djokovic_n'
-    iterations = 10
-
-    print(f"Testing extraction speed ({iterations} iterations)...")
-    start_time = time.time()
-
-    for i in range(iterations):
-        features = extract_all_jeff_features(test_player, 'M', jeff_data)
-
-    total_time = time.time() - start_time
-    avg_time = total_time / iterations
-
-    print(f"✅ Average extraction time: {avg_time:.3f} seconds per player")
-    print(f"✅ Estimated time for 1000 players: {avg_time * 1000 / 60:.1f} minutes")
-
-    # Memory usage estimation
-    import sys
-    feature_size = sys.getsizeof(features)
-    print(f"✅ Feature dictionary size: {feature_size} bytes")
-    print(f"✅ Estimated memory for 1000 players: {feature_size * 1000 / 1024 / 1024:.1f} MB")
-
-    return avg_time < 1.0  # Should be under 1 second per player
-
-
-def main():
-    """Run all tests"""
-
-    print("JEFF SACKMANN EXTRACTION FUNCTION TEST SUITE")
-    print("=" * 50)
-
-    test_results = []
-
-    # Run tests
-    tests = [
-        ("Individual Functions", test_individual_functions),
-        ("Pipeline Integration", test_integration),
-        ("Data Quality", test_data_quality),
-        ("Performance", test_performance)
-    ]
-
-    for test_name, test_func in tests:
-        print(f"\n{'=' * 20} {test_name} {'=' * 20}")
-
-        try:
-            result = test_func()
-            test_results.append((test_name, result))
-
-            if result:
-                print(f"✅ {test_name}: PASSED")
-            else:
-                print(f"❌ {test_name}: FAILED")
-
-        except Exception as e:
-            print(f"❌ {test_name}: ERROR - {e}")
-            traceback.print_exc()
-            test_results.append((test_name, False))
-
-    # Final summary
-    print(f"\n{'=' * 20} FINAL RESULTS {'=' * 20}")
-
-    passed_tests = sum(1 for _, result in test_results if result)
-    total_tests = len(test_results)
-
-    for test_name, result in test_results:
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"{status}: {test_name}")
-
-    print(f"\nOVERALL: {passed_tests}/{total_tests} tests passed")
-
-    if passed_tests == total_tests:
-        print("🎉 ALL TESTS PASSED! Ready for production deployment.")
-        return True
-    else:
-        print("⚠️  Some tests failed. Review errors before deployment.")
-        return False
-
-
-if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
-
-# ============================================================================
-# SYNTHETIC DATA GENERATION
-# ============================================================================
-
-def generate_synthetic_point_data(n_matches=500, points_per_match=150):
-    """Generate synthetic point-by-point tennis data for momentum learning"""
-    point_data = []
-    surfaces = ['Hard', 'Clay', 'Grass']
-
-    for match_id in range(n_matches):
-        surface = random.choice(surfaces)
-
-        if surface == 'Grass':
-            base_serve_prob = 0.68
-        elif surface == 'Clay':
-            base_serve_prob = 0.62
-        else:
-            base_serve_prob = 0.65
-
-        skill_diff = random.uniform(-0.1, 0.1)
-        p1_games = p2_games = 0
-        p1_sets = p2_sets = 0
-        current_server = 1
-        recent_points = []
-        momentum_decay = 0.85
-
-        for point_num in range(points_per_match):
-            if len(recent_points) > 0:
-                weights = np.array([momentum_decay ** i for i in range(len(recent_points))])
-                server_wins = np.array([1 if p == current_server else -1 for p in recent_points])
-                momentum = np.sum(weights * server_wins) / np.sum(weights) if len(weights) > 0 else 0
-            else:
-                momentum = 0
-
-            is_break_point = (p1_games == 6 and p2_games == 5) or (p1_games == 5 and p2_games == 6)
-            is_set_point = (p1_games >= 5 and p1_games - p2_games >= 1) or (p2_games >= 5 and p2_games - p1_games >= 1)
-            is_match_point = ((p1_sets == 2 and p2_sets <= 1) or (p2_sets == 2 and p1_sets <= 1)) and is_set_point
-
-            pressure_mod = 1.0
-            if is_match_point:
-                pressure_mod = 0.95 if current_server == 1 else 1.05
-            elif is_break_point:
-                pressure_mod = 0.97 if current_server == 1 else 1.03
-
-            serve_prob = base_serve_prob
-            if current_server == 1:
-                serve_prob += skill_diff + momentum * 0.03
-            else:
-                serve_prob -= skill_diff - momentum * 0.03
-            serve_prob *= pressure_mod
-            serve_prob = np.clip(serve_prob, 0.1, 0.9)
-
-            point_winner = current_server if random.random() < serve_prob else (3 - current_server)
-            recent_points.append(point_winner)
-
-            if len(recent_points) > 10:
-                recent_points.pop(0)
-
-            point_data.append({
-                'match_id': f"synthetic_match_{match_id}",
-                'Pt': point_num + 1,
-                'Svr': current_server,
-                'PtWinner': point_winner,
-                'surface': surface,
-                'p1_games': p1_games,
-                'p2_games': p2_games,
-                'p1_sets': p1_sets,
-                'p2_sets': p2_sets,
-                'is_break_point': is_break_point,
-                'is_set_point': is_set_point,
-                'is_match_point': is_match_point,
-                'momentum': momentum,
-                'serve_prob_used': serve_prob,
-                'skill_differential': skill_diff
-            })
-
-            if point_num % 4 == 3:
-                if point_winner == current_server:
-                    if current_server == 1:
-                        p1_games += 1
-                    else:
-                        p2_games += 1
-                else:
-                    if current_server == 1:
-                        p2_games += 1
-                    else:
-                        p1_games += 1
-
-                current_server = 3 - current_server
-
-                if p1_games >= 6 and p1_games - p2_games >= 2:
-                    p1_sets += 1
-                    p1_games = p2_games = 0
-                elif p2_games >= 6 and p2_games - p1_games >= 2:
-                    p2_sets += 1
-                    p1_games = p2_games = 0
-
-                if p1_sets == 3 or p2_sets == 3:
-                    break
-
-    return pd.DataFrame(point_data)
-
-
-def generate_synthetic_match_data(n_matches=1000):
-    """Generate synthetic match-level data with comprehensive statistics"""
-    matches = []
-    surfaces = ['Hard', 'Clay', 'Grass']
-    tournaments = ['ATP Masters', 'Grand Slam', 'ATP 250', 'ATP 500', 'WTA Premier']
-
-    player_pool = []
-    for i in range(200):
-        skill_level = np.random.beta(2, 5)
-        player_pool.append({
-            'player_id': f"player_{i:03d}",
-            'skill_level': skill_level,
-            'serve_skill': skill_level + np.random.normal(0, 0.1),
-            'return_skill': skill_level + np.random.normal(0, 0.1),
-            'clay_modifier': np.random.normal(0, 0.05),
-            'grass_modifier': np.random.normal(0, 0.08),
-            'pressure_resistance': np.random.beta(3, 3)
-        })
-
-    start_date = date(2023, 1, 1)
-
-    for match_id in range(n_matches):
-        p1, p2 = random.sample(player_pool, 2)
-        surface = random.choice(surfaces)
-        tournament = random.choice(tournaments)
-        match_date = start_date + timedelta(days=random.randint(0, 730))
-
-        p1_effective_skill = p1['skill_level']
-        p2_effective_skill = p2['skill_level']
-
-        if surface == 'Clay':
-            p1_effective_skill += p1['clay_modifier']
-            p2_effective_skill += p2['clay_modifier']
-        elif surface == 'Grass':
-            p1_effective_skill += p1['grass_modifier']
-            p2_effective_skill += p2['grass_modifier']
-
-        skill_diff = p1_effective_skill - p2_effective_skill
-        p1_win_prob = 0.5 + skill_diff * 2
-        p1_win_prob = np.clip(p1_win_prob, 0.1, 0.9)
-
-        winner_is_p1 = random.random() < p1_win_prob
-
-        if winner_is_p1:
-            winner_skill = p1_effective_skill
-            loser_skill = p2_effective_skill
-            winner_name = p1['player_id']
-            loser_name = p2['player_id']
-        else:
-            winner_skill = p2_effective_skill
-            loser_skill = p1_effective_skill
-            winner_name = p2['player_id']
-            loser_name = p1['player_id']
-
-        if surface == 'Grass':
-            base_aces = 12
-            base_serve_pct = 0.68
-            base_return_won = 0.32
-        elif surface == 'Clay':
-            base_aces = 4
-            base_serve_pct = 0.62
-            base_return_won = 0.38
-        else:
-            base_aces = 8
-            base_serve_pct = 0.65
-            base_return_won = 0.35
-
-        winner_aces = int(base_aces * (1 + winner_skill * 0.5) + np.random.poisson(2))
-        winner_serve_pts = random.randint(70, 90)
-        winner_first_serve_pct = base_serve_pct + winner_skill * 0.1 + np.random.normal(0, 0.05)
-        winner_first_serve_pct = np.clip(winner_first_serve_pct, 0.45, 0.85)
-
-        winner_first_won = int(winner_serve_pts * winner_first_serve_pct * (0.7 + winner_skill * 0.2))
-        winner_second_won = int(winner_serve_pts * (1 - winner_first_serve_pct) * (0.5 + winner_skill * 0.15))
-        winner_break_pts_saved = random.randint(2, 8)
-        winner_return_pts_won = int(random.randint(60, 80) * (base_return_won + winner_skill * 0.1))
-        winner_winners = random.randint(20, 45)
-        winner_unforced = random.randint(15, 35)
-
-        loser_aces = int(base_aces * (0.8 + loser_skill * 0.4) + np.random.poisson(1))
-        loser_serve_pts = random.randint(75, 95)
-        loser_first_serve_pct = base_serve_pct + loser_skill * 0.08 + np.random.normal(0, 0.05)
-        loser_first_serve_pct = np.clip(loser_first_serve_pct, 0.40, 0.80)
-
-        loser_first_won = int(loser_serve_pts * loser_first_serve_pct * (0.65 + loser_skill * 0.15))
-        loser_second_won = int(loser_serve_pts * (1 - loser_first_serve_pct) * (0.45 + loser_skill * 0.1))
-        loser_break_pts_saved = random.randint(1, 6)
-        loser_return_pts_won = int(random.randint(55, 75) * (base_return_won - 0.05 + loser_skill * 0.08))
-        loser_winners = random.randint(15, 35)
-        loser_unforced = random.randint(18, 40)
-
-        matches.append({
-            'composite_id': f"{match_date.strftime('%Y%m%d')}-{tournament.lower().replace(' ', '_')}-{winner_name}-{loser_name}",
-            'date': match_date,
-            'surface': surface,
-            'tournament': tournament,
-            'winner_canonical': winner_name,
-            'loser_canonical': loser_name,
-            'Winner': winner_name.replace('_', ' ').title(),
-            'Loser': loser_name.replace('_', ' ').title(),
-            'gender': random.choice(['M', 'W']),
-            'source_rank': 3,
-
-            'winner_aces': winner_aces,
-            'winner_serve_pts': winner_serve_pts,
-            'winner_first_in': int(winner_serve_pts * winner_first_serve_pct),
-            'winner_first_won': winner_first_won,
-            'winner_second_won': winner_second_won,
-            'winner_bp_saved': winner_break_pts_saved,
-            'winner_return_pts_won': winner_return_pts_won,
-            'winner_winners': winner_winners,
-            'winner_unforced': winner_unforced,
-
-            'loser_aces': loser_aces,
-            'loser_serve_pts': loser_serve_pts,
-            'loser_first_in': int(loser_serve_pts * loser_first_serve_pct),
-            'loser_first_won': loser_first_won,
-            'loser_second_won': loser_second_won,
-            'loser_bp_saved': loser_break_pts_saved,
-            'loser_return_pts_won': loser_return_pts_won,
-            'loser_winners': loser_winners,
-            'loser_unforced': loser_unforced,
-
-            'p1_win_probability': p1_win_prob,
-            'skill_differential': skill_diff,
-            'data_quality_score': 0.8
-        })
-
-    return pd.DataFrame(matches)
-
-
-def generate_comprehensive_player_features(player_canonical, gender='M', surface='Hard'):
-    """Generate comprehensive player features that match the system's expected format"""
-    base_skill = np.random.beta(2, 3)
-
-    surface_mod = 0
-    if surface == 'Clay':
-        surface_mod = np.random.normal(0, 0.1)
-    elif surface == 'Grass':
-        surface_mod = np.random.normal(0, 0.15)
-
-    effective_skill = base_skill + surface_mod
-
-    if gender == 'W':
-        base_serve_pts = 65
-        base_aces = 3
-        base_first_serve_pct = 0.58
-    else:
-        base_serve_pts = 75
-        base_aces = 6
-        base_first_serve_pct = 0.62
-
-    features = {
-        'serve_pts': base_serve_pts + int(effective_skill * 15),
-        'aces': int(base_aces * (1 + effective_skill)),
-        'double_faults': max(1, int(3 * (1 - effective_skill))),
-        'first_serve_pct': np.clip(base_first_serve_pct + effective_skill * 0.1, 0.45, 0.75),
-        'first_serve_won': int((base_serve_pts + effective_skill * 15) * 0.7 * (1 + effective_skill * 0.2)),
-        'second_serve_won': int((base_serve_pts + effective_skill * 15) * 0.3 * (0.5 + effective_skill * 0.3)),
-        'break_points_saved': max(0, int(5 * effective_skill)),
-        'return_pts_won': int(70 * (0.35 + effective_skill * 0.15)),
-        'winners_total': int(25 * (1 + effective_skill * 0.5)),
-        'winners_fh': int(15 * (1 + effective_skill * 0.4)),
-        'winners_bh': int(10 * (1 + effective_skill * 0.6)),
-        'unforced_errors': max(5, int(25 * (1 - effective_skill * 0.3))),
-        'unforced_fh': int(15 * (1 - effective_skill * 0.2)),
-        'unforced_bh': int(10 * (1 - effective_skill * 0.4)),
-
-        'serve_wide_pct': 0.25 + np.random.normal(0, 0.05),
-        'serve_t_pct': 0.45 + np.random.normal(0, 0.05),
-        'serve_body_pct': 0.30 + np.random.normal(0, 0.05),
-        'return_deep_pct': 0.35 + effective_skill * 0.2,
-        'return_shallow_pct': 0.35 - effective_skill * 0.1,
-        'return_very_deep_pct': 0.3 + effective_skill * 0.15,
-
-        'aggression_index': 0.4 + effective_skill * 0.3,
-        'consistency_index': 0.5 + effective_skill * 0.4,
-        'pressure_performance': 0.45 + effective_skill * 0.3,
-        'net_game_strength': 0.5 + effective_skill * 0.2 + (0.1 if surface == 'Grass' else 0)
-    }
-
-    return features
 
 
 # ============================================================================
@@ -7177,14 +6530,22 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
 
     logging.info("Step 5: Adding Jeff feature columns...")
     try:
-        men_feats = set(weighted_defaults.get('men', {}).keys())
-        women_feats = set(weighted_defaults.get('women', {}).keys())
-        all_jeff_features = sorted(men_feats.union(women_feats))
+        print("Generating comprehensive feature list from sample extraction...")
+        sample_features = set()
+
+        # Extract features from a sample player to get full feature set
+        test_players = [('djokovic_n', 'M'), ('federer_r', 'M'), ('serena_w', 'W')]
+        for player, gender in test_players:
+            features = extract_comprehensive_jeff_features(player, gender, jeff_data, weighted_defaults)
+            sample_features.update(features.keys())
+
+        all_jeff_features = sorted(list(sample_features))
+        print(f"✓ Detected {len(all_jeff_features)} comprehensive features")
 
         if not all_jeff_features:
-            raise ValueError("No features available in weighted_defaults")
+            raise ValueError("No features available from sample extraction")
 
-        missing_cols_dict = {}
+        missing_cols_dict = {}  # This line needs to be indented inside the try block
 
         for feat in all_jeff_features:
             w_col = f"winner_{feat}"
@@ -7267,21 +6628,216 @@ def generate_comprehensive_historical_data(fast=True, n_sample=500, use_syntheti
     return tennis_data, jeff_data, weighted_defaults
 
 
-def generate_synthetic_training_data_for_model():
-    """Generate synthetic data specifically formatted for model training"""
-    logging.info("Generating synthetic training data for ML models...")
+def extract_all_player_features_batched(tennis_data, jeff_data, weighted_defaults):
+    """Pre-compute features for all unique players, then map to matches"""
 
-    point_data = generate_synthetic_point_data(n_matches=200, points_per_match=120)
+    print("=== BATCHED PLAYER FEATURE EXTRACTION ===")
 
-    match_data, jeff_data, defaults = generate_comprehensive_historical_data(
-        fast=False,
-        n_sample=1000,
-        use_synthetic=True
-    )
+    # Get all unique players
+    all_players = set()
+    all_players.update(tennis_data['winner_canonical'].dropna().unique())
+    all_players.update(tennis_data['loser_canonical'].dropna().unique())
+    all_players = sorted(list(all_players))
 
-    logging.info(f"Generated {len(point_data)} point records and {len(match_data)} match records")
+    print(f"Found {len(all_players)} unique players across all matches")
 
-    return point_data, match_data, jeff_data, defaults
+    # Pre-compute features for each unique player
+    player_features_cache = {}
+
+    for i, player_canonical in enumerate(all_players):
+        if i % 50 == 0:
+            print(f"Pre-computing features for player {i + 1}/{len(all_players)}: {player_canonical}")
+
+        try:
+            # Infer gender from dataset (most common gender for this player)
+            player_matches = tennis_data[
+                (tennis_data['winner_canonical'] == player_canonical) |
+                (tennis_data['loser_canonical'] == player_canonical)
+                ]
+
+            if not player_matches.empty:
+                gender = player_matches['gender'].mode().iloc[0] if not player_matches['gender'].mode().empty else 'M'
+            else:
+                gender = 'M'  # Default
+
+            # Extract features once for this player
+            features = extract_comprehensive_jeff_features(
+                player_canonical, gender, jeff_data, weighted_defaults
+            )
+
+            player_features_cache[player_canonical] = features
+
+        except Exception as e:
+            if i < 5:  # Only log first few errors
+                print(f"Warning: Error extracting features for {player_canonical}: {e}")
+            player_features_cache[player_canonical] = {}
+
+    print(f"✓ Pre-computed features for {len(player_features_cache)} players")
+
+    # Now map features to matches (fast lookup)
+    print("Mapping features to matches...")
+
+    # Get feature names from any player with features
+    feature_names = []
+    for features in player_features_cache.values():
+        if features:
+            feature_names = list(features.keys())
+            break
+
+    print(f"Found {len(feature_names)} features per player")
+
+    # Create feature columns efficiently
+    for feature_name in feature_names:
+        winner_col = f'winner_{feature_name}'
+        loser_col = f'loser_{feature_name}'
+
+        # Vectorized mapping
+        tennis_data[winner_col] = tennis_data['winner_canonical'].map(
+            lambda x: player_features_cache.get(x, {}).get(feature_name, np.nan)
+        )
+        tennis_data[loser_col] = tennis_data['loser_canonical'].map(
+            lambda x: player_features_cache.get(x, {}).get(feature_name, np.nan)
+        )
+
+    print(f"✓ Mapped features to {len(tennis_data)} matches")
+    print(f"Final shape: {tennis_data.shape}")
+
+    return tennis_data
+
+
+def generate_comprehensive_historical_data_optimized(fast=True, n_sample=500, use_synthetic=False):
+    """OPTIMIZED version with batched feature extraction"""
+    logging.info("=== STARTING OPTIMIZED DATA GENERATION ===")
+
+    if use_synthetic:
+        logging.info("=== SYNTHETIC DATA MODE ===")
+        jeff_data = {
+            'men': {'overview': pd.DataFrame()},
+            'women': {'overview': pd.DataFrame()}
+        }
+        weighted_defaults = {
+            'men': get_fallback_defaults('men'),
+            'women': get_fallback_defaults('women')
+        }
+        tennis_data = generate_synthetic_match_data(n_matches=n_sample)
+        logging.info(f"✓ Generated {len(tennis_data)} synthetic matches")
+
+        for idx, row in tennis_data.iterrows():
+            if idx % 100 == 0:
+                logging.info(f"  Processing synthetic match {idx}/{len(tennis_data)}")
+            gender = row['gender']
+            surface = row['surface']
+            winner_features = generate_comprehensive_player_features(
+                row['winner_canonical'], gender, surface
+            )
+            loser_features = generate_comprehensive_player_features(
+                row['loser_canonical'], gender, surface
+            )
+            for feature_name, feature_value in winner_features.items():
+                col_name = f'winner_{feature_name}'
+                tennis_data.at[idx, col_name] = feature_value
+            for feature_name, feature_value in loser_features.items():
+                col_name = f'loser_{feature_name}'
+                tennis_data.at[idx, col_name] = feature_value
+
+        logging.info("✓ Synthetic player features added")
+        logging.info(f"=== SYNTHETIC DATA GENERATION COMPLETE ===")
+        logging.info(f"Final synthetic data shape: {tennis_data.shape}")
+        return tennis_data, jeff_data, weighted_defaults
+
+    # REAL DATA MODE - OPTIMIZED
+    logging.info("=== REAL DATA MODE ===")
+
+    logging.info("Step 1: Loading Jeff's comprehensive data...")
+    try:
+        jeff_data = load_jeff_comprehensive_data()
+        if not jeff_data or ('men' not in jeff_data and 'women' not in jeff_data):
+            logging.error("ERROR: Jeff data loading failed, falling back to synthetic")
+            return generate_comprehensive_historical_data_optimized(fast, n_sample, use_synthetic=True)
+        logging.info(f"✓ Jeff data loaded successfully")
+        logging.info(f"  - Men's datasets: {len(jeff_data.get('men', {}))}")
+        logging.info(f"  - Women's datasets: {len(jeff_data.get('women', {}))}")
+    except Exception as e:
+        logging.error(f"ERROR loading Jeff data: {e}, falling back to synthetic")
+        return generate_comprehensive_historical_data_optimized(fast, n_sample, use_synthetic=True)
+
+    logging.info("Step 2: Calculating weighted defaults...")
+    try:
+        weighted_defaults = calculate_comprehensive_weighted_defaults(jeff_data)
+        if not weighted_defaults:
+            logging.error("ERROR: Weighted defaults calculation failed")
+            return pd.DataFrame(), jeff_data, {}
+        logging.info(f"✓ Weighted defaults calculated")
+        logging.info(f"  - Men's features: {len(weighted_defaults.get('men', {}))}")
+        logging.info(f"  - Women's features: {len(weighted_defaults.get('women', {}))}")
+    except Exception as e:
+        logging.error(f"ERROR calculating weighted defaults: {e}")
+        return pd.DataFrame(), jeff_data, {}
+
+    logging.info("Step 3: Loading tennis match data...")
+    try:
+        tennis_data = load_all_tennis_data()
+        if tennis_data.empty:
+            logging.error("ERROR: No tennis data loaded, falling back to synthetic")
+            return generate_comprehensive_historical_data_optimized(fast, n_sample, use_synthetic=True)
+        logging.info(f"✓ Tennis data loaded: {len(tennis_data)} matches")
+
+        if fast:
+            total_rows = len(tennis_data)
+            take = min(n_sample, total_rows)
+            tennis_data = tennis_data.sample(take, random_state=1).reset_index(drop=True)
+            logging.info(f"[FAST MODE] Using sample of {take}/{total_rows} rows")
+    except Exception as e:
+        logging.error(f"ERROR loading tennis data: {e}, falling back to synthetic")
+        return generate_comprehensive_historical_data_optimized(fast, n_sample, use_synthetic=True)
+
+    logging.info("Step 4: Processing tennis data...")
+    try:
+        tennis_data['winner_canonical'] = tennis_data['Winner'].apply(canonical_player)
+        tennis_data['loser_canonical'] = tennis_data['Loser'].apply(canonical_player)
+        tennis_data['tournament_canonical'] = tennis_data['Tournament'].apply(normalize_tournament_name)
+        tennis_data['Date'] = pd.to_datetime(tennis_data['Date'], errors='coerce')
+        tennis_data['date'] = tennis_data['Date'].dt.date
+        tennis_data['composite_id'] = tennis_data.apply(
+            lambda r: build_composite_id(
+                r['date'],
+                r['tournament_canonical'],
+                r['winner_canonical'],
+                r['loser_canonical']
+            ) if pd.notna(r['date']) else None,
+            axis=1
+        )
+        tennis_data = tennis_data.dropna(subset=['date', 'composite_id'])
+        tennis_data['tennis_data_odds1'] = pd.to_numeric(tennis_data.get('PSW', 0), errors='coerce')
+        tennis_data['tennis_data_odds2'] = pd.to_numeric(tennis_data.get('PSL', 0), errors='coerce')
+        if 'WRank' in tennis_data.columns and 'LRank' in tennis_data.columns:
+            tennis_data['rank_difference'] = abs(pd.to_numeric(tennis_data['WRank'], errors='coerce') -
+                                                 pd.to_numeric(tennis_data['LRank'], errors='coerce'))
+        logging.info(f"✓ Tennis data processed")
+    except Exception as e:
+        logging.error(f"ERROR processing tennis data: {e}")
+        return pd.DataFrame(), jeff_data, weighted_defaults
+
+    # OPTIMIZED STEP 5: Batched feature extraction
+    logging.info("Step 5: Extracting Jeff features (OPTIMIZED BATCHED)...")
+    try:
+        tennis_data = extract_all_player_features_batched(tennis_data, jeff_data, weighted_defaults)
+        logging.info(f"✓ Jeff features extracted via batched approach")
+    except Exception as e:
+        logging.error(f"ERROR in batched feature extraction: {e}")
+        return pd.DataFrame(), jeff_data, weighted_defaults
+
+    # Continue with remaining steps
+    logging.info("Step 6: Adding Jeff notation features...")
+    tennis_data = integrate_jeff_notation_into_pipeline(tennis_data, jeff_data)
+
+    logging.info("Step 7: Integrating API and TA data...")
+    tennis_data = integrate_api_tennis_data_incremental(tennis_data)
+
+    logging.info(f"=== OPTIMIZED DATA GENERATION COMPLETE ===")
+    logging.info(f"Final data shape: {tennis_data.shape}")
+
+    return tennis_data, jeff_data, weighted_defaults
 
 def extract_ta_data_from_historical(historical_data):
     """Extract Tennis Abstract data already integrated in historical dataset"""
@@ -7488,8 +7044,7 @@ if __name__ == "__main__":
     print("🎾 TENNIS DATA PIPELINE 🎾")
 
     # Generate complete dataset
-    hist, jeff_data, defaults = generate_comprehensive_historical_data(fast=False)
-
+    hist, jeff_data, defaults = generate_comprehensive_historical_data_optimized(fast=False)
     # Integrate all data sources
     hist = integrate_api_tennis_data_incremental(hist)
 
