@@ -459,28 +459,44 @@ def safe_column_access(df, columns, default_value=0):
     return pd.DataFrame(result, index=df.index)
 
 
-def find_player_data(df, player_canonical, name_columns=['player', 'Player_canonical']):
-    """Find player data using multiple matching strategies"""
+def find_player_data_robust(df, player_canonical):
+    """ENHANCED: Multi-strategy player matching"""
     if df.empty:
         return pd.DataFrame()
 
-    # Strategy 1: Direct canonical match
-    for col in name_columns:
-        if col in df.columns:
-            direct_match = df[df[col] == player_canonical]
-            if not direct_match.empty:
-                return direct_match
-
-    # Strategy 2: Extract surname and search
+    # Extract search components
     search_name = extract_player_name_from_canonical(player_canonical)
-    if not search_name:
-        return pd.DataFrame()
 
-    for col in name_columns:
+    # Strategy 1: Direct canonical match
+    if 'Player_canonical' in df.columns:
+        direct_match = df[df['Player_canonical'] == player_canonical]
+        if not direct_match.empty:
+            return direct_match
+
+    # Strategy 2: Player column match
+    if 'player' in df.columns:
+        player_match = df[df['player'].str.contains(search_name, case=False, na=False)]
+        if not player_match.empty:
+            return player_match
+
+    # Strategy 3: Server/Returner columns (for Rally data)
+    if 'server' in df.columns:
+        server_match = df[df['server'].str.contains(search_name, case=False, na=False)]
+        if not server_match.empty:
+            return server_match
+
+    if 'returner' in df.columns:
+        returner_match = df[df['returner'].str.contains(search_name, case=False, na=False)]
+        if not returner_match.empty:
+            return returner_match
+
+    # Strategy 4: Fuzzy name matching
+    possible_cols = ['Player_canonical', 'player', 'server', 'returner']
+    for col in possible_cols:
         if col in df.columns:
-            name_match = df[df[col].str.contains(search_name, case=False, na=False)]
-            if not name_match.empty:
-                return name_match
+            fuzzy_match = df[df[col].str.contains(search_name[:4], case=False, na=False)]
+            if not fuzzy_match.empty:
+                return fuzzy_match
 
     return pd.DataFrame()
 
@@ -1563,7 +1579,7 @@ def extract_shot_direction_features(player_canonical, gender, jeff_data):
     return features
 
 
-def extract_shot_dir_outcomes_features_fixed(player_canonical, gender, jeff_data):
+def extract_shot_dir_outcomes_features(player_canonical, gender, jeff_data):
     """FIXED: Extract 40+ features from ShotDirOutcomes with proper data aggregation"""
     gender_key = 'men' if gender == 'M' else 'women'
 
@@ -1685,29 +1701,6 @@ def extract_shot_dir_outcomes_features_fixed(player_canonical, gender, jeff_data
 
     return features
 
-
-# Test the fixed function
-jeff_data = load_jeff_comprehensive_data()
-
-for player_canonical, gender, name in [('djokovic_n', 'M', 'Djokovic'), ('sabalenka_a', 'W', 'Sabalenka')]:
-    print(f"--- {name} ShotDirOutcomes FIXED ---")
-    features = extract_shot_dir_outcomes_features_fixed(player_canonical, gender, jeff_data)
-    print(f"Features extracted: {len(features)}")
-
-    if features:
-        # Key tactical metrics
-        print(f"Total shots: {features.get('sdo_total_shots', 0)}")
-        print(f"Overall effectiveness: {features.get('sdo_overall_effectiveness', 0):.1f}%")
-        print(f"FH vs BH effectiveness: {features.get('sdo_fh_vs_bh_effectiveness', 0):.1f}%")
-        print(f"Crosscourt preference: {features.get('sdo_crosscourt_preference', 0):.1f}%")
-        print(f"Attacking shot rate: {features.get('sdo_attacking_shot_rate', 0):.1f}%")
-        print(f"Winner/Error ratio: {features.get('sdo_winner_error_ratio', 0):.2f}")
-        print(f"FH shot preference: {features.get('sdo_fh_shot_preference', 0):.1f}%")
-
-        print(f"All features: {sorted(features.keys())}")
-    else:
-        print("No ShotDirOutcomes data found")
-    print()
 
 
 def extract_shot_types_features(player_canonical, gender, jeff_data):
@@ -2863,10 +2856,22 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
     extraction_functions = [
         extract_serve_basics_features,
         extract_key_points_serve_features,
-        # Add other extraction functions here - keeping the working ones from original
+        extract_key_points_return_features,
+        extract_net_points_features,
         extract_rally_features,
-        extract_serve_influence_features,
+        extract_serve_direction_features,
+        extract_return_outcomes_features,
         extract_return_depth_features,
+        extract_serve_influence_features,
+        extract_shot_direction_features,
+        extract_shot_dir_outcomes_features,
+        extract_shot_types_features,
+        extract_snv_features,
+        extract_sv_break_split_features,
+        extract_sv_break_total_features,
+        extract_matches_features,
+        extract_overview_features,
+        extract_jeff_notation_features,
     ]
 
     for func in extraction_functions:
