@@ -490,11 +490,331 @@ def calculate_comprehensive_weighted_defaults(jeff_data: dict) -> dict:
 
 
 # ============================================================================
-# JEFF FILE EXTRACTION
+# JEFF FILES EXTRACTION
 # ============================================================================
 
+# ============================================================================
+# ADD THEM IN THE "JEFF FILE EXTRACTION FUNCTIONS" SECTION
+# ============================================================================
+
+def extract_serve_basics_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'serve_basics' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['serve_basics']
+    player_data = df[df['Player_canonical'] == player_canonical]
+
+    if player_data.empty:
+        return {}
+
+    # FIXED: serve_basics uses 'Total' not 'STotal'
+    total_data = player_data[player_data['row'] == 'Total']
+    if total_data.empty:
+        return {}
+
+    totals = total_data[['pts', 'pts_won', 'aces', 'unret', 'wide', 'body', 't']].sum()
+
+    features = {}
+    serve_pts = totals['pts']
+
+    if serve_pts > 0:
+        features['sb_serve_pts'] = float(serve_pts)
+        features['sb_aces'] = float(totals['aces'])
+        features['sb_ace_rate'] = features['sb_aces'] / serve_pts
+        features['sb_wide_pct'] = float(totals['wide']) / serve_pts
+        features['sb_body_pct'] = float(totals['body']) / serve_pts
+        features['sb_t_pct'] = float(totals['t']) / serve_pts
+
+    return features
+
+def extract_key_points_serve_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'key_points_serve' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['key_points_serve']
+    player_data = df[df['Player_canonical'] == player_canonical]
+
+    if player_data.empty:
+        return {}
+
+    total_data = player_data[player_data['row'] == 'STotal']
+    if total_data.empty:
+        return {}
+
+    totals = total_data[['pts', 'pts_won', 'aces', 'svc_winners']].sum()
+
+    features = {}
+    if totals['pts'] > 0:
+        features['kps_pts'] = float(totals['pts'])
+        features['kps_pts_won'] = float(totals['pts_won'])
+        features['kps_aces'] = float(totals['aces'])
+        features['kps_win_pct'] = features['kps_pts_won'] / features['kps_pts']
+
+    return features
+
+
+def extract_key_points_return_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'key_points_return' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['key_points_return']
+    player_data = df[df['Player_canonical'] == player_canonical]
+
+    if player_data.empty:
+        return {}
+
+    # FIXED: key_points_return uses 'RTotal'
+    total_data = player_data[player_data['row'] == 'RTotal']
+    if total_data.empty:
+        return {}
+
+    totals = total_data[['pts', 'pts_won']].sum()
+
+    features = {}
+    if totals['pts'] > 0:
+        features['kpr_pts'] = float(totals['pts'])
+        features['kpr_pts_won'] = float(totals['pts_won'])
+        features['kpr_win_pct'] = features['kpr_pts_won'] / features['kpr_pts']
+
+    return features
+
+
+def extract_net_points_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'net_points' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['net_points']
+    player_data = df[df['Player_canonical'] == player_canonical]
+
+    if player_data.empty:
+        return {}
+
+    # FIXED: net_points uses 'NetPoints' not 'STotal'
+    total_data = player_data[player_data['row'] == 'NetPoints']
+    if total_data.empty:
+        return {}
+
+    totals = total_data[['net_pts', 'pts_won']].sum()
+
+    features = {}
+    if totals['net_pts'] > 0:
+        features['np_net_pts'] = float(totals['net_pts'])
+        features['np_pts_won'] = float(totals['pts_won'])
+        features['np_win_pct'] = features['np_pts_won'] / features['np_net_pts']
+
+    return features
+
+
+def extract_rally_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'rally' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['rally']
+
+    # Extract surname from canonical format
+    if player_canonical == 'djokovic_n':
+        search_name = 'Djokovic'
+    elif player_canonical == 'federer_r':
+        search_name = 'Federer'
+    elif player_canonical == 'nadal_r':
+        search_name = 'Nadal'
+    else:
+        # Generic extraction: take part before underscore, capitalize
+        search_name = player_canonical.split('_')[0].capitalize()
+
+    player_server = df[df['server'].str.contains(search_name, case=False, na=False)]
+    player_returner = df[df['returner'].str.contains(search_name, case=False, na=False)]
+
+    features = {}
+
+    # Server stats
+    server_total = player_server[player_server['row'] == 'Total']
+    if not server_total.empty:
+        server_totals = server_total[['pts', 'pl1_won', 'pl1_winners', 'pl1_forced', 'pl1_unforced']].sum()
+        if server_totals['pts'] > 0:
+            features['rally_serve_win_pct'] = float(server_totals['pl1_won'] / server_totals['pts'])
+            features['rally_serve_winner_pct'] = float(server_totals['pl1_winners'] / server_totals['pts'])
+            features['rally_serve_error_pct'] = float(server_totals['pl1_unforced'] / server_totals['pts'])
+
+    # Returner stats
+    returner_total = player_returner[player_returner['row'] == 'Total']
+    if not returner_total.empty:
+        returner_totals = returner_total[['pts', 'pl2_won', 'pl2_winners', 'pl2_forced', 'pl2_unforced']].sum()
+        if returner_totals['pts'] > 0:
+            features['rally_return_win_pct'] = float(returner_totals['pl2_won'] / returner_totals['pts'])
+            features['rally_return_winner_pct'] = float(returner_totals['pl2_winners'] / returner_totals['pts'])
+            features['rally_return_error_pct'] = float(returner_totals['pl2_unforced'] / returner_totals['pts'])
+
+    return features
+
+
+def extract_serve_direction_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'serve_direction' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['serve_direction']
+    player_data = df[df['Player_canonical'] == player_canonical]
+
+    if player_data.empty:
+        return {}
+
+    total_data = player_data[player_data['row'] == 'Total']
+    if total_data.empty:
+        return {}
+
+    totals = total_data[['deuce_wide', 'deuce_middle', 'deuce_t', 'ad_wide', 'ad_middle', 'ad_t', 'err_net', 'err_wide',
+                         'err_deep']].sum()
+
+    features = {}
+    total_serves = totals['deuce_wide'] + totals['deuce_middle'] + totals['deuce_t'] + totals['ad_wide'] + totals[
+        'ad_middle'] + totals['ad_t']
+    total_errors = totals['err_net'] + totals['err_wide'] + totals['err_deep']
+
+    if total_serves > 0:
+        features['sd_deuce_wide_pct'] = totals['deuce_wide'] / total_serves
+        features['sd_deuce_middle_pct'] = totals['deuce_middle'] / total_serves
+        features['sd_deuce_t_pct'] = totals['deuce_t'] / total_serves
+        features['sd_ad_wide_pct'] = totals['ad_wide'] / total_serves
+        features['sd_ad_middle_pct'] = totals['ad_middle'] / total_serves
+        features['sd_ad_t_pct'] = totals['ad_t'] / total_serves
+        features['sd_error_rate'] = total_errors / total_serves if total_serves > 0 else 0
+        features['sd_deuce_side_pct'] = (totals['deuce_wide'] + totals['deuce_middle'] + totals[
+            'deuce_t']) / total_serves
+        features['sd_ad_side_pct'] = (totals['ad_wide'] + totals['ad_middle'] + totals['ad_t']) / total_serves
+
+    return features
+
+
+def extract_return_outcomes_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'return_outcomes' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['return_outcomes']
+    player_data = df[df['Player_canonical'] == player_canonical]
+
+    if player_data.empty:
+        return {}
+
+    # FIXED: return_outcomes uses 'Total' not 'STotal'
+    total_data = player_data[player_data['row'] == 'Total']
+    if total_data.empty:
+        return {}
+
+    return {'ro_total_rows': len(total_data)}
+
+
+def extract_return_depth_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+
+    if gender_key not in jeff_data or 'return_depth' not in jeff_data[gender_key]:
+        return {}
+
+    df = jeff_data[gender_key]['return_depth']
+    player_data = df[df['Player_canonical'] == player_canonical]
+
+    if player_data.empty:
+        return {}
+
+    total_data = player_data[player_data['row'] == 'STotal']
+    if total_data.empty:
+        return {}
+
+    return {'rd_sample': len(total_data)}
+
+
+# Simple placeholder functions for remaining files
+def extract_serve_influence_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if gender_key not in jeff_data or 'serve_influence' not in jeff_data[gender_key]:
+        return {}
+    df = jeff_data[gender_key]['serve_influence']
+    player_data = df[df['Player_canonical'] == player_canonical]
+    return {'si_sample': len(player_data)} if not player_data.empty else {}
+
+
+def extract_shot_direction_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if gender_key not in jeff_data or 'shot_direction' not in jeff_data[gender_key]:
+        return {}
+    df = jeff_data[gender_key]['shot_direction']
+    player_data = df[df['Player_canonical'] == player_canonical]
+    return {'shotd_sample': len(player_data)} if not player_data.empty else {}
+
+
+def extract_shot_dir_outcomes_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if gender_key not in jeff_data or 'shot_dir_outcomes' not in jeff_data[gender_key]:
+        return {}
+    df = jeff_data[gender_key]['shot_dir_outcomes']
+    player_data = df[df['Player_canonical'] == player_canonical]
+    return {'sdo_sample': len(player_data)} if not player_data.empty else {}
+
+
+def extract_shot_types_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if gender_key not in jeff_data or 'shot_types' not in jeff_data[gender_key]:
+        return {}
+    df = jeff_data[gender_key]['shot_types']
+    player_data = df[df['Player_canonical'] == player_canonical]
+    return {'st_sample': len(player_data)} if not player_data.empty else {}
+
+
+def extract_snv_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if gender_key not in jeff_data or 'snv' not in jeff_data[gender_key]:
+        return {}
+    df = jeff_data[gender_key]['snv']
+    player_data = df[df['Player_canonical'] == player_canonical]
+    return {'snv_sample': len(player_data)} if not player_data.empty else {}
+
+
+def extract_sv_break_split_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if gender_key not in jeff_data or 'sv_break_split' not in jeff_data[gender_key]:
+        return {}
+    df = jeff_data[gender_key]['sv_break_split']
+    player_data = df[df['Player_canonical'] == player_canonical]
+    return {'svbs_sample': len(player_data)} if not player_data.empty else {}
+
+
+def extract_sv_break_total_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if gender_key not in jeff_data or 'sv_break_total' not in jeff_data[gender_key]:
+        return {}
+    df = jeff_data[gender_key]['sv_break_total']
+    player_data = df[df['Player_canonical'] == player_canonical]
+    return {'svbt_sample': len(player_data)} if not player_data.empty else {}
+
+
+def extract_matches_features(player_canonical, gender, jeff_data):
+    gender_key = 'men' if gender == 'M' else 'women'
+    if 'matches' not in jeff_data[gender_key]:
+        return {}
+    matches_df = jeff_data[gender_key]['matches']
+    player_matches = matches_df[
+        (matches_df['Player 1'] == player_canonical) |
+        (matches_df['Player 2'] == player_canonical)
+        ]
+    if player_matches.empty:
+        return {}
+    return {'matches_total': len(player_matches)}
+
 def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, weighted_defaults=None):
-    """Enhanced feature extraction with actual Jeff data processing"""
+    """Enhanced feature extraction with ALL Jeff data files"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data:
@@ -505,13 +825,14 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
     else:
         features = get_fallback_defaults(gender_key)
 
+    # EXISTING OVERVIEW EXTRACTION
     if 'overview' in jeff_data[gender_key]:
         overview_df = jeff_data[gender_key]['overview']
         if 'Player_canonical' in overview_df.columns:
             player_overview = overview_df[
                 (overview_df['Player_canonical'] == player_canonical) &
                 (overview_df['set'] == 'Total')
-                ]
+            ]
 
             if len(player_overview) > 0:
                 latest = player_overview.iloc[-1]
@@ -534,26 +855,58 @@ def extract_comprehensive_jeff_features(player_canonical, gender, jeff_data, wei
                         'unforced_bh': float(latest.get('unforced_bh', 0))
                     })
 
+    # EXTRACT FROM ALL FILES
+    extraction_functions = [
+        extract_serve_basics_features,
+        extract_key_points_serve_features,
+        extract_key_points_return_features,
+        extract_net_points_features,
+        extract_rally_features,
+        extract_serve_direction_features,
+        extract_return_outcomes_features,
+        extract_return_depth_features,
+        extract_serve_influence_features,
+        extract_shot_direction_features,
+        extract_shot_dir_outcomes_features,
+        extract_shot_types_features,
+        extract_snv_features,
+        extract_sv_break_split_features,
+        extract_sv_break_total_features,
+        extract_matches_features
+    ]
+
+    for func in extraction_functions:
+        try:
+            new_features = func(player_canonical, gender, jeff_data)  # FIXED: was 'canonical'
+            features.update(new_features)
+            if new_features:
+                print(f"{func.__name__}: Added {len(new_features)} features")
+        except Exception as e:
+            print(f"{func.__name__}: Error - {e}")
+            continue
+
+    # EXISTING DERIVED FEATURES
     features['aggression_index'] = (
-            features.get('winners_total', 20) / (
-            features.get('winners_total', 20) + features.get('unforced_errors', 20))
+        features.get('winners_total', 20) / (
+        features.get('winners_total', 20) + features.get('unforced_errors', 20))
     )
 
     features['consistency_index'] = 1 - (
-            features.get('unforced_errors', 20) / (features.get('serve_pts', 80) + features.get('return_pts_won', 30))
+        features.get('unforced_errors', 20) / (features.get('serve_pts', 80) + features.get('return_pts_won', 30))
     )
 
     features['pressure_performance'] = (
-                                               features.get('key_points_serve_won_pct', 0.5) + features.get(
-                                           'key_points_return_won_pct', 0.5)
-                                       ) / 2
+        features.get('key_points_serve_won_pct', 0.5) + features.get(
+        'key_points_return_won_pct', 0.5)
+    ) / 2
 
     features['net_game_strength'] = features.get('net_points_won_pct', 0.5)
+
+    # EXISTING JEFF NOTATION
     jeff_notation_features = extract_jeff_notation_features(player_canonical, gender, jeff_data)
     features.update(jeff_notation_features)
 
     return features
-
 
 def calculate_feature_importance_weights(historical_data, jeff_data):
     """Calculate dynamic feature importance weights based on data availability"""
@@ -583,84 +936,6 @@ def calculate_feature_importance_weights(historical_data, jeff_data):
     return weights
 
 
-def extract_jeff_features(player_canonical, gender, jeff_data):
-    """Extract actual features from Jeff Sackmann data - simplified version for simulation"""
-    gender_key = 'men' if gender == 'M' else 'women'
-
-    if gender_key not in jeff_data or player_canonical not in jeff_data[gender_key]:
-        return {
-            'serve_pts': 60,
-            'first_won': 0,
-            'second_won': 0,
-            'return_pts_won': 20
-        }
-
-    player_data = jeff_data[gender_key][player_canonical]
-
-    first_in = player_data.get('1stIn', 0)
-    first_won = player_data.get('1stWon', 0)
-    second_won = player_data.get('2ndWon', 0)
-    double_faults = player_data.get('df', 0)
-
-    total_serve_pts = first_in + double_faults + (
-            first_won - first_in) if first_won >= first_in else first_in + second_won + double_faults
-
-    break_points_saved = player_data.get('bpSaved', 0)
-    break_points_faced = player_data.get('bpFaced', 0)
-    return_pts_won = break_points_faced - break_points_saved
-
-    return {
-        'serve_pts': max(1, total_serve_pts),
-        'first_won': first_won,
-        'second_won': second_won,
-        'return_pts_won': max(0, return_pts_won)
-    }
-
-
-def extract_unified_features_fixed(match_data, player_prefix):
-    """Enhanced version that prioritizes TA data, falls back to API, then defaults"""
-    features = {}
-
-    if f'{player_prefix}_ta_serve_won_pct' in match_data:
-        serve_won_pct = match_data[f'{player_prefix}_ta_serve_won_pct']
-        features['serve_effectiveness'] = serve_won_pct / 100 if serve_won_pct > 1 else serve_won_pct
-    elif f'{player_prefix}_serve_pts' in match_data:
-        serve_pts = match_data.get(f'{player_prefix}_serve_pts', 80)
-        serve_pts_won = match_data.get(f'{player_prefix}_pts_won', 0)
-        features['serve_effectiveness'] = serve_pts_won / serve_pts if serve_pts > 0 else 0.65
-    else:
-        features['serve_effectiveness'] = 0.65
-
-    if f'{player_prefix}_ta_return1_points_won_pct' in match_data:
-        return_won_pct = match_data[f'{player_prefix}_ta_return1_points_won_pct']
-        features['return_effectiveness'] = return_won_pct / 100 if return_won_pct > 1 else return_won_pct
-    else:
-        features['return_effectiveness'] = 0.35
-
-    if f'{player_prefix}_ta_serve_aces_pct' in match_data:
-        ace_pct = match_data[f'{player_prefix}_ta_serve_aces_pct']
-        features['winners_rate'] = (ace_pct / 100) * 3 if ace_pct > 1 else ace_pct * 3
-        features['winners_rate'] = min(features['winners_rate'], 0.5)
-    else:
-        features['winners_rate'] = 0.20
-
-    if f'{player_prefix}_ta_serve_forced_errors_pct' in match_data:
-        forced_err_pct = match_data[f'{player_prefix}_ta_serve_forced_errors_pct']
-        features['unforced_rate'] = (forced_err_pct / 100) * 2 if forced_err_pct > 1 else forced_err_pct * 2
-    else:
-        features['unforced_rate'] = 0.18
-
-    if f'{player_prefix}_ta_keypoints_points_won_pct' in match_data:
-        kp_won_pct = match_data[f'{player_prefix}_ta_keypoints_points_won_pct']
-        features['pressure_performance'] = kp_won_pct / 100 if kp_won_pct > 1 else kp_won_pct
-    else:
-        features['pressure_performance'] = 0.50
-
-    features['net_effectiveness'] = 0.65
-
-    return features
-
-
 def load_cached_scraped_data():
     """Load existing Tennis Abstract scraped data from cache"""
     from tennis_updated import AutomatedTennisAbstractScraper
@@ -682,6 +957,368 @@ def load_cached_scraped_data():
 
     print(f"Loaded {len(scraped_data)} cached Tennis Abstract records")
     return scraped_data
+
+
+#________________________________#
+
+import sys
+import os
+import traceback
+from collections import defaultdict
+
+# Add current directory to path for imports
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
+def test_individual_functions():
+    """Test each extraction function individually"""
+
+    print("=== TESTING INDIVIDUAL EXTRACTION FUNCTIONS ===\n")
+
+    try:
+        from tennis_updated import load_jeff_comprehensive_data, canonical_player
+
+        # Import new extraction functions
+        from jeff_extraction_functions import (
+            extract_serve_basics_features,
+            extract_key_points_serve_features,
+            extract_key_points_return_features,
+            extract_net_points_features,
+            extract_rally_features,
+            extract_serve_direction_features,
+            extract_return_outcomes_features,
+            extract_return_depth_features,
+            extract_serve_influence_features,
+            extract_shot_direction_features,
+            extract_shot_dir_outcomes_features,
+            extract_shot_types_features,
+            extract_snv_features,
+            extract_sv_break_split_features,
+            extract_sv_break_total_features,
+            extract_matches_features
+        )
+
+        print("✅ All imports successful")
+
+    except ImportError as e:
+        print(f"❌ Import error: {e}")
+        return False
+
+    print("Loading Jeff data...")
+    jeff_data = load_jeff_comprehensive_data()
+    print(f"✅ Jeff data loaded successfully")
+
+    # Test functions
+    functions_to_test = [
+        ('ServeBasics', extract_serve_basics_features),
+        ('KeyPointsServe', extract_key_points_serve_features),
+        ('KeyPointsReturn', extract_key_points_return_features),
+        ('NetPoints', extract_net_points_features),
+        ('Rally', extract_rally_features),
+        ('ServeDirection', extract_serve_direction_features),
+        ('ReturnOutcomes', extract_return_outcomes_features),
+        ('ReturnDepth', extract_return_depth_features),
+        ('ServeInfluence', extract_serve_influence_features),
+        ('ShotDirection', extract_shot_direction_features),
+        ('ShotDirOutcomes', extract_shot_dir_outcomes_features),
+        ('ShotTypes', extract_shot_types_features),
+        ('ServeAndVolley', extract_snv_features),
+        ('SvBreakSplit', extract_sv_break_split_features),
+        ('SvBreakTotal', extract_sv_break_total_features),
+        ('Matches', extract_matches_features)
+    ]
+
+    # Test players
+    test_players = [
+        ('djokovic_n', 'M'),
+        ('federer_r', 'M'),
+        ('serena_w', 'W')
+    ]
+
+    results = defaultdict(dict)
+
+    for name, func in functions_to_test:
+        print(f"\n--- Testing {name} ---")
+
+        for player, gender in test_players:
+            try:
+                features = func(player, gender, jeff_data)
+                results[name][player] = len(features)
+
+                if features:
+                    sample_keys = list(features.keys())[:3]
+                    sample_values = [features[k] for k in sample_keys]
+                    print(f"  {player}: {len(features)} features - {dict(zip(sample_keys, sample_values))}")
+                else:
+                    print(f"  {player}: No features extracted (expected for some players)")
+
+            except Exception as e:
+                print(f"  ❌ {player}: Error - {e}")
+                results[name][player] = -1
+
+    # Summary
+    print(f"\n=== INDIVIDUAL FUNCTION TEST SUMMARY ===")
+
+    total_functions = len(functions_to_test)
+    successful_functions = 0
+
+    for name, func in functions_to_test:
+        player_results = results[name]
+        success_count = sum(1 for v in player_results.values() if v >= 0)
+        total_features = sum(v for v in player_results.values() if v > 0)
+
+        if success_count == len(test_players):
+            print(f"✅ {name}: All players successful, {total_features} total features")
+            successful_functions += 1
+        else:
+            print(f"❌ {name}: {success_count}/{len(test_players)} players successful")
+
+    print(f"\n✅ {successful_functions}/{total_functions} functions working correctly")
+    return successful_functions == total_functions
+
+
+def test_integration():
+    """Test integration with main pipeline"""
+
+    print("\n=== TESTING PIPELINE INTEGRATION ===\n")
+
+    try:
+        from tennis_updated import (
+            load_jeff_comprehensive_data,
+            extract_comprehensive_jeff_features,
+            canonical_player
+        )
+
+        print("✅ Main pipeline imports successful")
+
+    except ImportError as e:
+        print(f"❌ Pipeline import error: {e}")
+        return False
+
+    jeff_data = load_jeff_comprehensive_data()
+
+    # Test integrated extraction
+    test_players = [
+        ('djokovic_n', 'M'),
+        ('federer_r', 'M'),
+        ('nadal_r', 'M'),
+        ('serena_w', 'W')
+    ]
+
+    print("Testing integrated extraction...")
+
+    for player, gender in test_players:
+        try:
+            # Test original function (should include new extractions)
+            features = extract_comprehensive_jeff_features(player, gender, jeff_data)
+
+            # Count features by category
+            categories = {
+                'sb_': 'ServeBasics',
+                'kps_': 'KeyPointsServe',
+                'kpr_': 'KeyPointsReturn',
+                'np_': 'NetPoints',
+                'rally_': 'Rally',
+                'sd_': 'ServeDirection',
+                'ro_': 'ReturnOutcomes',
+                'rd_': 'ReturnDepth',
+                'si_': 'ServeInfluence',
+                'shotd_': 'ShotDirection',
+                'sdo_': 'ShotDirOutcomes',
+                'st_': 'ShotTypes',
+                'snv_': 'ServeAndVolley',
+                'svbs_': 'SvBreakSplit',
+                'svbt_': 'SvBreakTotal',
+                'matches_': 'Matches',
+                'jeff_': 'JeffNotation'
+            }
+
+            print(f"\n{player} ({gender}): {len(features)} total features")
+
+            category_counts = {}
+            for prefix, name in categories.items():
+                count = len([k for k in features.keys() if k.startswith(prefix)])
+                if count > 0:
+                    category_counts[name] = count
+                    print(f"  {name}: {count}")
+
+            # Verify we have features from multiple categories
+            if len(category_counts) >= 5:
+                print(f"  ✅ Multiple categories extracted successfully")
+            else:
+                print(f"  ⚠️  Only {len(category_counts)} categories with features")
+
+        except Exception as e:
+            print(f"❌ {player}: Integration error - {e}")
+            traceback.print_exc()
+            return False
+
+    print(f"\n✅ Pipeline integration test successful")
+    return True
+
+
+def test_data_quality():
+    """Test data quality and validation"""
+
+    print("\n=== TESTING DATA QUALITY ===\n")
+
+    try:
+        from tennis_updated import load_jeff_comprehensive_data
+        from jeff_extraction_functions import extract_all_jeff_features
+
+    except ImportError as e:
+        print(f"❌ Import error: {e}")
+        return False
+
+    jeff_data = load_jeff_comprehensive_data()
+
+    # Test data quality
+    test_player = 'djokovic_n'
+    features = extract_all_jeff_features(test_player, 'M', jeff_data)
+
+    print(f"Testing data quality for {test_player}...")
+
+    # Check for reasonable values
+    quality_checks = [
+        ('sb_first_serve_pct', 0.0, 1.0, 'First serve percentage'),
+        ('sb_ace_rate', 0.0, 0.5, 'Ace rate'),
+        ('kps_bp_save_pct', 0.0, 1.0, 'Break point save percentage'),
+        ('np_net_win_pct', 0.0, 1.0, 'Net win percentage'),
+        ('rally_short_pct', 0.0, 1.0, 'Short rally percentage'),
+        ('sd_placement_variety', 0.0, 1.0, 'Serve placement variety'),
+        ('ro_return_effectiveness', 0.0, 1.0, 'Return effectiveness'),
+        ('st_forehand_pct', 0.0, 1.0, 'Forehand percentage')
+    ]
+
+    passed_checks = 0
+    total_checks = 0
+
+    for feature_key, min_val, max_val, description in quality_checks:
+        if feature_key in features:
+            value = features[feature_key]
+            total_checks += 1
+
+            if min_val <= value <= max_val:
+                print(f"  ✅ {description}: {value:.3f} (valid range)")
+                passed_checks += 1
+            else:
+                print(f"  ❌ {description}: {value:.3f} (outside range {min_val}-{max_val})")
+        else:
+            print(f"  ⚠️  {description}: Not found in features")
+
+    # Check for NaN values
+    nan_count = sum(1 for v in features.values() if str(v).lower() == 'nan')
+    if nan_count == 0:
+        print(f"  ✅ No NaN values found")
+    else:
+        print(f"  ⚠️  {nan_count} NaN values found")
+
+    print(f"\n✅ Data quality: {passed_checks}/{total_checks} checks passed")
+    return passed_checks >= total_checks * 0.8  # 80% success rate
+
+
+def test_performance():
+    """Test extraction performance"""
+
+    print("\n=== TESTING PERFORMANCE ===\n")
+
+    import time
+
+    try:
+        from tennis_updated import load_jeff_comprehensive_data
+        from jeff_extraction_functions import extract_all_jeff_features
+
+    except ImportError as e:
+        print(f"❌ Import error: {e}")
+        return False
+
+    print("Loading data...")
+    start_time = time.time()
+    jeff_data = load_jeff_comprehensive_data()
+    load_time = time.time() - start_time
+    print(f"✅ Data loading: {load_time:.2f} seconds")
+
+    # Test extraction speed
+    test_player = 'djokovic_n'
+    iterations = 10
+
+    print(f"Testing extraction speed ({iterations} iterations)...")
+    start_time = time.time()
+
+    for i in range(iterations):
+        features = extract_all_jeff_features(test_player, 'M', jeff_data)
+
+    total_time = time.time() - start_time
+    avg_time = total_time / iterations
+
+    print(f"✅ Average extraction time: {avg_time:.3f} seconds per player")
+    print(f"✅ Estimated time for 1000 players: {avg_time * 1000 / 60:.1f} minutes")
+
+    # Memory usage estimation
+    import sys
+    feature_size = sys.getsizeof(features)
+    print(f"✅ Feature dictionary size: {feature_size} bytes")
+    print(f"✅ Estimated memory for 1000 players: {feature_size * 1000 / 1024 / 1024:.1f} MB")
+
+    return avg_time < 1.0  # Should be under 1 second per player
+
+
+def main():
+    """Run all tests"""
+
+    print("JEFF SACKMANN EXTRACTION FUNCTION TEST SUITE")
+    print("=" * 50)
+
+    test_results = []
+
+    # Run tests
+    tests = [
+        ("Individual Functions", test_individual_functions),
+        ("Pipeline Integration", test_integration),
+        ("Data Quality", test_data_quality),
+        ("Performance", test_performance)
+    ]
+
+    for test_name, test_func in tests:
+        print(f"\n{'=' * 20} {test_name} {'=' * 20}")
+
+        try:
+            result = test_func()
+            test_results.append((test_name, result))
+
+            if result:
+                print(f"✅ {test_name}: PASSED")
+            else:
+                print(f"❌ {test_name}: FAILED")
+
+        except Exception as e:
+            print(f"❌ {test_name}: ERROR - {e}")
+            traceback.print_exc()
+            test_results.append((test_name, False))
+
+    # Final summary
+    print(f"\n{'=' * 20} FINAL RESULTS {'=' * 20}")
+
+    passed_tests = sum(1 for _, result in test_results if result)
+    total_tests = len(test_results)
+
+    for test_name, result in test_results:
+        status = "✅ PASS" if result else "❌ FAIL"
+        print(f"{status}: {test_name}")
+
+    print(f"\nOVERALL: {passed_tests}/{total_tests} tests passed")
+
+    if passed_tests == total_tests:
+        print("🎉 ALL TESTS PASSED! Ready for production deployment.")
+        return True
+    else:
+        print("⚠️  Some tests failed. Review errors before deployment.")
+        return False
+
+
+if __name__ == "__main__":
+    success = main()
+    sys.exit(0 if success else 1)
 
 # ============================================================================
 # SYNTHETIC DATA GENERATION
