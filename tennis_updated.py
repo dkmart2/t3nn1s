@@ -3717,8 +3717,16 @@ class AutomatedTennisAbstractScraper(TennisAbstractScraper):
 # JEFF NOTATION PARSER - Extract features from point-by-point shot sequences
 # ============================================================================
 
+from typing import Dict, List, Optional, Tuple, Any
+
+import pandas as pd
+import numpy as np
+import re
+from typing import Dict, List, Optional, Tuple, Any
+
+
 class JeffNotationParser:
-    """Complete parser for Jeff Sackmann's tennis notation system"""
+    """Complete parser for Jeff Sackmann's tennis match charting notation system"""
 
     def __init__(self):
         # Serve directions
@@ -3729,7 +3737,7 @@ class JeffNotationParser:
             '0': 'unknown'
         }
 
-        # CORRECTED shot types per official guide
+        # Shot types - corrected based on official guide
         self.shot_types = {
             'f': 'forehand',
             'b': 'backhand',
@@ -3751,6 +3759,21 @@ class JeffNotationParser:
             'q': 'unknown_shot'
         }
 
+        # Shot directions
+        self.shot_directions = {
+            '1': 'to_righty_fh',  # to right-hander's forehand
+            '2': 'down_middle',
+            '3': 'to_righty_bh',  # to right-hander's backhand
+            '0': 'unknown'
+        }
+
+        # Return depths
+        self.return_depths = {
+            '7': 'service_box',
+            '8': 'mid_court',
+            '9': 'deep'
+        }
+
         # Error types
         self.error_types = {
             'n': 'net',
@@ -3760,22 +3783,6 @@ class JeffNotationParser:
             '!': 'shank',
             'e': 'unknown_error',
             'g': 'foot_fault'
-        }
-
-        # Outcomes
-        self.outcomes = {
-            '*': 'winner',
-            '#': 'forced_error',
-            '@': 'unforced_error'
-        }
-
-        # Shot modifiers
-        self.modifiers = {
-            '+': 'approach_shot',
-            '-': 'at_net',
-            '=': 'at_baseline',
-            ';': 'net_cord',
-            '^': 'drop_volley'
         }
 
         # Special codes
@@ -3788,31 +3795,24 @@ class JeffNotationParser:
             'V': 'time_violation'
         }
 
-        # Return depth
-        self.return_depths = {
-            '7': 'service_box',
-            '8': 'mid_court',
-            '9': 'deep'
-        }
-
-        # Court zones for shot placement
-        self.court_zones = {
-            '1': 'deuce_corner',  # right-hander's forehand
-            '2': 'middle',
-            '3': 'ad_corner',  # right-hander's backhand
-            '0': 'unknown'
-        }
-
-    def parse_point(self, first_serve, second_serve=None, server_hand='R', returner_hand='R'):
+    def parse_point(self, first_serve: str, second_serve: str = None, server_hand: str = 'R',
+                    returner_hand: str = 'R') -> Dict:
         """Parse complete point from first and second serve notations"""
         result = {
             'shots': [],
             'rally_length': 0,
             'serve_result': None,
-            'point_winner': None
+            'point_winner': None,
+            'server_hand': server_hand,
+            'returner_hand': returner_hand
         }
 
-        # Check for special codes
+        if not first_serve or pd.isna(first_serve):
+            return result
+
+        first_serve = str(first_serve).strip()
+
+        # Check for special codes first
         if first_serve in self.special_codes:
             result['special_code'] = self.special_codes[first_serve]
             result['point_winner'] = 'server' if first_serve == 'S' else 'returner'
@@ -3822,41 +3822,46 @@ class JeffNotationParser:
         first_serve_data, rally_start = self._parse_serve(first_serve)
         result['shots'].append(first_serve_data)
 
-        # If first serve went in, parse the rally
-        if not first_serve_data.get('fault'):
-            if first_serve_data.get('ace') or first_serve_data.get('unreturnable'):
-                result['serve_result'] = 'ace' if first_serve_data.get('ace') else 'unreturnable'
-                result['point_winner'] = 'server'
-                result['rally_length'] = 1
+        # Determine if rally continues after first serve
+        if first_serve_data.get('fault'):
+            # First serve was fault, check second serve
+            if second_serve and str(second_serve).strip():
+                second_serve_data, rally_start_2nd = self._parse_serve(str(second_serve).strip())
+                second_serve_data['serve_number'] = 2
+                result['shots'].append(second_serve_data)
+
+                if second_serve_data.get('fault'):
+                    result['serve_result'] = 'double_fault'
+                    result['point_winner'] = 'returner'
+                    result['rally_length'] = 0
+                elif second_serve_data.get('ace') or second_serve_data.get('unreturnable'):
+                    result['serve_result'] = 'second_serve_ace' if second_serve_data.get('ace') else 'unreturnable'
+                    result['point_winner'] = 'server'
+                    result['rally_length'] = 1
+                else:
+                    # Parse rally after second serve
+                    rally_shots = self._parse_rally(str(second_serve)[rally_start_2nd:], is_return=True,
+                                                    server_hand=server_hand, returner_hand=returner_hand)
+                    result['shots'].extend(rally_shots)
+                    result['rally_length'] = len([s for s in result['shots'] if not s.get('fault')])
+                    result['point_winner'] = self._determine_winner(result['shots'])
             else:
-                # Parse the rally after first serve
-                rally_shots = self._parse_rally(first_serve[rally_start:], is_return=True,
-                                                server_hand=server_hand, returner_hand=returner_hand)
-                result['shots'].extend(rally_shots)
-                result['rally_length'] = len(result['shots'])
-                result['point_winner'] = self._determine_winner(result['shots'])
-
-        # Parse second serve if first was fault
-        elif second_serve:
-            second_serve_data, rally_start = self._parse_serve(second_serve)
-            second_serve_data['serve_number'] = 2
-            result['shots'].append(second_serve_data)
-
-            if second_serve_data.get('fault'):
+                # No second serve recorded, assume double fault
                 result['serve_result'] = 'double_fault'
                 result['point_winner'] = 'returner'
                 result['rally_length'] = 0
-            elif second_serve_data.get('ace') or second_serve_data.get('unreturnable'):
-                result['serve_result'] = 'second_serve_ace' if second_serve_data.get('ace') else 'unreturnable'
-                result['point_winner'] = 'server'
-                result['rally_length'] = 1
-            else:
-                # Parse rally after second serve
-                rally_shots = self._parse_rally(second_serve[rally_start:], is_return=True,
-                                                server_hand=server_hand, returner_hand=returner_hand)
-                result['shots'].extend(rally_shots)
-                result['rally_length'] = len(result['shots'])
-                result['point_winner'] = self._determine_winner(result['shots'])
+
+        elif first_serve_data.get('ace') or first_serve_data.get('unreturnable'):
+            result['serve_result'] = 'ace' if first_serve_data.get('ace') else 'unreturnable'
+            result['point_winner'] = 'server'
+            result['rally_length'] = 1
+        else:
+            # Parse rally after first serve
+            rally_shots = self._parse_rally(first_serve[rally_start:], is_return=True,
+                                            server_hand=server_hand, returner_hand=returner_hand)
+            result['shots'].extend(rally_shots)
+            result['rally_length'] = len([s for s in result['shots'] if not s.get('fault')])
+            result['point_winner'] = self._determine_winner(result['shots'])
 
         # Extract patterns
         result['patterns'] = self._extract_patterns(result['shots'])
@@ -3864,17 +3869,18 @@ class JeffNotationParser:
 
         return result
 
-    def _parse_serve(self, notation):
+    def _parse_serve(self, notation: str) -> Tuple[Dict, int]:
         """Parse serve notation including lets, faults, and outcomes"""
         serve = {
             'type': 'serve',
             'shot_num': 0,
-            'serve_number': 1
+            'serve_number': 1,
+            'player': 'server'
         }
 
         i = 0
 
-        # Count lets
+        # Count lets (c characters)
         let_count = 0
         while i < len(notation) and notation[i] == 'c':
             let_count += 1
@@ -3889,18 +3895,18 @@ class JeffNotationParser:
             return serve, i + 1
 
         # Serve direction
-        if i < len(notation) and notation[i] in '0456':
+        if i < len(notation) and notation[i] in self.serve_directions:
             serve['direction'] = self.serve_directions[notation[i]]
             serve['zone'] = notation[i]
             i += 1
 
-        # Serve and volley
+        # Serve and volley indicator
         if i < len(notation) and notation[i] == '+':
             serve['serve_and_volley'] = True
             i += 1
 
         # Check for fault
-        if i < len(notation) and notation[i] in 'nwdxge!':
+        if i < len(notation) and notation[i] in self.error_types:
             serve['fault'] = True
             serve['fault_type'] = self.error_types[notation[i]]
             i += 1
@@ -3920,65 +3926,93 @@ class JeffNotationParser:
 
         return serve, i
 
-    def _parse_rally(self, notation, is_return=False, server_hand='R', returner_hand='R'):
+    def _parse_rally(self, notation: str, is_return: bool = False, server_hand: str = 'R', returner_hand: str = 'R') -> \
+    List[Dict]:
         """Parse rally shots after serve"""
         shots = []
         i = 0
         shot_num = 1
+        current_player = 'returner'  # First rally shot is normally return
 
         while i < len(notation):
-            shot = {'shot_num': shot_num}
+            shot = {
+                'shot_num': shot_num,
+                'player': current_player
+            }
 
             # Shot type
-            if notation[i] in self.shot_types:
+            if i < len(notation) and notation[i] in self.shot_types:
                 shot['type'] = self.shot_types[notation[i]]
                 i += 1
 
-                # Check modifiers before direction
-                if i < len(notation) and notation[i] in '+-=^':
-                    if notation[i] == '+':
-                        shot['approach'] = True
-                    elif notation[i] == '-':
-                        shot['at_net'] = True
-                    elif notation[i] == '=':
-                        shot['at_baseline'] = True
-                    elif notation[i] == '^':
-                        shot['drop_volley'] = True
+                # Special case: First shot after serve is a volley = serve-and-volley
+                if 'volley' in shot['type'] and shot_num == 1:
+                    shot['player'] = 'server'  # Server hit the volley
+                    current_player = 'server'  # Keep as server for next alternation
+
+                # Approach shot indicator
+                if i < len(notation) and notation[i] == '+':
+                    shot['approach'] = True
                     i += 1
 
-                # Direction
-                if i < len(notation) and notation[i] in '0123':
+                # Court position modifiers
+                if i < len(notation) and notation[i] == '-':
+                    shot['at_net'] = True
+                    i += 1
+                elif i < len(notation) and notation[i] == '=':
+                    shot['at_baseline'] = True
+                    i += 1
+
+                # Shot direction
+                if i < len(notation) and notation[i] in self.shot_directions:
+                    shot['direction'] = self.shot_directions[notation[i]]
                     shot['zone'] = notation[i]
-                    shot['direction'] = self.court_zones[notation[i]]
                     i += 1
 
                     # Return depth (only for first shot after serve)
-                    if is_return and shot_num == 1 and i < len(notation) and notation[i] in '789':
+                    if is_return and shot_num == 1 and i < len(notation) and notation[i] in self.return_depths:
                         shot['return_depth'] = self.return_depths[notation[i]]
                         i += 1
 
-                # Net cord
+                # Special modifiers
+                if i < len(notation) and notation[i] == '^':
+                    shot['drop_volley'] = True
+                    i += 1
+
                 if i < len(notation) and notation[i] == ';':
                     shot['net_cord'] = True
                     i += 1
 
                 # Error type
-                if i < len(notation) and notation[i] in 'nwdx!e':
+                if i < len(notation) and notation[i] in self.error_types:
                     shot['error_type'] = self.error_types[notation[i]]
                     i += 1
 
-                # Outcome
-                if i < len(notation) and notation[i] in '*#@':
-                    shot['outcome'] = self.outcomes[notation[i]]
-                    shot['terminal'] = True
-                    if notation[i] == '@':
-                        shot['unforced'] = True
+                # Outcome (winner, forced error, unforced error)
+                if i < len(notation) and notation[i] in ['*', '#', '@']:
+                    if notation[i] == '*':
+                        shot['outcome'] = 'winner'
                     elif notation[i] == '#':
+                        shot['outcome'] = 'forced_error'
                         shot['forced'] = True
+                    elif notation[i] == '@':
+                        shot['outcome'] = 'unforced_error'
+                        shot['unforced'] = True
+
+                    shot['terminal'] = True
+                    i += 1
+
+                # Challenge indicator
+                if i < len(notation) and notation[i] == 'C':
+                    shot['incorrect_challenge'] = True
+                    shot['terminal'] = True
                     i += 1
 
                 shots.append(shot)
                 shot_num += 1
+
+                # Alternate players for next shot
+                current_player = 'server' if current_player == 'returner' else 'returner'
                 is_return = False
             else:
                 # Skip unknown characters
@@ -3986,26 +4020,45 @@ class JeffNotationParser:
 
         return shots
 
-    def _determine_winner(self, shots):
-        """Determine point winner based on shot sequence"""
+    def _determine_winner(self, shots: List[Dict]) -> Optional[str]:
+        """Determine point winner based on shot sequence - FIXED VERSION"""
         if not shots:
             return None
 
-        # Find terminal shot
-        for i, shot in enumerate(shots):
+        # Filter out faulted serves for rally analysis
+        rally_shots = [s for s in shots if not s.get('fault')]
+
+        if not rally_shots:
+            return None
+
+        # Check for serve aces/unreturnable first
+        serve_shot = rally_shots[0] if rally_shots else None
+        if serve_shot and serve_shot.get('type') == 'serve':
+            if serve_shot.get('ace') or serve_shot.get('unreturnable'):
+                return 'server'
+
+        # Find the terminal shot and determine winner
+        for i, shot in enumerate(rally_shots):
             if shot.get('terminal'):
-                if shot['type'] == 'serve':
-                    return 'server'
-                elif shot.get('outcome') == 'winner':
-                    # Winner by player who hit the shot
-                    return 'server' if i % 2 == 0 else 'returner'
+                # Player who hit this shot
+                if i == 0:
+                    # Server hit the terminal shot (serve ace/unreturnable already handled above)
+                    shot_player = 'server'
+                else:
+                    # Alternate players: server serves (0), returner returns (1), server (2), returner (3), etc.
+                    shot_player = 'returner' if i % 2 == 1 else 'server'
+
+                # Determine winner based on outcome
+                if shot.get('outcome') == 'winner':
+                    return shot_player
                 elif shot.get('outcome') in ['forced_error', 'unforced_error']:
-                    # Error gives point to opponent
-                    return 'returner' if i % 2 == 0 else 'server'
+                    return 'returner' if shot_player == 'server' else 'server'
+                elif shot.get('incorrect_challenge'):
+                    return 'returner' if shot_player == 'server' else 'server'
 
         return None
 
-    def _extract_patterns(self, shots):
+    def _extract_patterns(self, shots: List[Dict]) -> Dict:
         """Extract tactical patterns from shot sequence"""
         patterns = {
             'shot_sequence': [],
@@ -4016,51 +4069,49 @@ class JeffNotationParser:
             'rally_progression': []
         }
 
-        for i, shot in enumerate(shots):
+        rally_shots = [s for s in shots if not s.get('fault')]  # Exclude faulted serves
+
+        for i, shot in enumerate(rally_shots):
             # Shot sequence
             if shot.get('type'):
                 patterns['shot_sequence'].append(shot['type'])
                 patterns['shot_types_used'].add(shot['type'])
 
             # Direction changes
-            if i > 0 and 'zone' in shot and 'zone' in shots[i - 1]:
-                prev_zone = int(shots[i - 1]['zone']) if shots[i - 1]['zone'].isdigit() else 0
-                curr_zone = int(shot['zone']) if shot['zone'].isdigit() else 0
+            if i > 0 and 'zone' in shot and 'zone' in rally_shots[i - 1]:
+                prev_zone = rally_shots[i - 1]['zone']
+                curr_zone = shot['zone']
 
-                if prev_zone and curr_zone:
-                    if (prev_zone in [1] and curr_zone in [3]) or (prev_zone in [3] and curr_zone in [1]):
-                        patterns['direction_changes'].append('crosscourt')
-                    elif prev_zone == curr_zone:
-                        patterns['direction_changes'].append('down_line')
-                    else:
-                        patterns['direction_changes'].append('middle')
+                if prev_zone in ['1', '3'] and curr_zone in ['3', '1'] and prev_zone != curr_zone:
+                    patterns['direction_changes'].append('crosscourt')
+                elif prev_zone == curr_zone:
+                    patterns['direction_changes'].append('down_line')
+                elif curr_zone == '2':
+                    patterns['direction_changes'].append('to_middle')
 
             # Net approaches
-            if shot.get('approach') or shot.get('at_net'):
+            if shot.get('approach') or shot.get('at_net') or 'volley' in shot.get('type', ''):
                 patterns['net_points'] = True
                 if i > 0:
                     patterns['approach_sequences'].append({
-                        'approach_shot': shots[i - 1],
+                        'approach_shot': rally_shots[i - 1],
                         'net_shot': shot
                     })
 
-            # Rally progression (groups of 3 shots)
-            if i >= 2:
-                three_shot_pattern = [shots[i - 2]['type'], shots[i - 1]['type'], shot['type']]
-                patterns['rally_progression'].append('->'.join(three_shot_pattern))
-
         return patterns
 
-    def _extract_serve_plus_one(self, shots):
+    def _extract_serve_plus_one(self, shots: List[Dict]) -> Optional[Dict]:
         """Extract serve+1 pattern"""
-        if len(shots) < 2:
+        rally_shots = [s for s in shots if not s.get('fault')]  # Exclude faulted serves
+
+        if len(rally_shots) < 2:
             return None
 
-        serve = shots[0]
+        serve = rally_shots[0]
         if serve['type'] != 'serve':
             return None
 
-        next_shot = shots[1]
+        next_shot = rally_shots[1]
 
         return {
             'serve_direction': serve.get('direction', 'unknown'),
@@ -4072,105 +4123,9 @@ class JeffNotationParser:
             'pattern': f"{serve.get('direction', '?')}->{next_shot.get('type', '?')}_{next_shot.get('direction', '?')}"
         }
 
-    def extract_match_patterns(self, points_df):
-        """Extract patterns from entire match"""
-        patterns = {
-            'serve_locations': {'first': {}, 'second': {}},
-            'return_depths': {},
-            'serve_plus_one_patterns': {},
-            'rally_lengths': [],
-            'shot_type_frequencies': {},
-            'direction_patterns': {},
-            'net_point_success': {'attempts': 0, 'won': 0},
-            'pressure_patterns': {}
-        }
 
-        for _, point in points_df.iterrows():
-            first_serve = point.get('1st', '')
-            second_serve = point.get('2nd', '')
-
-            if not first_serve:
-                continue
-
-            # Parse point
-            parsed = self.parse_point(first_serve, second_serve)
-
-            # Analyze patterns
-            self._update_serve_patterns(parsed, patterns)
-            self._update_rally_patterns(parsed, patterns)
-            self._update_shot_effectiveness(parsed, patterns)
-
-        return patterns
-
-    def _update_serve_patterns(self, parsed_point, patterns):
-        """Update serve pattern statistics"""
-        shots = parsed_point.get('shots', [])
-        if not shots:
-            return
-
-        serve = shots[0]
-        if serve.get('type') != 'serve':
-            return
-
-        # Serve location
-        direction = serve.get('direction', 'unknown')
-        serve_num = 'second' if serve.get('serve_number') == 2 else 'first'
-
-        patterns['serve_locations'][serve_num][direction] = \
-            patterns['serve_locations'][serve_num].get(direction, 0) + 1
-
-        # Serve+1 patterns
-        if parsed_point.get('serve_plus_one'):
-            pattern = parsed_point['serve_plus_one']['pattern']
-            patterns['serve_plus_one_patterns'][pattern] = \
-                patterns['serve_plus_one_patterns'].get(pattern, 0) + 1
-
-        # Return depth
-        if len(shots) > 1 and 'return_depth' in shots[1]:
-            depth = shots[1]['return_depth']
-            patterns['return_depths'][depth] = patterns['return_depths'].get(depth, 0) + 1
-
-    def _update_rally_patterns(self, parsed_point, patterns):
-        """Update rally pattern statistics"""
-        rally_length = parsed_point.get('rally_length', 0)
-        patterns['rally_lengths'].append(rally_length)
-
-        # Shot types
-        for shot in parsed_point.get('shots', []):
-            shot_type = shot.get('type')
-            if shot_type:
-                patterns['shot_type_frequencies'][shot_type] = \
-                    patterns['shot_type_frequencies'].get(shot_type, 0) + 1
-
-        # Direction patterns
-        point_patterns = parsed_point.get('patterns', {})
-        for direction in point_patterns.get('direction_changes', []):
-            patterns['direction_patterns'][direction] = \
-                patterns['direction_patterns'].get(direction, 0) + 1
-
-        # Net points
-        if point_patterns.get('net_points'):
-            patterns['net_point_success']['attempts'] += 1
-            if parsed_point.get('point_winner') == 'server':  # Assuming server came to net
-                patterns['net_point_success']['won'] += 1
-
-    def _update_shot_effectiveness(self, parsed_point, patterns):
-        """Update shot effectiveness statistics"""
-        # This would track winners/errors by shot type
-        for shot in parsed_point.get('shots', []):
-            if shot.get('outcome') == 'winner':
-                shot_type = shot.get('type', 'unknown')
-                key = f"{shot_type}_winners"
-                patterns[key] = patterns.get(key, 0) + 1
-            elif shot.get('outcome') in ['forced_error', 'unforced_error']:
-                shot_type = shot.get('type', 'unknown')
-                error_type = 'unforced' if shot.get('unforced') else 'forced'
-                key = f"{shot_type}_{error_type}_errors"
-                patterns[key] = patterns.get(key, 0) + 1
-
-
-def extract_jeff_notation_features(player_canonical, gender, jeff_data):
-    """Extract features from Jeff's point-by-point notation"""
+def extract_jeff_notation_features(player_canonical: str, gender: str, jeff_data: dict) -> dict:
+    """Extract features from Jeff's point-by-point notation for a specific player"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'points_2020s' not in jeff_data[gender_key]:
@@ -4178,8 +4133,6 @@ def extract_jeff_notation_features(player_canonical, gender, jeff_data):
 
     points_df = jeff_data[gender_key]['points_2020s']
     parser = JeffNotationParser()
-
-    # Collect all points for this player
     player_points = []
 
     for _, row in points_df.iterrows():
@@ -4187,149 +4140,165 @@ def extract_jeff_notation_features(player_canonical, gender, jeff_data):
         if not match_id:
             continue
 
-        # Determine if player was server
+        # FIXED: Determine which player number this player is
+        # Parse match_id to get player names: "YYYYMMDD-tournament-player1-player2"
         parts = match_id.split('-')
-        if len(parts) >= 6:
-            player1_canonical = canonical_player(parts[-2].replace('_', ' '))
-            player2_canonical = canonical_player(parts[-1].replace('_', ' '))
+        if len(parts) < 4:
+            continue
 
-            server = row.get('Svr', 0)
-            pt_winner = row.get('PtWinner', 0)
+        player1_name = parts[-2].replace('_', ' ')
+        player2_name = parts[-1].replace('_', ' ')
 
-            # Check if this player was involved
-            if player_canonical == player1_canonical:
-                player_num = 1
-            elif player_canonical == player2_canonical:
-                player_num = 2
-            else:
-                continue
+        # Match canonical names
+        player1_canonical = canonical_player(player1_name)
+        player2_canonical = canonical_player(player2_name)
 
-            # Parse the point
-            first_serve = str(row.get('1st', ''))
-            second_serve = str(row.get('2nd', '')) if pd.notna(row.get('2nd')) else None
+        if player_canonical == player1_canonical:
+            player_num = 1
+        elif player_canonical == player2_canonical:
+            player_num = 2
+        else:
+            continue  # Player not in this match
 
-            if first_serve and first_serve not in ['nan', '']:
-                parsed = parser.parse_point(first_serve, second_serve)
+        server = row.get('Svr', 0)
+        pt_winner = row.get('PtWinner', 0)
 
-                # Add context
-                parsed['serving'] = (server == player_num)
-                parsed['won'] = (pt_winner == player_num)
-                parsed['match_id'] = match_id
-                parsed['score_state'] = {
-                    'set1': row.get('Set1', 0),
-                    'set2': row.get('Set2', 0),
-                    'game1': row.get('Gm1', 0),
-                    'game2': row.get('Gm2', 0),
-                    'points': row.get('Pts', '0-0')
-                }
+        first_serve = str(row.get('1st', ''))
+        second_serve = str(row.get('2nd', '')) if pd.notna(row.get('2nd')) else None
 
-                player_points.append(parsed)
+        if first_serve and first_serve not in ['nan', '']:
+            parsed = parser.parse_point(first_serve, second_serve)
+
+            # FIXED: Correct player context
+            parsed['serving'] = (server == player_num)
+            parsed['won'] = (pt_winner == player_num)
+            parsed['match_id'] = match_id
+            parsed['player_num'] = player_num
+
+            # Add score context if available
+            parsed['score_state'] = {
+                'set1': row.get('Set1', 0),
+                'set2': row.get('Set2', 0),
+                'game1': row.get('Gm1', 0),
+                'game2': row.get('Gm2', 0),
+                'points': row.get('Pts', '0-0')
+            }
+
+            player_points.append(parsed)
 
     if not player_points:
         return {}
 
-    # Extract comprehensive patterns
-    patterns = parser.extract_match_patterns(pd.DataFrame(player_points))
-
-    # Convert to flat features
+    # ENHANCED: Extract comprehensive features using parser capabilities
     features = {}
 
-    # Serve location features
-    total_first_serves = sum(patterns['serve_locations']['first'].values())
-    total_second_serves = sum(patterns['serve_locations']['second'].values())
+    # Serve patterns for serving points only
+    serving_points = [p for p in player_points if p.get('serving')]
+    if serving_points:
+        # Serve direction distribution
+        serve_dirs = {'wide': 0, 'body': 0, 'T': 0, 'unknown': 0}
+        serve_outcomes = {'ace': 0, 'unreturnable': 0, 'double_fault': 0, 'in_play': 0}
 
-    if total_first_serves > 0:
-        features['jeff_first_serve_wide_pct'] = patterns['serve_locations']['first'].get('wide', 0) / total_first_serves
-        features['jeff_first_serve_body_pct'] = patterns['serve_locations']['first'].get('body', 0) / total_first_serves
-        features['jeff_first_serve_t_pct'] = patterns['serve_locations']['first'].get('T', 0) / total_first_serves
+        for point in serving_points:
+            if point['shots']:
+                serve = point['shots'][0]
+                if serve.get('type') == 'serve':
+                    direction = serve.get('direction', 'unknown')
+                    serve_dirs[direction] += 1
 
-    if total_second_serves > 0:
-        features['jeff_second_serve_wide_pct'] = patterns['serve_locations']['second'].get('wide',
-                                                                                           0) / total_second_serves
-        features['jeff_second_serve_body_pct'] = patterns['serve_locations']['second'].get('body',
-                                                                                           0) / total_second_serves
-        features['jeff_second_serve_t_pct'] = patterns['serve_locations']['second'].get('T', 0) / total_second_serves
+                    if serve.get('ace'):
+                        serve_outcomes['ace'] += 1
+                    elif serve.get('unreturnable'):
+                        serve_outcomes['unreturnable'] += 1
+                    elif point.get('serve_result') == 'double_fault':
+                        serve_outcomes['double_fault'] += 1
+                    else:
+                        serve_outcomes['in_play'] += 1
 
-    # Return depth features
-    total_returns = sum(patterns['return_depths'].values())
-    if total_returns > 0:
-        features['jeff_return_service_box_pct'] = patterns['return_depths'].get('service_box', 0) / total_returns
-        features['jeff_return_mid_court_pct'] = patterns['return_depths'].get('mid_court', 0) / total_returns
-        features['jeff_return_deep_pct'] = patterns['return_depths'].get('deep', 0) / total_returns
+        total_serves = len(serving_points)
+        if total_serves > 0:
+            features['jeff_serve_wide_pct'] = serve_dirs['wide'] / total_serves
+            features['jeff_serve_body_pct'] = serve_dirs['body'] / total_serves
+            features['jeff_serve_t_pct'] = serve_dirs['T'] / total_serves
+            features['jeff_ace_rate'] = serve_outcomes['ace'] / total_serves
+            features['jeff_double_fault_rate'] = serve_outcomes['double_fault'] / total_serves
 
-    # Rally length features
-    if patterns['rally_lengths']:
-        features['jeff_avg_rally_length'] = np.mean(patterns['rally_lengths'])
-        features['jeff_rally_length_std'] = np.std(patterns['rally_lengths'])
-        short_rallies = sum(1 for l in patterns['rally_lengths'] if l <= 3)
-        features['jeff_short_rally_pct'] = short_rallies / len(patterns['rally_lengths'])
+    # Return patterns for returning points only
+    returning_points = [p for p in player_points if not p.get('serving')]
+    if returning_points:
+        return_depths = {'service_box': 0, 'mid_court': 0, 'deep': 0}
+        return_wins = sum(1 for p in returning_points if p.get('won'))
 
-    # Shot type frequencies
-    total_shots = sum(patterns['shot_type_frequencies'].values())
+        for point in returning_points:
+            if len(point['shots']) > 1:  # Has return shot
+                return_shot = point['shots'][1]  # First shot after serve
+                depth = return_shot.get('return_depth', 'unknown')
+                if depth in return_depths:
+                    return_depths[depth] += 1
+
+        features['jeff_return_win_rate'] = return_wins / len(returning_points)
+        total_returns = sum(return_depths.values())
+        if total_returns > 0:
+            features['jeff_return_deep_pct'] = return_depths['deep'] / total_returns
+
+    # Rally analysis
+    rally_lengths = [p.get('rally_length', 0) for p in player_points]
+    if rally_lengths:
+        features['jeff_avg_rally_length'] = np.mean(rally_lengths)
+        features['jeff_short_rally_pct'] = sum(1 for l in rally_lengths if l <= 3) / len(rally_lengths)
+
+    # Shot type effectiveness
+    shot_outcomes = {}
+    for point in player_points:
+        for i, shot in enumerate(point.get('shots', [])):
+            # Skip serves and determine if this player hit the shot
+            if shot.get('type') == 'serve':
+                continue
+
+            # Player alternates: returner (shot 1), server (shot 2), returner (shot 3), etc.
+            shot_by_player = (i % 2 == 1) == (not point.get('serving'))
+            if not shot_by_player:
+                continue
+
+            shot_type = shot.get('type', 'unknown')
+            if shot_type not in shot_outcomes:
+                shot_outcomes[shot_type] = {'total': 0, 'winners': 0, 'errors': 0}
+
+            shot_outcomes[shot_type]['total'] += 1
+            if shot.get('outcome') == 'winner':
+                shot_outcomes[shot_type]['winners'] += 1
+            elif shot.get('outcome') in ['forced_error', 'unforced_error']:
+                shot_outcomes[shot_type]['errors'] += 1
+
+    # Shot type percentages and effectiveness
+    total_shots = sum(data['total'] for data in shot_outcomes.values())
     if total_shots > 0:
-        features['jeff_forehand_pct'] = patterns['shot_type_frequencies'].get('forehand', 0) / total_shots
-        features['jeff_backhand_pct'] = patterns['shot_type_frequencies'].get('backhand', 0) / total_shots
-        features['jeff_slice_pct'] = (patterns['shot_type_frequencies'].get('forehand_slice', 0) +
-                                      patterns['shot_type_frequencies'].get('backhand_slice', 0)) / total_shots
-        features['jeff_volley_pct'] = (patterns['shot_type_frequencies'].get('forehand_volley', 0) +
-                                       patterns['shot_type_frequencies'].get('backhand_volley', 0)) / total_shots
+        features['jeff_forehand_pct'] = shot_outcomes.get('forehand', {}).get('total', 0) / total_shots
+        features['jeff_backhand_pct'] = shot_outcomes.get('backhand', {}).get('total', 0) / total_shots
 
-    # Direction patterns
-    total_direction_changes = sum(patterns['direction_patterns'].values())
-    if total_direction_changes > 0:
-        features['jeff_crosscourt_pct'] = patterns['direction_patterns'].get('crosscourt', 0) / total_direction_changes
-        features['jeff_down_line_pct'] = patterns['direction_patterns'].get('down_line', 0) / total_direction_changes
-        features['jeff_middle_pct'] = patterns['direction_patterns'].get('middle', 0) / total_direction_changes
+        # Effectiveness ratios
+        fh_data = shot_outcomes.get('forehand', {})
+        if fh_data.get('total', 0) > 0:
+            features['jeff_fh_effectiveness'] = fh_data.get('winners', 0) / (
+                        fh_data.get('winners', 0) + fh_data.get('errors', 0)) if (fh_data.get('winners',
+                                                                                              0) + fh_data.get('errors',
+                                                                                                               0)) > 0 else 0
 
     # Net play
-    if patterns['net_point_success']['attempts'] > 0:
-        features['jeff_net_success_rate'] = patterns['net_point_success']['won'] / patterns['net_point_success'][
-            'attempts']
-        features['jeff_net_approach_rate'] = patterns['net_point_success']['attempts'] / len(player_points)
-
-    # Winner/error analysis
-    for shot_type in ['forehand', 'backhand', 'forehand_volley', 'backhand_volley']:
-        winners = patterns.get(f'{shot_type}_winners', 0)
-        unforced = patterns.get(f'{shot_type}_unforced_errors', 0)
-        forced = patterns.get(f'{shot_type}_forced_errors', 0)
-
-        total = winners + unforced + forced
-        if total > 0:
-            features[f'jeff_{shot_type}_winner_pct'] = winners / total
-            features[f'jeff_{shot_type}_error_pct'] = (unforced + forced) / total
+    net_points = sum(1 for p in player_points if p.get('patterns', {}).get('net_points'))
+    features['jeff_net_approach_rate'] = net_points / len(player_points) if player_points else 0
 
     # Serve+1 patterns
-    if patterns['serve_plus_one_patterns']:
-        top_patterns = sorted(patterns['serve_plus_one_patterns'].items(),
-                              key=lambda x: x[1], reverse=True)[:3]
-        for i, (pattern, count) in enumerate(top_patterns):
-            features[f'jeff_serve_plus_one_pattern_{i + 1}'] = pattern
-            features[f'jeff_serve_plus_one_pattern_{i + 1}_freq'] = count / len(player_points)
+    serve_plus_patterns = {}
+    for point in serving_points:
+        if point.get('serve_plus_one'):
+            pattern = point['serve_plus_one']['pattern']
+            serve_plus_patterns[pattern] = serve_plus_patterns.get(pattern, 0) + 1
 
-    # Pressure analysis (break points, game points)
-    break_points = [p for p in player_points if 'BP' in p.get('score_state', {}).get('points', '')]
-    game_points = [p for p in player_points if 'GP' in p.get('score_state', {}).get('points', '')]
-
-    if break_points:
-        bp_won = sum(1 for p in break_points if p.get('won'))
-        features['jeff_break_point_win_rate'] = bp_won / len(break_points)
-        features['jeff_break_point_rally_length'] = np.mean([p.get('rally_length', 0) for p in break_points])
-
-    if game_points:
-        gp_won = sum(1 for p in game_points if p.get('won'))
-        features['jeff_game_point_win_rate'] = gp_won / len(game_points)
-
-    # Tactical indices
-    features['jeff_aggression_index'] = features.get('jeff_forehand_winner_pct', 0) * 0.5 + \
-                                        features.get('jeff_net_approach_rate', 0) * 0.3 + \
-                                        features.get('jeff_down_line_pct', 0) * 0.2
-
-    features['jeff_consistency_index'] = 1 - (features.get('jeff_forehand_error_pct', 0) * 0.5 +
-                                              features.get('jeff_backhand_error_pct', 0) * 0.5)
-
-    features['jeff_placement_variety'] = 1 - max(features.get('jeff_first_serve_wide_pct', 0.33),
-                                                 features.get('jeff_first_serve_body_pct', 0.33),
-                                                 features.get('jeff_first_serve_t_pct', 0.34))
+    if serve_plus_patterns:
+        most_common = max(serve_plus_patterns.items(), key=lambda x: x[1])
+        features['jeff_most_common_serve_plus_one'] = most_common[0]
+        features['jeff_serve_plus_one_consistency'] = most_common[1] / len(serving_points)
 
     return features
 
