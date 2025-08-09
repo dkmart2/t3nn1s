@@ -3072,7 +3072,7 @@ def calculate_feature_importance_weights(historical_data, jeff_data):
     """Calculate dynamic feature importance weights based on data availability"""
     weights = {
         'jeff_comprehensive': 0.4,
-        'tennis_abstract': 0.35,
+        'tennis_abstract': 0.4,
         'api_tennis': 0.2,
         'tennis_data_files': 0.05
     }
@@ -3719,341 +3719,509 @@ class AutomatedTennisAbstractScraper(TennisAbstractScraper):
 
 class JeffNotationParser:
     """Parse Jeff Sackmann's shot notation to extract tactical features"""
-    
+
     def __init__(self):
-        # Shot direction mappings
-        self.directions = {
-            '1': 'wide_deuce', '2': 'wide_ad', '3': 'down_line', 
-            '4': 'wide', '5': 'body', '6': 'center', 
-            '7': 'inside_out', '8': 'crosscourt', '9': 'down_middle'
-        }
-        
-        # Shot type mappings  
-        self.shot_types = {
-            'f': 'forehand', 'b': 'backhand', 'v': 'volley',
-            'o': 'overhead', 'l': 'lob', 'd': 'drop', 
-            'h': 'half_volley', 'z': 'slice'
-        }
-        
-        # Shot outcomes
-        self.outcomes = {
-            '*': 'winner', '#': 'error', '@': 'forced_error',
-            '!': 'ace', '=': 'let', '+': 'net'
+        # Serve directions
+        self.serve_directions = {
+            '4': 'wide', '5': 'body', '6': 'T'
         }
 
-    def parse_point(self, notation):
-        """Parse a single point notation into structured data"""
+        # Shot types - expanded set
+        self.shot_types = {
+            'f': 'forehand', 'b': 'backhand', 'r': 'forehand_slice',
+            's': 'backhand_slice', 'v': 'volley', 'z': 'swinging_volley',
+            'o': 'overhead', 'u': 'lob', 'h': 'half_volley',
+            'j': 'drop_shot', 'k': 'drop_volley', 't': 'trick_shot',
+            'd': 'drop', 'l': 'lob', 'p': 'passing_shot'
+        }
+
+        # Shot outcomes
+        self.outcomes = {
+            '*': 'winner', '#': 'unforced_error', '@': 'forced_error',
+            '+': 'net_cord', '!': 'ace', '=': 'service_winner'
+        }
+
+        # Court zones (1-9 grid)
+        self.court_zones = {
+            '1': 'deep_deuce', '2': 'deep_center', '3': 'deep_ad',
+            '4': 'mid_deuce', '5': 'mid_center', '6': 'mid_ad',
+            '7': 'net_deuce', '8': 'net_center', '9': 'net_ad'
+        }
+
+    def parse_point(self, notation, serving=True, score_state=None):
+        """Comprehensive point parsing with full shot sequences"""
         if pd.isna(notation) or not notation:
-            return {}
-            
+            return {'shots': [], 'rally_length': 0}
+
         notation = str(notation).strip()
         shots = []
-        serve_info = {}
-        
-        # First character is usually serve direction
-        if notation and notation[0].isdigit():
-            serve_info['serve_direction'] = self.directions.get(notation[0], 'unknown')
-            notation = notation[1:]
-        
-        # Parse remaining shots
         i = 0
-        shot_count = 0
+
+        # Parse serve if present
+        if notation and notation[0].isdigit() and serving:
+            serve = {
+                'shot_num': 0,
+                'type': 'serve',
+                'direction': self.serve_directions.get(notation[0], 'unknown'),
+                'zone': notation[0]
+            }
+
+            # Check for immediate serve outcome
+            if len(notation) > 1 and notation[1] in self.outcomes:
+                serve['outcome'] = self.outcomes[notation[1]]
+                serve['terminal'] = True
+                i = 2
+            else:
+                i = 1
+
+            shots.append(serve)
+
+        # Parse rally shots
+        shot_num = len(shots)
         while i < len(notation):
             char = notation[i]
-            
-            # Shot type
+
             if char.lower() in self.shot_types:
                 shot = {
-                    'shot_num': shot_count,
-                    'shot_type': self.shot_types[char.lower()],
+                    'shot_num': shot_num,
+                    'type': self.shot_types[char.lower()],
                     'direction': None,
-                    'outcome': None
+                    'zone': None,
+                    'outcome': None,
+                    'terminal': False
                 }
-                
-                # Look ahead for direction
+
+                # Look for direction (next digit)
                 if i + 1 < len(notation) and notation[i + 1].isdigit():
-                    shot['direction'] = self.directions.get(notation[i + 1], 'unknown')
+                    shot['zone'] = notation[i + 1]
+                    shot['direction'] = self._decode_direction(notation[i + 1])
+                    shot['court_position'] = self.court_zones.get(notation[i + 1], 'unknown')
                     i += 1
-                
-                # Look ahead for outcome
+
+                # Look for outcome
                 if i + 1 < len(notation) and notation[i + 1] in self.outcomes:
                     shot['outcome'] = self.outcomes[notation[i + 1]]
+                    shot['terminal'] = True
                     i += 1
-                    
+
                 shots.append(shot)
-                shot_count += 1
-                
-            # Direct outcome (ace, error, etc.)
-            elif char in self.outcomes:
-                if shots:
-                    shots[-1]['outcome'] = self.outcomes[char]
-                else:
-                    serve_info['serve_outcome'] = self.outcomes[char]
-            
+                shot_num += 1
+
             i += 1
-        
+
+        # Extract patterns and analysis
         return {
-            'serve_info': serve_info,
             'shots': shots,
             'rally_length': len(shots),
-            'point_notation': str(notation)
+            'shot_sequence': self._extract_shot_sequence(shots),
+            'patterns': self._extract_patterns(shots),
+            'serve_plus_one': self._extract_serve_plus_one(shots) if serving else None,
+            'finishing_sequence': self._extract_finishing_sequence(shots),
+            'score_state': score_state
+        }
+
+    def _decode_direction(self, zone):
+        """Decode zone number to direction"""
+        zone_directions = {
+            '1': 'deep_right', '2': 'deep_center', '3': 'deep_left',
+            '4': 'mid_right', '5': 'mid_center', '6': 'mid_left',
+            '7': 'net_right', '8': 'net_center', '9': 'net_left'
+        }
+
+        # For cross-court/down-line analysis
+        if zone in ['1', '4', '7']:
+            return 'deuce_court'
+        elif zone in ['3', '6', '9']:
+            return 'ad_court'
+        else:
+            return 'center'
+
+    def _extract_shot_sequence(self, shots):
+        """Extract shot type sequence"""
+        return '->'.join([s['type'] for s in shots])
+
+    def _extract_patterns(self, shots):
+        """Extract tactical patterns from shot sequence"""
+        patterns = {
+            'shot_transitions': [],
+            'direction_changes': [],
+            'approach_sequences': [],
+            'net_points': False,
+            'rally_construction': []
+        }
+
+        for i in range(1, len(shots)):
+            prev_shot = shots[i - 1]
+            curr_shot = shots[i]
+
+            # Shot type transitions
+            transition = f"{prev_shot['type']}->{curr_shot['type']}"
+            patterns['shot_transitions'].append(transition)
+
+            # Direction changes
+            if prev_shot.get('zone') and curr_shot.get('zone'):
+                prev_zone = int(prev_shot['zone']) if prev_shot['zone'].isdigit() else 5
+                curr_zone = int(curr_shot['zone']) if curr_shot['zone'].isdigit() else 5
+
+                # Cross-court vs down-line
+                if self._is_cross_court(prev_zone, curr_zone):
+                    patterns['direction_changes'].append('cross_court')
+                elif self._is_down_line(prev_zone, curr_zone):
+                    patterns['direction_changes'].append('down_line')
+                else:
+                    patterns['direction_changes'].append('center')
+
+            # Net approaches
+            if curr_shot['type'] in ['volley', 'swinging_volley', 'overhead']:
+                patterns['net_points'] = True
+                if i >= 1:
+                    patterns['approach_sequences'].append(shots[i - 1:i + 1])
+
+        # Rally construction (3-shot patterns)
+        for i in range(len(shots) - 2):
+            three_shot = '->'.join([s['type'] for s in shots[i:i + 3]])
+            patterns['rally_construction'].append(three_shot)
+
+        return patterns
+
+    def _is_cross_court(self, from_zone, to_zone):
+        """Check if shot is cross-court"""
+        deuce_zones = [1, 4, 7]
+        ad_zones = [3, 6, 9]
+        return ((from_zone in deuce_zones and to_zone in ad_zones) or
+                (from_zone in ad_zones and to_zone in deuce_zones))
+
+    def _is_down_line(self, from_zone, to_zone):
+        """Check if shot is down the line"""
+        deuce_zones = [1, 4, 7]
+        ad_zones = [3, 6, 9]
+        return ((from_zone in deuce_zones and to_zone in deuce_zones) or
+                (from_zone in ad_zones and to_zone in ad_zones))
+
+    def _extract_serve_plus_one(self, shots):
+        """Extract serve+1 patterns"""
+        if len(shots) < 2:
+            return None
+
+        serve = shots[0]
+        plus_one = shots[1] if len(shots) > 1 else None
+
+        if serve['type'] != 'serve' or not plus_one:
+            return None
+
+        return {
+            'serve_direction': serve.get('direction', 'unknown'),
+            'plus_one_shot': plus_one['type'],
+            'plus_one_direction': plus_one.get('direction', 'unknown'),
+            'plus_one_outcome': plus_one.get('outcome', 'in_play'),
+            'pattern': f"{serve['direction']}->{plus_one['type']}_{plus_one.get('direction', '')}"
+        }
+
+    def _extract_finishing_sequence(self, shots):
+        """Extract last 3 shots before point end"""
+        if len(shots) < 3:
+            return None
+
+        # Find terminal shot
+        terminal_idx = None
+        for i, shot in enumerate(shots):
+            if shot.get('terminal', False):
+                terminal_idx = i
+                break
+
+        if terminal_idx is None:
+            terminal_idx = len(shots) - 1
+
+        # Get last 3 shots
+        start_idx = max(0, terminal_idx - 2)
+        finishing_shots = shots[start_idx:terminal_idx + 1]
+
+        return {
+            'sequence': '->'.join([s['type'] for s in finishing_shots]),
+            'directions': [s.get('direction', 'unknown') for s in finishing_shots],
+            'outcome': shots[terminal_idx].get('outcome', 'unknown')
         }
 
     def extract_player_patterns(self, player_points):
-        """Extract tactical patterns from all points for a player"""
-        if not player_points or len(player_points) == 0:
+        """Extract comprehensive tactical patterns from all points"""
+        if not player_points:
             return self._get_default_patterns()
-            
+
         patterns = {
             'total_points': len(player_points),
-            'serve_patterns': {},
-            'return_patterns': {},
-            'rally_patterns': {},
-            'pressure_patterns': {},
-            'shot_distribution': {}
+            'serve_patterns': self._analyze_serve_patterns(player_points),
+            'rally_patterns': self._analyze_rally_patterns(player_points),
+            'shot_effectiveness': self._analyze_shot_effectiveness(player_points),
+            'pressure_patterns': self._analyze_pressure_patterns(player_points),
+            'tactical_tendencies': self._analyze_tactical_tendencies(player_points)
         }
-        
-        serve_points = []
-        return_points = []
-        
-        for point_data in player_points:
-            parsed = self.parse_point(point_data.get('notation', ''))
-            
-            if not parsed:
-                continue
-                
-            # Categorize by serve/return
-            if point_data.get('serving', True):  # Default assume serving
-                serve_points.append(parsed)
-            else:
-                return_points.append(parsed)
-        
-        # Extract serve patterns
-        patterns['serve_patterns'] = self._extract_serve_patterns(serve_points)
-        
-        # Extract return patterns  
-        patterns['return_patterns'] = self._extract_return_patterns(return_points)
-        
-        # Extract rally patterns from all points
-        all_parsed = [self.parse_point(p.get('notation', '')) for p in player_points]
-        patterns['rally_patterns'] = self._extract_rally_patterns(all_parsed)
-        
-        # Extract pressure performance
-        patterns['pressure_patterns'] = self._extract_pressure_patterns(player_points)
-        
+
         return patterns
 
-    def _extract_serve_patterns(self, serve_points):
-        """Extract serving patterns"""
-        if not serve_points:
-            return self._get_default_serve_patterns()
-            
+    def _analyze_serve_patterns(self, player_points):
+        """Detailed serve pattern analysis"""
+        serve_points = [p for p in player_points if p.get('serving', False)]
+
         patterns = {
-            'total_serves': len(serve_points),
-            'direction_distribution': {},
-            'ace_rate': 0,
-            'service_winner_rate': 0,
-            'avg_rally_length': 0
+            'first_serve_locations': {'wide': 0, 'body': 0, 'T': 0},
+            'second_serve_locations': {'wide': 0, 'body': 0, 'T': 0},
+            'serve_plus_one_patterns': {},
+            'ace_distribution': {'wide': 0, 'body': 0, 'T': 0},
+            'service_winner_distribution': {'wide': 0, 'body': 0, 'T': 0}
         }
-        
-        directions = []
-        aces = 0
-        service_winners = 0
-        rally_lengths = []
-        
+
         for point in serve_points:
-            serve_info = point.get('serve_info', {})
-            direction = serve_info.get('serve_direction')
-            if direction:
-                directions.append(direction)
-                
-            outcome = serve_info.get('serve_outcome')
-            if outcome == 'ace':
-                aces += 1
-            elif outcome == 'winner':
-                service_winners += 1
-                
-            rally_lengths.append(point.get('rally_length', 0))
-        
-        # Calculate distributions
-        if directions:
-            from collections import Counter
-            dir_counts = Counter(directions)
-            total = len(directions)
-            patterns['direction_distribution'] = {
-                k: v / total for k, v in dir_counts.items()
-            }
-        
-        patterns['ace_rate'] = aces / len(serve_points) if serve_points else 0
-        patterns['service_winner_rate'] = service_winners / len(serve_points) if serve_points else 0
-        patterns['avg_rally_length'] = np.mean(rally_lengths) if rally_lengths else 0
-        
-        return patterns
-
-    def _extract_return_patterns(self, return_points):
-        """Extract return patterns"""
-        if not return_points:
-            return self._get_default_return_patterns()
-            
-        patterns = {
-            'total_returns': len(return_points),
-            'return_winner_rate': 0,
-            'return_error_rate': 0,
-            'avg_rally_length': 0,
-            'shot_type_distribution': {}
-        }
-        
-        winners = 0
-        errors = 0
-        rally_lengths = []
-        first_shots = []
-        
-        for point in return_points:
-            shots = point.get('shots', [])
-            
-            if shots:
-                first_shot = shots[0]
-                first_shots.append(first_shot.get('shot_type', 'unknown'))
-                
-                # Check for return winners/errors
-                for shot in shots:
-                    outcome = shot.get('outcome')
-                    if outcome == 'winner':
-                        winners += 1
-                        break
-                    elif outcome in ['error', 'forced_error']:
-                        errors += 1
-                        break
-                        
-            rally_lengths.append(point.get('rally_length', 0))
-        
-        patterns['return_winner_rate'] = winners / len(return_points) if return_points else 0
-        patterns['return_error_rate'] = errors / len(return_points) if return_points else 0
-        patterns['avg_rally_length'] = np.mean(rally_lengths) if rally_lengths else 0
-        
-        # Shot type distribution for returns
-        if first_shots:
-            from collections import Counter
-            shot_counts = Counter(first_shots)
-            total = len(first_shots)
-            patterns['shot_type_distribution'] = {
-                k: v / total for k, v in shot_counts.items()
-            }
-        
-        return patterns
-
-    def _extract_rally_patterns(self, all_points):
-        """Extract rally characteristics"""
-        if not all_points:
-            return self._get_default_rally_patterns()
-            
-        patterns = {
-            'avg_rally_length': 0,
-            'short_rally_rate': 0,  # <= 3 shots
-            'medium_rally_rate': 0,  # 4-9 shots  
-            'long_rally_rate': 0,   # >= 10 shots
-            'net_approach_rate': 0,
-            'winner_to_error_ratio': 1.0
-        }
-        
-        rally_lengths = []
-        net_approaches = 0
-        winners = 0
-        errors = 0
-        
-        for point in all_points:
-            if not point:
+            parsed = self.parse_point(point.get('notation', ''), serving=True)
+            if not parsed['shots']:
                 continue
-                
-            length = point.get('rally_length', 0)
-            rally_lengths.append(length)
-            
-            shots = point.get('shots', [])
-            
-            # Check for net approaches
-            for shot in shots:
-                if shot.get('shot_type') == 'volley':
-                    net_approaches += 1
-                    break
-            
-            # Count winners and errors
-            for shot in shots:
+
+            serve = parsed['shots'][0]
+            serve_dir = serve.get('direction', 'unknown')
+
+            # Track serve locations
+            if point.get('serve_num', 1) == 1:
+                if serve_dir in patterns['first_serve_locations']:
+                    patterns['first_serve_locations'][serve_dir] += 1
+            else:
+                if serve_dir in patterns['second_serve_locations']:
+                    patterns['second_serve_locations'][serve_dir] += 1
+
+            # Track aces and service winners
+            if serve.get('outcome') == 'ace':
+                if serve_dir in patterns['ace_distribution']:
+                    patterns['ace_distribution'][serve_dir] += 1
+            elif serve.get('outcome') == 'service_winner':
+                if serve_dir in patterns['service_winner_distribution']:
+                    patterns['service_winner_distribution'][serve_dir] += 1
+
+            # Serve+1 patterns
+            if parsed.get('serve_plus_one'):
+                pattern = parsed['serve_plus_one']['pattern']
+                patterns['serve_plus_one_patterns'][pattern] = patterns['serve_plus_one_patterns'].get(pattern, 0) + 1
+
+        # Convert counts to percentages
+        for location_type in ['first_serve_locations', 'second_serve_locations']:
+            total = sum(patterns[location_type].values())
+            if total > 0:
+                patterns[location_type] = {k: v / total for k, v in patterns[location_type].items()}
+
+        return patterns
+
+    def _analyze_rally_patterns(self, player_points):
+        """Analyze rally construction and patterns"""
+        all_patterns = {
+            'common_sequences': {},
+            'direction_patterns': {'cross_court': 0, 'down_line': 0, 'center': 0},
+            'net_approach_count': 0,
+            'avg_rally_length': 0,
+            'rally_length_distribution': {'short': 0, 'medium': 0, 'long': 0}
+        }
+
+        total_rally_length = 0
+
+        for point in player_points:
+            parsed = self.parse_point(point.get('notation', ''))
+            patterns = parsed.get('patterns', {})
+
+            # Rally length
+            rally_len = parsed['rally_length']
+            total_rally_length += rally_len
+
+            if rally_len <= 3:
+                all_patterns['rally_length_distribution']['short'] += 1
+            elif rally_len <= 9:
+                all_patterns['rally_length_distribution']['medium'] += 1
+            else:
+                all_patterns['rally_length_distribution']['long'] += 1
+
+            # Common sequences
+            for seq in patterns.get('rally_construction', []):
+                all_patterns['common_sequences'][seq] = all_patterns['common_sequences'].get(seq, 0) + 1
+
+            # Direction patterns
+            for direction in patterns.get('direction_changes', []):
+                if direction in all_patterns['direction_patterns']:
+                    all_patterns['direction_patterns'][direction] += 1
+
+            # Net approaches
+            if patterns.get('net_points', False):
+                all_patterns['net_approach_count'] += 1
+
+        if player_points:
+            all_patterns['avg_rally_length'] = total_rally_length / len(player_points)
+
+        # Get top 10 most common sequences
+        top_sequences = sorted(all_patterns['common_sequences'].items(), key=lambda x: x[1], reverse=True)[:10]
+        all_patterns['common_sequences'] = dict(top_sequences)
+
+        return all_patterns
+
+    def _analyze_shot_effectiveness(self, player_points):
+        """Analyze effectiveness by shot type"""
+        shot_stats = {
+            'forehand': {'total': 0, 'winners': 0, 'errors': 0, 'directions': {}},
+            'backhand': {'total': 0, 'winners': 0, 'errors': 0, 'directions': {}},
+            'volley': {'total': 0, 'winners': 0, 'errors': 0},
+            'slice': {'total': 0, 'winners': 0, 'errors': 0}
+        }
+
+        for point in player_points:
+            parsed = self.parse_point(point.get('notation', ''))
+
+            for shot in parsed['shots']:
+                shot_type = shot['type']
+
+                # Map to basic categories
+                if shot_type == 'forehand':
+                    category = 'forehand'
+                elif shot_type == 'backhand':
+                    category = 'backhand'
+                elif shot_type in ['forehand_slice', 'backhand_slice']:
+                    category = 'slice'
+                elif shot_type in ['volley', 'swinging_volley']:
+                    category = 'volley'
+                else:
+                    continue
+
+                shot_stats[category]['total'] += 1
+
+                # Track outcomes
                 outcome = shot.get('outcome')
                 if outcome == 'winner':
-                    winners += 1
-                elif outcome in ['error', 'forced_error']:
-                    errors += 1
-        
-        if rally_lengths:
-            patterns['avg_rally_length'] = np.mean(rally_lengths)
-            total_rallies = len(rally_lengths)
-            patterns['short_rally_rate'] = sum(1 for x in rally_lengths if x <= 3) / total_rallies
-            patterns['medium_rally_rate'] = sum(1 for x in rally_lengths if 4 <= x <= 9) / total_rallies  
-            patterns['long_rally_rate'] = sum(1 for x in rally_lengths if x >= 10) / total_rallies
-        
-        patterns['net_approach_rate'] = net_approaches / len(all_points) if all_points else 0
-        patterns['winner_to_error_ratio'] = winners / errors if errors > 0 else 2.0
-        
-        return patterns
+                    shot_stats[category]['winners'] += 1
+                elif outcome in ['unforced_error', 'forced_error']:
+                    shot_stats[category]['errors'] += 1
 
-    def _extract_pressure_patterns(self, all_points):
-        """Extract performance under pressure"""
-        if not all_points:
-            return self._get_default_pressure_patterns()
-            
-        patterns = {
-            'break_point_conversion': 0.5,
-            'deuce_performance': 0.5,
-            'set_point_performance': 0.5,
-            'clutch_shot_accuracy': 0.5
+                # Track directions for groundstrokes
+                if category in ['forehand', 'backhand'] and shot.get('direction'):
+                    direction = shot['direction']
+                    if 'directions' not in shot_stats[category]:
+                        shot_stats[category]['directions'] = {}
+                    shot_stats[category]['directions'][direction] = shot_stats[category]['directions'].get(direction,
+                                                                                                           0) + 1
+
+        return shot_stats
+
+    def _analyze_pressure_patterns(self, player_points):
+        """Analyze performance under pressure"""
+        pressure_stats = {
+            'break_points': {'total': 0, 'won': 0, 'rally_length': [], 'error_rate': 0},
+            'game_points': {'total': 0, 'won': 0, 'rally_length': [], 'error_rate': 0},
+            'deuce_points': {'total': 0, 'won': 0, 'rally_length': [], 'error_rate': 0}
         }
-        
-        # This would require score context which isn't in basic notation
-        # For now, return defaults - could be enhanced with game score data
-        
-        return patterns
+
+        for point in player_points:
+            score_state = point.get('score_state', {})
+            parsed = self.parse_point(point.get('notation', ''))
+
+            # Determine pressure situation
+            pressure_type = None
+            if score_state.get('is_break_point'):
+                pressure_type = 'break_points'
+            elif score_state.get('is_game_point'):
+                pressure_type = 'game_points'
+            elif score_state.get('is_deuce'):
+                pressure_type = 'deuce_points'
+
+            if pressure_type:
+                pressure_stats[pressure_type]['total'] += 1
+                pressure_stats[pressure_type]['rally_length'].append(parsed['rally_length'])
+
+                # Check if point was won
+                won = point.get('won', False)
+                if won:
+                    pressure_stats[pressure_type]['won'] += 1
+
+                # Check for errors
+                for shot in parsed['shots']:
+                    if shot.get('outcome') in ['unforced_error', 'forced_error']:
+                        pressure_stats[pressure_type]['error_rate'] += 1
+
+        # Calculate averages
+        for pressure_type in pressure_stats:
+            stats = pressure_stats[pressure_type]
+            if stats['total'] > 0:
+                stats['win_rate'] = stats['won'] / stats['total']
+                stats['avg_rally_length'] = sum(stats['rally_length']) / len(stats['rally_length']) if stats[
+                    'rally_length'] else 0
+                stats['error_rate'] = stats['error_rate'] / stats['total']
+            else:
+                stats['win_rate'] = 0
+                stats['avg_rally_length'] = 0
+
+        return pressure_stats
+
+    def _analyze_tactical_tendencies(self, player_points):
+        """Extract player's tactical fingerprint"""
+        tendencies = {
+            'favorite_patterns': {},
+            'pressure_goto': None,
+            'finishing_shots': {},
+            'defensive_patterns': {}
+        }
+
+        # Analyze all patterns
+        all_serve_plus_one = {}
+        all_finishing_sequences = {}
+        pressure_patterns = {}
+
+        for point in player_points:
+            parsed = self.parse_point(point.get('notation', ''))
+
+            # Serve+1 patterns
+            if parsed.get('serve_plus_one'):
+                pattern = parsed['serve_plus_one']['pattern']
+                all_serve_plus_one[pattern] = all_serve_plus_one.get(pattern, 0) + 1
+
+            # Finishing sequences
+            if parsed.get('finishing_sequence'):
+                seq = parsed['finishing_sequence']['sequence']
+                all_finishing_sequences[seq] = all_finishing_sequences.get(seq, 0) + 1
+
+            # Pressure patterns
+            if point.get('score_state', {}).get('is_break_point') or point.get('score_state', {}).get('is_game_point'):
+                for shot in parsed['shots']:
+                    if shot['type'] != 'serve':
+                        pressure_patterns[shot['type']] = pressure_patterns.get(shot['type'], 0) + 1
+
+        # Get top patterns
+        if all_serve_plus_one:
+            tendencies['favorite_patterns'] = sorted(all_serve_plus_one.items(), key=lambda x: x[1], reverse=True)[:3]
+
+        if pressure_patterns:
+            tendencies['pressure_goto'] = max(pressure_patterns, key=pressure_patterns.get)
+
+        if all_finishing_sequences:
+            tendencies['finishing_shots'] = sorted(all_finishing_sequences.items(), key=lambda x: x[1], reverse=True)[
+                                            :3]
+
+        return tendencies
 
     def _get_default_patterns(self):
         """Default patterns when no data available"""
         return {
-            'serve_patterns': self._get_default_serve_patterns(),
-            'return_patterns': self._get_default_return_patterns(), 
-            'rally_patterns': self._get_default_rally_patterns(),
-            'pressure_patterns': self._get_default_pressure_patterns()
-        }
-
-    def _get_default_serve_patterns(self):
-        return {
-            'direction_distribution': {'wide': 0.3, 'body': 0.4, 'center': 0.3},
-            'ace_rate': 0.08,
-            'service_winner_rate': 0.15,
-            'avg_rally_length': 2.5
-        }
-
-    def _get_default_return_patterns(self):
-        return {
-            'return_winner_rate': 0.05,
-            'return_error_rate': 0.15,
-            'avg_rally_length': 4.2,
-            'shot_type_distribution': {'forehand': 0.6, 'backhand': 0.4}
-        }
-
-    def _get_default_rally_patterns(self):
-        return {
-            'avg_rally_length': 3.8,
-            'short_rally_rate': 0.6,
-            'medium_rally_rate': 0.3,
-            'long_rally_rate': 0.1,
-            'net_approach_rate': 0.08,
-            'winner_to_error_ratio': 1.2
-        }
-
-    def _get_default_pressure_patterns(self):
-        return {
-            'break_point_conversion': 0.42,
-            'deuce_performance': 0.52,
-            'set_point_performance': 0.65,
-            'clutch_shot_accuracy': 0.48
+            'total_points': 0,
+            'serve_patterns': {
+                'first_serve_locations': {'wide': 0.4, 'body': 0.3, 'T': 0.3},
+                'second_serve_locations': {'body': 0.5, 'T': 0.3, 'wide': 0.2},
+                'serve_plus_one_patterns': {},
+                'ace_distribution': {'wide': 0, 'body': 0, 'T': 0}
+            },
+            'rally_patterns': {
+                'common_sequences': {},
+                'direction_patterns': {'cross_court': 0.6, 'down_line': 0.3, 'center': 0.1},
+                'net_approach_count': 0,
+                'avg_rally_length': 4.2
+            },
+            'shot_effectiveness': {
+                'forehand': {'total': 0, 'winners': 0, 'errors': 0},
+                'backhand': {'total': 0, 'winners': 0, 'errors': 0}
+            },
+            'pressure_patterns': {
+                'break_points': {'win_rate': 0.4, 'avg_rally_length': 5.5},
+                'game_points': {'win_rate': 0.65, 'avg_rally_length': 3.8}
+            },
+            'tactical_tendencies': {}
         }
 
 def extract_jeff_notation_features(player_canonical, gender, jeff_data):
@@ -4167,7 +4335,7 @@ def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
     total_matches = len(historical_data)
     
     for idx, row in historical_data.iterrows():
-        if idx % 1000 == 0:
+        if idx % 100 == 0:
             print(f"Processing Jeff notation for match {idx}/{total_matches}")
             
         # Skip if already has Jeff notation features
