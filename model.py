@@ -13,6 +13,7 @@ import joblib
 import os
 import warnings
 import logging
+import argparse
 from dataclasses import dataclass
 
 # Suppress sklearn warnings globally
@@ -21,6 +22,91 @@ warnings.filterwarnings("ignore", category=UserWarning, module="lightgbm")
 
 # Set random seed for reproducibility
 np.random.seed(42)
+
+# Utility functions
+def normalize_name(name):
+    """Normalize player name for matching"""
+    from unidecode import unidecode
+    import re
+    
+    if pd.isna(name) or name == '':
+        return ''
+    
+    name = str(name).lower()
+    name = unidecode(name)  # Remove accents
+    name = re.sub(r'[^a-z\s]', '', name)  # Remove non-letters
+    name = re.sub(r'\s+', '_', name.strip())  # Replace spaces with underscores
+    return name
+
+def extract_unified_features_fixed(match_dict, player_prefix):
+    """Extract unified features for a player from match dictionary"""
+    features = {}
+    prefix = f"{player_prefix}_"
+    
+    # Extract all features with the given prefix
+    for key, value in match_dict.items():
+        if key.startswith(prefix):
+            feature_name = key[len(prefix):]  # Remove prefix
+            features[feature_name] = value
+    
+    return features
+
+def extract_unified_match_context_fixed(match_dict):
+    """Extract match context from match dictionary"""
+    context = {
+        'surface': match_dict.get('surface', 'Hard'),
+        'p1_ranking': match_dict.get('winner_rank', None),
+        'p2_ranking': match_dict.get('loser_rank', None),
+        'tournament_level': match_dict.get('tourney_level', 'ATP250'),
+        'data_quality_score': match_dict.get('data_quality_score', 0.5),
+        'best_of': match_dict.get('best_of', 3),
+    }
+    
+    return context
+
+# Import required functions from tennis_updated
+try:
+    from tennis_updated import (
+        load_from_cache_with_scraping,
+        generate_comprehensive_historical_data,
+        save_to_cache,
+        integrate_api_tennis_data_incremental,
+        run_automated_tennis_abstract_integration,
+        extract_ta_data_from_historical,
+        AutomatedTennisAbstractScraper,
+        TennisAbstractScraper
+    )
+    from settings import CACHE_DIR
+except ImportError as e:
+    print(f"Warning: Could not import functions from tennis_updated: {e}")
+    # Define fallback functions
+    def load_from_cache_with_scraping():
+        return None, None, None
+    
+    def generate_comprehensive_historical_data(fast=True):
+        return pd.DataFrame(), {}, {}
+    
+    def save_to_cache(hist, jeff_data, defaults):
+        pass
+    
+    def integrate_api_tennis_data_incremental(hist):
+        return hist
+        
+    def run_automated_tennis_abstract_integration(hist):
+        return hist
+        
+    def extract_ta_data_from_historical(hist):
+        return []
+    
+    class AutomatedTennisAbstractScraper:
+        def automated_scraping_session(self, days_back=30, max_matches=50):
+            return []
+    
+    class TennisAbstractScraper:
+        def get_raw_pointlog(self, url):
+            return pd.DataFrame()
+    
+    CACHE_DIR = "cache"
 
 # Module-level constants
 DEFAULT_PRESSURE_MULTIPLIERS = {
