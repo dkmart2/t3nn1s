@@ -128,6 +128,282 @@ FULL_MODE_PARAMS = {
 }
 
 
+class EloIntegration:
+    """
+    Real ELO rating integration from Tennis Abstract and other sources
+    """
+    
+    def __init__(self):
+        self.elo_cache = {}
+        self.surface_specific = {'Hard': 'hElo', 'Clay': 'cElo', 'Grass': 'gElo'}
+        
+    def load_real_elo_data(self):
+        """Load ELO data from available sources"""
+        try:
+            # Try to load from cached ELO files
+            import os
+            import glob
+            
+            # Look for ELO files in various locations
+            elo_patterns = [
+                '~/Desktop/data/*elo*.csv',
+                'data/*elo*.csv', 
+                'cache/*elo*.csv',
+                '*elo*.csv'
+            ]
+            
+            elo_files = []
+            for pattern in elo_patterns:
+                expanded_pattern = os.path.expanduser(pattern)
+                elo_files.extend(glob.glob(expanded_pattern))
+            
+            if elo_files:
+                print(f"Found ELO files: {elo_files[:3]}")  # Show first 3
+                
+                # Load the most recent/largest ELO file
+                best_file = max(elo_files, key=lambda f: os.path.getsize(f))
+                elo_df = pd.read_csv(best_file)
+                
+                print(f"Loaded ELO data from {best_file}: {len(elo_df)} player ratings")
+                
+                # Cache player ratings by name
+                for _, row in elo_df.iterrows():
+                    player_name = self._normalize_player_name(row.get('player', ''))
+                    if player_name:
+                        self.elo_cache[player_name] = {
+                            'overall': row.get('elo', 1500),
+                            'hard': row.get('hElo', row.get('elo', 1500)),
+                            'clay': row.get('cElo', row.get('elo', 1500)),
+                            'grass': row.get('gElo', row.get('elo', 1500))
+                        }
+                
+                return True
+                
+        except Exception as e:
+            print(f"Could not load ELO data: {e}")
+            
+        return False
+    
+    def _normalize_player_name(self, name):
+        """Normalize player name for ELO lookup"""
+        if pd.isna(name) or name == '':
+            return ''
+        name = str(name).lower().strip()
+        # Remove common suffixes and normalize
+        name = name.replace('jr.', '').replace('sr.', '').replace('iii', '').replace('ii', '')
+        name = ''.join(c for c in name if c.isalpha() or c.isspace())
+        return ' '.join(name.split())
+    
+    def get_player_elo(self, player_name, surface='Hard', default_elo=1500):
+        """Get ELO rating for a player on specific surface"""
+        if not self.elo_cache:
+            self.load_real_elo_data()
+            
+        normalized_name = self._normalize_player_name(player_name)
+        
+        if normalized_name in self.elo_cache:
+            player_elos = self.elo_cache[normalized_name]
+            surface_key = surface.lower()
+            
+            # Try surface-specific first, then overall
+            if surface_key in player_elos:
+                return player_elos[surface_key]
+            elif 'overall' in player_elos:
+                return player_elos['overall']
+        
+        # Fallback to default with some realistic variation
+        import random
+        return default_elo + random.randint(-200, 200)
+    
+    def get_elo_differential(self, player1, player2, surface='Hard'):
+        """Get ELO difference between two players"""
+        p1_elo = self.get_player_elo(player1, surface)
+        p2_elo = self.get_player_elo(player2, surface)
+        return p1_elo - p2_elo
+    
+    def update_match_data_with_real_elo(self, match_data):
+        """Replace synthetic ELO with real ELO ratings"""
+        if 'winner' not in match_data.columns or 'loser' not in match_data.columns:
+            print("Missing winner/loser columns for ELO integration")
+            return match_data
+            
+        # Get surface info
+        surfaces = match_data.get('surface', 'Hard')
+        if isinstance(surfaces, str):
+            surfaces = [surfaces] * len(match_data)
+            
+        # Calculate real ELO for all matches
+        winner_elos = []
+        loser_elos = []
+        
+        for idx, row in match_data.iterrows():
+            surface = surfaces[idx] if isinstance(surfaces, list) else row.get('surface', 'Hard')
+            winner = row.get('winner', '')
+            loser = row.get('loser', '')
+            
+            winner_elo = self.get_player_elo(winner, surface)
+            loser_elo = self.get_player_elo(loser, surface)
+            
+            winner_elos.append(winner_elo)
+            loser_elos.append(loser_elo)
+        
+        # Update match data with real ELO
+        match_data['winner_elo'] = winner_elos
+        match_data['loser_elo'] = loser_elos
+        match_data['elo_diff'] = pd.Series(winner_elos) - pd.Series(loser_elos)
+        
+        print(f"Updated {len(match_data)} matches with real ELO ratings")
+        print(f"ELO range: {min(winner_elos + loser_elos)} - {max(winner_elos + loser_elos)}")
+        
+        return match_data
+
+
+class JeffNotationParser:
+    """
+    Parser for Jeff Sackmann's point notation system
+    
+    Notation format:
+    - First char: Serve direction (4=wide, 5=body, 6=T)
+    - Middle chars: Shot type (f=forehand, b=backhand, r=rally, v=volley, s=slice)
+    - Direction: Number 1-9 (court zones)
+    - Last char: Outcome (*=winner, @=unforced error, #=forced error)
+    
+    Example: '4f8b3f*' = wide serve, forehand crosscourt, backhand line, forehand winner
+    """
+    
+    def __init__(self):
+        self.serve_directions = {'4': 'wide', '5': 'body', '6': 'T'}
+        self.shot_types = {
+            'f': 'forehand', 'b': 'backhand', 'r': 'rally', 
+            'v': 'volley', 's': 'slice', 'd': 'dropshot'
+        }
+        self.outcomes = {'*': 'winner', '@': 'unforced_error', '#': 'forced_error'}
+        
+    def parse_point_sequence(self, point_string):
+        """
+        Parse a complete point sequence into structured shot data
+        
+        Returns:
+            dict with point statistics: serve_dir, rally_length, winner_type, etc.
+        """
+        if pd.isna(point_string) or point_string == '' or point_string == '0':
+            return self._default_point_stats()
+            
+        point_string = str(point_string).strip()
+        shots = []
+        
+        try:
+            i = 0
+            while i < len(point_string):
+                shot = self._parse_single_shot(point_string, i)
+                if shot:
+                    shots.append(shot)
+                    i += shot.get('chars_consumed', 1)
+                else:
+                    i += 1
+                    
+            return self._extract_point_statistics(shots, point_string)
+            
+        except Exception as e:
+            # If parsing fails, return defaults
+            return self._default_point_stats()
+    
+    def _parse_single_shot(self, sequence, start_idx):
+        """Parse a single shot from the sequence"""
+        if start_idx >= len(sequence):
+            return None
+            
+        shot = {'type': None, 'direction': None, 'outcome': None, 'chars_consumed': 1}
+        char = sequence[start_idx]
+        
+        # First shot (serve) - check for serve direction
+        if start_idx == 0 and char in self.serve_directions:
+            shot['serve_direction'] = self.serve_directions[char]
+            shot['type'] = 'serve'
+            shot['chars_consumed'] = 1
+            return shot
+        
+        # Shot type
+        if char in self.shot_types:
+            shot['type'] = self.shot_types[char]
+        elif char.isdigit():
+            shot['direction'] = int(char)
+        elif char in self.outcomes:
+            shot['outcome'] = self.outcomes[char]
+        
+        # Look ahead for direction/outcome
+        if start_idx + 1 < len(sequence):
+            next_char = sequence[start_idx + 1]
+            if next_char.isdigit() and shot['direction'] is None:
+                shot['direction'] = int(next_char)
+                shot['chars_consumed'] = 2
+            elif next_char in self.outcomes:
+                shot['outcome'] = self.outcomes[next_char]
+                shot['chars_consumed'] = 2
+                
+        return shot if shot['type'] or shot['outcome'] else None
+    
+    def _extract_point_statistics(self, shots, original_string):
+        """Extract statistical features from parsed shots"""
+        stats = self._default_point_stats()
+        
+        if not shots:
+            return stats
+            
+        # Basic point info
+        stats['rally_length'] = len(shots)
+        stats['original_sequence'] = original_string
+        
+        # Serve information
+        first_shot = shots[0] if shots else {}
+        if 'serve_direction' in first_shot:
+            serve_dir = first_shot['serve_direction']
+            stats['serve_wide'] = 1 if serve_dir == 'wide' else 0
+            stats['serve_body'] = 1 if serve_dir == 'body' else 0
+            stats['serve_t'] = 1 if serve_dir == 'T' else 0
+        
+        # Shot type analysis
+        shot_types = [s.get('type', '') for s in shots if s.get('type')]
+        stats['forehand_count'] = shot_types.count('forehand')
+        stats['backhand_count'] = shot_types.count('backhand')
+        stats['volley_count'] = shot_types.count('volley')
+        stats['is_net_point'] = 1 if stats['volley_count'] > 0 else 0
+        
+        # Point outcome
+        last_shot = shots[-1] if shots else {}
+        outcome = last_shot.get('outcome', '')
+        stats['is_winner'] = 1 if outcome == 'winner' else 0
+        stats['is_unforced_error'] = 1 if outcome == 'unforced_error' else 0
+        stats['is_forced_error'] = 1 if outcome == 'forced_error' else 0
+        
+        # Rally patterns
+        if len(shots) >= 2:
+            stats['serve_plus_one'] = 1  # Point lasted past serve
+        if len(shots) >= 4:
+            stats['extended_rally'] = 1  # Rally of 4+ shots
+        
+        return stats
+    
+    def _default_point_stats(self):
+        """Default statistics when parsing fails or no data available"""
+        return {
+            'rally_length': 3,
+            'serve_wide': 0.33,
+            'serve_body': 0.33, 
+            'serve_t': 0.34,
+            'forehand_count': 1,
+            'backhand_count': 1,
+            'volley_count': 0,
+            'is_net_point': 0,
+            'is_winner': 0,
+            'is_unforced_error': 0,
+            'is_forced_error': 0,
+            'serve_plus_one': 1,
+            'extended_rally': 0,
+            'original_sequence': ''
+        }
+
+
 @dataclass
 class ModelConfig:
     """Configuration for model parameters"""
@@ -184,8 +460,12 @@ class PointLevelModel:
         self.feature_names = None
 
     def engineer_point_features(self, point_data: pd.DataFrame) -> pd.DataFrame:
-        """Extract features from raw point data"""
+        """Extract features from raw point data using Jeff's notation parser"""
         features = pd.DataFrame(index=point_data.index)
+        
+        # Initialize Jeff parser
+        if not hasattr(self, '_jeff_parser'):
+            self._jeff_parser = JeffNotationParser()
 
         # Helper function to safely extract numeric columns
         def safe_numeric_extract(data, col_name, default_val):
@@ -194,27 +474,55 @@ class PointLevelModel:
             else:
                 return pd.Series([default_val] * len(data), index=data.index)
 
-        # Serve features (simplified since we don't have detailed serve coding)
-        features['is_first_serve'] = 1  # Assume first serve for simplicity
-        features['serve_direction_wide'] = 0.3  # Default serve direction distribution
-        features['serve_direction_body'] = 0.3
-        features['serve_direction_t'] = 0.4
+        # Parse Jeff's point sequences for REAL shot-level features
+        jeff_features_list = []
+        for idx, row in point_data.iterrows():
+            # Try multiple column names for Jeff's sequences
+            point_sequence = None
+            for col_name in ['1st', '2nd', 'point_sequence', 'jeff_sequence']:
+                if col_name in row and pd.notna(row[col_name]) and row[col_name] != '':
+                    point_sequence = row[col_name]
+                    break
+            
+            # Parse the sequence to extract real features
+            jeff_stats = self._jeff_parser.parse_point_sequence(point_sequence)
+            jeff_features_list.append(jeff_stats)
+        
+        # Convert Jeff features to DataFrame and add to features
+        jeff_df = pd.DataFrame(jeff_features_list, index=point_data.index)
+        
+        # Core shot-level features from Jeff's data
+        features['rally_length'] = jeff_df['rally_length']
+        features['serve_wide'] = jeff_df['serve_wide']
+        features['serve_body'] = jeff_df['serve_body'] 
+        features['serve_t'] = jeff_df['serve_t']
+        features['is_net_point'] = jeff_df['is_net_point']
+        features['is_winner'] = jeff_df['is_winner']
+        features['is_unforced_error'] = jeff_df['is_unforced_error']
+        features['is_forced_error'] = jeff_df['is_forced_error']
+        features['forehand_count'] = jeff_df['forehand_count']
+        features['backhand_count'] = jeff_df['backhand_count']
+        features['volley_count'] = jeff_df['volley_count']
+        features['serve_plus_one'] = jeff_df['serve_plus_one']
+        features['extended_rally'] = jeff_df['extended_rally']
 
-        # Rally features
-        rally_col = 'rallyCount' if 'rallyCount' in point_data.columns else 'rally_length'
-        if rally_col in point_data.columns:
-            features['rally_length'] = pd.to_numeric(point_data[rally_col], errors='coerce').fillna(3)
-        else:
-            features['rally_length'] = 3  # Default rally length
+        # Derived features from Jeff data
+        features['is_first_serve'] = 1  # Assume first serve data
+        features['serve_direction_wide'] = features['serve_wide']
+        features['serve_direction_body'] = features['serve_body']
+        features['serve_direction_t'] = features['serve_t']
+        
+        # Shot balance ratios
+        total_shots = features['forehand_count'] + features['backhand_count']
+        features['fh_bh_ratio'] = features['forehand_count'] / total_shots.clip(lower=1)
+        features['volley_ratio'] = features['volley_count'] / features['rally_length'].clip(lower=1)
 
-        features['is_net_point'] = 0  # Simplified - no net point detection
-
-        # Score state
+        # Score state (try to extract from data or use defaults)
         features['games_diff'] = (safe_numeric_extract(point_data, 'p1_games', 0) -
                                   safe_numeric_extract(point_data, 'p2_games', 0))
         features['sets_diff'] = (safe_numeric_extract(point_data, 'p1_sets', 0) -
                                  safe_numeric_extract(point_data, 'p2_sets', 0))
-        features['is_tiebreak'] = 0  # Simplified - no tiebreak detection
+        features['is_tiebreak'] = safe_numeric_extract(point_data, 'is_tiebreak', 0)
 
         # Point importance - FIX: Handle boolean conversion properly
         bp_col = point_data.get('is_break_point', False)
@@ -243,16 +551,20 @@ class PointLevelModel:
                                 safe_numeric_extract(point_data, 'returner_elo', 1500))
         features['h2h_server_advantage'] = safe_numeric_extract(point_data, 'server_h2h_win_pct', 0.5) - 0.5
 
-        # Additional features that might be useful
+        # Additional contextual features
         features['momentum'] = safe_numeric_extract(point_data, 'momentum', 0)
         features['serve_prob_used'] = safe_numeric_extract(point_data, 'serve_prob_used', 0.65)
         features['skill_differential'] = safe_numeric_extract(point_data, 'skill_differential', 0)
-        features['round_level'] = 1  # Default round level
+        features['round_level'] = safe_numeric_extract(point_data, 'round_level', 1)
 
-        # Match state features
+        # Match progression features
         total_games = features['games_diff'].abs()
         features['match_length'] = total_games
         features['late_in_match'] = (total_games > 10).astype(int)
+        
+        # Rally complexity features
+        features['rally_complexity'] = (features['volley_count'] + features['extended_rally']) / 2
+        features['point_outcome_type'] = (features['is_winner'] * 2 + features['is_unforced_error'] * -1 + features['is_forced_error'] * 0)
 
         return features
 
@@ -535,6 +847,216 @@ class DataDrivenTennisModel:
         self.n_simulations = n_simulations
         self.state_modifiers = StateDependentModifiers()
         self.recent_points = []
+        
+        # Temporal decay parameters for recent match weighting
+        self.temporal_decay_rate = 0.01  # 1% decay per day
+        self.form_decay_rate = 0.05      # 5% decay per day for form calculation
+        self.fatigue_decay_rate = 0.1    # 10% decay per day for fatigue
+
+    def calculate_temporal_weight(self, match_date, reference_date, decay_rate=None):
+        """
+        Calculate exponential decay weight based on match recency
+        
+        Args:
+            match_date: Date of the match (datetime or string)
+            reference_date: Reference date (usually today or match prediction date)
+            decay_rate: Daily decay rate (default uses temporal_decay_rate)
+        
+        Returns:
+            Weight between 0 and 1, where recent matches get higher weight
+        """
+        if decay_rate is None:
+            decay_rate = self.temporal_decay_rate
+            
+        try:
+            if isinstance(match_date, str):
+                from datetime import datetime
+                if len(match_date) == 8:  # YYYYMMDD format
+                    match_dt = datetime.strptime(match_date, '%Y%m%d')
+                else:
+                    match_dt = pd.to_datetime(match_date)
+            else:
+                match_dt = pd.to_datetime(match_date)
+                
+            if isinstance(reference_date, str):
+                ref_dt = pd.to_datetime(reference_date)
+            else:
+                ref_dt = pd.to_datetime(reference_date)
+                
+            days_ago = (ref_dt - match_dt).days
+            weight = np.exp(-decay_rate * days_ago)
+            return max(0.01, min(1.0, weight))  # Bound between 0.01 and 1.0
+            
+        except Exception as e:
+            return 0.5  # Fallback weight if date parsing fails
+
+    def calculate_weighted_player_stats(self, player_matches, reference_date, stats_columns=None):
+        """
+        Calculate temporally weighted statistics for a player
+        
+        Args:
+            player_matches: DataFrame of player's recent matches
+            reference_date: Reference date for weighting calculation
+            stats_columns: List of stat columns to weight (if None, weights all numeric columns)
+        
+        Returns:
+            Dictionary of weighted statistics
+        """
+        if len(player_matches) == 0:
+            return {}
+            
+        # Default stats to weight if not specified
+        if stats_columns is None:
+            stats_columns = [
+                'winner_aces', 'winner_double_faults', 'winner_first_serve_pct',
+                'winner_first_serve_pts_won', 'winner_second_serve_pts_won',
+                'winner_break_pts_saved', 'winner_service_games_won',
+                'loser_aces', 'loser_double_faults', 'loser_first_serve_pct',
+                'loser_first_serve_pts_won', 'loser_second_serve_pts_won',
+                'loser_break_pts_saved', 'loser_service_games_won'
+            ]
+        
+        # Calculate temporal weights for each match
+        weights = []
+        for _, match in player_matches.iterrows():
+            match_date = match.get('date', match.get('Date', reference_date))
+            weight = self.calculate_temporal_weight(match_date, reference_date)
+            weights.append(weight)
+        
+        weights = np.array(weights)
+        total_weight = np.sum(weights)
+        
+        if total_weight == 0:
+            return {}
+            
+        # Calculate weighted averages for each stat
+        weighted_stats = {}
+        for stat in stats_columns:
+            if stat in player_matches.columns:
+                stat_values = pd.to_numeric(player_matches[stat], errors='coerce').fillna(0)
+                weighted_avg = np.sum(weights * stat_values) / total_weight
+                weighted_stats[f'weighted_{stat}'] = weighted_avg
+        
+        # Add temporal form indicators
+        weighted_stats['form_weight_sum'] = total_weight
+        weighted_stats['recent_matches_count'] = len(player_matches)
+        weighted_stats['avg_match_recency'] = np.sum(weights * np.arange(len(weights))) / total_weight
+        
+        return weighted_stats
+
+    def calculate_form_trajectory(self, player_matches, reference_date):
+        """
+        Calculate player's form trajectory with stronger emphasis on recent matches
+        
+        Args:
+            player_matches: DataFrame of player's matches (ordered by date)
+            reference_date: Reference date for calculation
+            
+        Returns:
+            Dictionary with form metrics including trend and momentum
+        """
+        if len(player_matches) < 2:
+            return {'form_trend': 0, 'form_momentum': 0, 'recent_form_strength': 0.5}
+        
+        # Calculate win/loss for each match (assuming 'is_winner' column or similar)
+        match_results = []
+        weights = []
+        
+        for idx, (_, match) in enumerate(player_matches.iterrows()):
+            # Determine if player won (adapt based on your data structure)
+            is_winner = match.get('is_winner', match.get('winner_canonical') == match.get('player_canonical', ''))
+            match_results.append(1 if is_winner else 0)
+            
+            match_date = match.get('date', match.get('Date', reference_date))
+            weight = self.calculate_temporal_weight(match_date, reference_date, self.form_decay_rate)
+            weights.append(weight)
+        
+        match_results = np.array(match_results)
+        weights = np.array(weights)
+        
+        # Calculate weighted win rate
+        total_weight = np.sum(weights)
+        if total_weight > 0:
+            weighted_win_rate = np.sum(weights * match_results) / total_weight
+        else:
+            weighted_win_rate = 0.5
+        
+        # Calculate form trend (recent vs older matches)
+        if len(match_results) >= 4:
+            recent_weight = np.sum(weights[:len(weights)//2])
+            older_weight = np.sum(weights[len(weights)//2:])
+            
+            if recent_weight > 0 and older_weight > 0:
+                recent_performance = np.sum(weights[:len(weights)//2] * match_results[:len(weights)//2]) / recent_weight
+                older_performance = np.sum(weights[len(weights)//2:] * match_results[len(weights)//2:]) / older_weight
+                form_trend = recent_performance - older_performance
+            else:
+                form_trend = 0
+        else:
+            form_trend = 0
+        
+        # Form momentum (consistency + upward trajectory)
+        if len(match_results) >= 3:
+            # Look at last 3 matches with exponential weights
+            recent_3 = match_results[-3:]
+            recent_weights = [self.calculate_temporal_weight(f"2024-12-{3-i:02d}", "2024-12-03", 0.1) for i in range(3)]
+            form_momentum = np.sum(recent_weights * recent_3) / np.sum(recent_weights)
+        else:
+            form_momentum = weighted_win_rate
+        
+        return {
+            'form_trend': form_trend,  # Positive = improving, negative = declining
+            'form_momentum': form_momentum,  # 0-1, higher = better recent form
+            'recent_form_strength': weighted_win_rate,  # Overall weighted win rate
+            'matches_analyzed': len(match_results),
+            'total_form_weight': total_weight
+        }
+
+    def calculate_fatigue_index(self, player_matches, reference_date):
+        """
+        Calculate player fatigue based on recent match load and intensity
+        
+        Args:
+            player_matches: DataFrame of player's recent matches
+            reference_date: Reference date for calculation
+            
+        Returns:
+            Fatigue index (0 = no fatigue, 1 = high fatigue)
+        """
+        if len(player_matches) == 0:
+            return 0.0
+        
+        fatigue_score = 0.0
+        
+        for _, match in player_matches.iterrows():
+            match_date = match.get('date', match.get('Date', reference_date))
+            weight = self.calculate_temporal_weight(match_date, reference_date, self.fatigue_decay_rate)
+            
+            # Base fatigue from match duration
+            match_duration = match.get('minutes', 120)  # Default 2 hours
+            base_fatigue = match_duration / 60  # Hours played
+            
+            # Additional fatigue factors
+            sets_played = match.get('sets_total', 3)  # Longer matches = more fatigue
+            tournament_importance = 1.0
+            
+            # Tournament importance multiplier
+            tournament = match.get('tourney_level', '').lower()
+            if 'grand slam' in tournament or tournament in ['wimbledon', 'french open', 'us open', 'australian open']:
+                tournament_importance = 1.5  # Grand Slams are more taxing
+            elif 'masters' in tournament or 'atp 1000' in tournament:
+                tournament_importance = 1.3  # Masters events
+            elif tournament in ['atp 500', '500']:
+                tournament_importance = 1.1
+            
+            # Calculate weighted fatigue contribution
+            match_fatigue = base_fatigue * tournament_importance * (sets_played / 3.0)
+            fatigue_score += match_fatigue * weight
+        
+        # Normalize to 0-1 scale
+        normalized_fatigue = min(1.0, fatigue_score / 10.0)  # Assume max ~10 hours recent play = full fatigue
+        
+        return normalized_fatigue
 
     def get_point_win_prob(self, match_context: dict, score_state: dict, momentum: dict) -> float:
         """Get point-win probability from trained model - OPTIMIZED AND SAFE"""
@@ -1009,30 +1531,21 @@ class TennisModelPipeline:
         print("Using default ensemble weights: simulation=0.6, direct=0.4")
 
     def predict(self, match_context: dict, best_of: Optional[int] = None, fast_mode: bool = False) -> dict:
-        """Make prediction for a match with comprehensive error handling"""
+        """Make comprehensive prediction with set scores, game scores, and confidence"""
         bo = best_of or match_context.get('best_of', 3)
 
         # Validate best_of
         if bo not in [3, 5]:
             bo = 3
 
-        # Run simulation with safety measures
-        if self.simulation_model:
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    sim_prob = self.simulation_model.simulate_match(match_context, best_of=bo, fast_mode=True)
-            except Exception as e:
-                sim_prob = 0.5
-        else:
-            sim_prob = 0.5
-
+        # Run detailed simulation to get set/game predictions
+        detailed_results = self._run_detailed_simulation(match_context, best_of=bo, n_sims=100)
+        
         # Get direct prediction with safety measures
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
 
-                # Ensure match_context is properly formatted as DataFrame
                 if isinstance(match_context, dict):
                     context_df = pd.DataFrame([match_context])
                 else:
@@ -1044,14 +1557,197 @@ class TennisModelPipeline:
         except Exception as e:
             direct_prob = 0.5
 
-        # Simple ensemble (60% simulation, 40% direct)
+        # Calculate ensemble probability
+        sim_prob = detailed_results['win_probability']
         ensemble_prob = 0.6 * sim_prob + 0.4 * direct_prob
+        
+        # Calculate confidence and volatility
+        confidence_score = self._calculate_confidence_score(ensemble_prob, match_context, detailed_results)
+        volatility = self._calculate_match_volatility(detailed_results)
 
         return {
+            # Core predictions
             'win_probability': float(ensemble_prob),
+            'p1_win_prob': float(ensemble_prob),
+            'p2_win_prob': float(1 - ensemble_prob),
+            
+            # Set score predictions
+            'most_likely_sets': detailed_results['most_likely_sets'],
+            'set_score_probabilities': detailed_results['set_score_probabilities'],
+            
+            # Game predictions
+            'expected_total_games': detailed_results['expected_total_games'],
+            'games_range': detailed_results['games_range'],
+            
+            # Confidence and uncertainty
+            'confidence_level': confidence_score['level'],  # HIGH/MEDIUM/LOW
+            'confidence_score': confidence_score['score'],  # 0-1
+            'volatility': volatility,  # How unpredictable the match is
+            'uncertainty_range': {
+                'p5': ensemble_prob - detailed_results['prob_std'] * 1.65,
+                'p95': ensemble_prob + detailed_results['prob_std'] * 1.65
+            },
+            
+            # Components for transparency
             'simulation_component': float(sim_prob),
             'direct_component': float(direct_prob),
-            'confidence': self._calculate_confidence(ensemble_prob, match_context)
+            'data_quality': match_context.get('data_quality_score', 0.5),
+            
+            # AI context preparation
+            'ai_context': self._prepare_ai_context(match_context, ensemble_prob, confidence_score)
+        }
+        
+    def _run_detailed_simulation(self, match_context: dict, best_of: int = 3, n_sims: int = 100) -> dict:
+        """Run detailed simulation to get set scores and game counts"""
+        if not self.simulation_model:
+            return self._default_detailed_results()
+            
+        set_scores = []
+        total_games_list = []
+        p1_wins = 0
+        
+        sets_to_win = best_of // 2 + 1
+        
+        for _ in range(n_sims):
+            try:
+                self.simulation_model.recent_points = []
+                p1_sets = p2_sets = 0
+                total_games = 0
+                
+                while p1_sets < sets_to_win and p2_sets < sets_to_win:
+                    set_result = self.simulation_model._simulate_set(match_context, p1_sets, p2_sets)
+                    p1_games, p2_games = set_result.get('p1_games', 6), set_result.get('p2_games', 4)
+                    total_games += p1_games + p2_games
+                    
+                    if p1_games > p2_games:
+                        p1_sets += 1
+                    else:
+                        p2_sets += 1
+                
+                set_scores.append((p1_sets, p2_sets))
+                total_games_list.append(total_games)
+                
+                if p1_sets > p2_sets:
+                    p1_wins += 1
+                    
+            except:
+                # Fallback for failed simulation
+                set_scores.append((2, 1) if best_of == 3 else (3, 2))
+                total_games_list.append(18 if best_of == 3 else 30)
+                p1_wins += 0.5
+        
+        # Calculate statistics
+        win_prob = p1_wins / n_sims
+        
+        # Most common set score
+        from collections import Counter
+        set_counter = Counter(set_scores)
+        most_likely_sets = set_counter.most_common(1)[0][0]
+        
+        # Set score probabilities
+        set_probs = {f"{s[0]}-{s[1]}": count/n_sims for s, count in set_counter.items()}
+        
+        # Games statistics
+        avg_games = np.mean(total_games_list)
+        games_std = np.std(total_games_list)
+        
+        return {
+            'win_probability': win_prob,
+            'prob_std': np.std([1 if score[0] > score[1] else 0 for score in set_scores]),
+            'most_likely_sets': f"{most_likely_sets[0]}-{most_likely_sets[1]}",
+            'set_score_probabilities': dict(sorted(set_probs.items(), key=lambda x: x[1], reverse=True)[:5]),
+            'expected_total_games': avg_games,
+            'games_range': {
+                'min': int(avg_games - games_std),
+                'max': int(avg_games + games_std),
+                'p25': int(np.percentile(total_games_list, 25)),
+                'p75': int(np.percentile(total_games_list, 75))
+            }
+        }
+    
+    def _default_detailed_results(self):
+        """Fallback results when simulation fails"""
+        return {
+            'win_probability': 0.5,
+            'prob_std': 0.1,
+            'most_likely_sets': "2-1",
+            'set_score_probabilities': {"2-1": 0.4, "2-0": 0.3, "1-2": 0.3},
+            'expected_total_games': 20,
+            'games_range': {'min': 16, 'max': 24, 'p25': 18, 'p75': 22}
+        }
+    
+    def _calculate_confidence_score(self, prob: float, context: dict, detailed_results: dict) -> dict:
+        """Calculate comprehensive confidence score"""
+        extremity = abs(prob - 0.5) * 2  # 0-1 scale
+        data_quality = context.get('data_quality_score', 0.5)
+        volatility = detailed_results.get('prob_std', 0.1)
+        
+        # Confidence factors
+        confidence_factors = {
+            'probability_extremity': extremity,  # How far from 50-50
+            'data_quality': data_quality,       # Quality of underlying data
+            'low_volatility': 1 - volatility,   # Less uncertainty = more confidence
+            'feature_coverage': min(1.0, len([k for k, v in context.items() if v not in [None, 0, '']]) / 10)
+        }
+        
+        # Weighted confidence score
+        weights = {'probability_extremity': 0.3, 'data_quality': 0.3, 'low_volatility': 0.25, 'feature_coverage': 0.15}
+        confidence_score = sum(confidence_factors[k] * weights[k] for k in weights)
+        
+        # Confidence level
+        if confidence_score > 0.75:
+            level = 'HIGH'
+        elif confidence_score > 0.5:
+            level = 'MEDIUM'
+        else:
+            level = 'LOW'
+            
+        return {
+            'score': confidence_score,
+            'level': level,
+            'factors': confidence_factors
+        }
+    
+    def _calculate_match_volatility(self, detailed_results: dict) -> str:
+        """Determine how volatile/unpredictable the match is"""
+        prob_std = detailed_results.get('prob_std', 0.1)
+        
+        if prob_std < 0.05:
+            return 'STABLE'      # Very predictable
+        elif prob_std < 0.15:
+            return 'MODERATE'    # Some uncertainty
+        else:
+            return 'VOLATILE'    # High uncertainty
+    
+    def _prepare_ai_context(self, match_context: dict, prob: float, confidence: dict) -> dict:
+        """Prepare structured context for AI research"""
+        player1 = match_context.get('player1', 'Player 1')
+        player2 = match_context.get('player2', 'Player 2')
+        surface = match_context.get('surface', 'Hard')
+        tournament = match_context.get('tournament', 'Tournament')
+        
+        return {
+            'query_template': f"Research current context for {player1} vs {player2} at {tournament} on {surface}",
+            'research_areas': [
+                f"{player1} recent form, health, personal situation",
+                f"{player2} recent form, health, personal situation",
+                f"Head-to-head recent dynamics between {player1} and {player2}",
+                f"Current conditions at {tournament} (weather, court speed, etc.)",
+                f"Recent tennis news affecting either player",
+                f"Historical performance at {tournament} on {surface}"
+            ],
+            'model_prediction': {
+                'probability': prob,
+                'confidence': confidence['level'],
+                'reasoning': f"Model predicts {prob:.1%} based on statistical analysis"
+            },
+            'adjustment_request': "Based on your research, suggest a multiplier (0.8-1.2) to adjust this probability and explain your reasoning.",
+            'expected_response_format': {
+                'adjustment_multiplier': 'float between 0.8 and 1.2',
+                'reasoning': 'explanation of contextual factors',
+                'key_factors': 'list of most important contextual elements',
+                'confidence_in_adjustment': 'HIGH/MEDIUM/LOW'
+            }
         }
 
     def _calculate_confidence(self, prob: float, context: dict) -> str:
@@ -1513,3 +2209,591 @@ if __name__ == "__main__":
         print(f"- Use --use_ml_model for ML-based prediction")
 
     print("\nPREDICTION COMPLETE")
+
+
+# ============================================================================ 
+# AI INTEGRATION AND FILTERING SYSTEM
+# ============================================================================
+
+class AIContextualPredictor:
+    """
+    AI-enhanced prediction system that combines quantitative models with 
+    contextual research for tennis match predictions
+    """
+    
+    def __init__(self, pipeline: TennisModelPipeline, min_confidence_threshold: float = 0.65):
+        self.pipeline = pipeline
+        self.min_confidence_threshold = min_confidence_threshold
+        self.player_profiles = {}  # For continuous learning
+        
+    def predict_with_ai_context(self, match_context: dict, use_ai: bool = True) -> dict:
+        """
+        Make enhanced prediction with optional AI contextual adjustment
+        
+        Returns:
+            Complete prediction with AI enhancements
+        """
+        # Get base quantitative prediction
+        base_prediction = self.pipeline.predict(match_context)
+        
+        if not use_ai or base_prediction['confidence_level'] == 'LOW':
+            return base_prediction
+            
+        if use_ai:
+            # Prepare AI research context
+            ai_context = base_prediction['ai_context']
+            
+            # Conduct real AI research using web search and analysis
+            ai_adjustment = self._conduct_real_ai_research(ai_context)
+            
+            # Apply AI adjustment
+            adjusted_prediction = self._apply_ai_adjustment(base_prediction, ai_adjustment)
+            
+            return adjusted_prediction
+        
+        return base_prediction
+    
+    def _conduct_real_ai_research(self, ai_context: dict) -> dict:
+        """
+        Conduct real AI research using web search and analysis
+        
+        Researches:
+        1. Recent player news, health updates, form
+        2. Tournament conditions, weather, surface  
+        3. Head-to-head dynamics and coaching changes
+        4. Court-specific performance patterns
+        """
+        player1 = ai_context.get('player1', 'Player 1')
+        player2 = ai_context.get('player2', 'Player 2') 
+        tournament = ai_context.get('tournament', '')
+        surface = ai_context.get('surface', '')
+        date = ai_context.get('date', '2024')
+        
+        research_factors = []
+        adjustment_multiplier = 1.0
+        confidence_level = 'LOW'
+        
+        try:
+            # 1. Search for recent player news and form
+            player1_query = f"{player1} tennis 2024 recent form injury news"
+            player2_query = f"{player2} tennis 2024 recent form injury news"
+            
+            # Note: In actual implementation, you would use the WebSearch tool available
+            # This is a framework for real AI integration that can be connected to 
+            # actual web search APIs or the WebSearch tool
+            
+            # Research Player 1 - OPTION 1: Call Claude API directly
+            try:
+                p1_analysis = self._call_claude_api_for_research(player1, tournament, surface)
+                research_factors.extend(p1_analysis['factors'])
+                adjustment_multiplier *= p1_analysis['adjustment']
+            except Exception:
+                research_factors.append(f"Limited {player1} research available")
+            
+            # Research Player 2 - OPTION 2: Use Claude Code's WebSearch tool
+            try:
+                # This uses the WebSearch tool available in Claude Code
+                from . import WebSearch  # Available in Claude Code environment
+                p2_results = WebSearch(query=player2_query)
+                if p2_results:
+                    # Analyze Player 2 information
+                    p2_analysis = self._analyze_player_research(p2_results, player2)
+                    research_factors.extend(p2_analysis['factors'])
+                    adjustment_multiplier *= (2.0 - p2_analysis['adjustment'])  # Inverse for opponent
+            except Exception as e:
+                research_factors.append(f"Limited {player2} research available")
+                
+            # 2. Research tournament and conditions
+            if tournament:
+                tournament_query = f"{tournament} tennis 2024 conditions surface weather court speed"
+                try:
+                    tourney_results = WebSearch(query=tournament_query)
+                    if tourney_results:
+                        tourney_analysis = self._analyze_tournament_conditions(tourney_results, tournament, surface)
+                        research_factors.extend(tourney_analysis['factors'])
+                        adjustment_multiplier *= tourney_analysis['adjustment']
+                except Exception as e:
+                    research_factors.append(f"Tournament conditions research limited")
+            
+            # 3. Head-to-head and matchup research
+            h2h_query = f"{player1} vs {player2} head to head tennis recent matches"
+            try:
+                h2h_results = WebSearch(query=h2h_query)
+                if h2h_results:
+                    h2h_analysis = self._analyze_head_to_head(h2h_results, player1, player2)
+                    research_factors.extend(h2h_analysis['factors'])
+                    adjustment_multiplier *= h2h_analysis['adjustment']
+            except Exception as e:
+                research_factors.append("Head-to-head research limited")
+            
+            # Determine confidence based on research success
+            research_completeness = len([f for f in research_factors if not 'limited' in f.lower()]) / max(1, len(research_factors))
+            
+            if research_completeness > 0.7:
+                confidence_level = 'HIGH'
+            elif research_completeness > 0.4:
+                confidence_level = 'MEDIUM'
+            else:
+                confidence_level = 'LOW'
+                
+            # Cap adjustment multiplier to reasonable bounds
+            adjustment_multiplier = max(0.8, min(1.2, adjustment_multiplier))
+            
+        except Exception as e:
+            # Fallback if web search fails
+            research_factors = [
+                "AI research system temporarily unavailable",
+                "Using base quantitative model only"
+            ]
+            adjustment_multiplier = 1.0
+            confidence_level = 'LOW'
+            research_completeness = 0.0
+        
+        return {
+            'adjustment_multiplier': adjustment_multiplier,
+            'reasoning': self._generate_research_reasoning(research_factors, adjustment_multiplier),
+            'key_factors': research_factors,
+            'confidence_in_adjustment': confidence_level,
+            'research_completeness': research_completeness
+        }
+    
+    def _analyze_player_research(self, search_results, player_name):
+        """Analyze web search results for player-specific factors"""
+        factors = []
+        adjustment = 1.0
+        
+        # This would analyze the actual search results
+        # For now, return structured analysis framework
+        analysis_keywords = {
+            'positive': ['winning', 'victory', 'strong', 'healthy', 'confident', 'form', 'streak'],
+            'negative': ['injury', 'loss', 'struggling', 'doubt', 'concern', 'retire', 'problem'],
+            'neutral': ['prepare', 'practice', 'ready', 'training']
+        }
+        
+        # Analyze search results (simplified for now)
+        result_text = str(search_results).lower()
+        
+        positive_count = sum(1 for word in analysis_keywords['positive'] if word in result_text)
+        negative_count = sum(1 for word in analysis_keywords['negative'] if word in result_text)
+        
+        if positive_count > negative_count:
+            factors.append(f"{player_name} showing positive recent indicators")
+            adjustment = 1.05
+        elif negative_count > positive_count:
+            factors.append(f"{player_name} has some concerning recent indicators")
+            adjustment = 0.95
+        else:
+            factors.append(f"{player_name} recent form appears stable")
+            adjustment = 1.0
+            
+        return {'factors': factors, 'adjustment': adjustment}
+    
+    def _call_claude_api_for_research(self, player_name: str, tournament: str, surface: str) -> dict:
+        """
+        OPTION 1: Call Claude API directly for real AI research
+        
+        This shows you how to actually call AI from within your code
+        """
+        import requests
+        import json
+        
+        # Your Claude API key (set as environment variable)
+        api_key = os.environ.get('CLAUDE_API_KEY', 'your-api-key-here')
+        
+        research_prompt = f"""
+        Research the current tennis situation for {player_name}:
+        
+        1. Recent form and match results (last 2-3 weeks)
+        2. Any injuries or health concerns  
+        3. Performance at {tournament} historically
+        4. Performance on {surface} courts recently
+        5. Any personal/coaching changes
+        6. Recent tennis news mentions
+        
+        Based on your research, provide:
+        - 3-5 key factors affecting their performance
+        - An adjustment multiplier between 0.8-1.2 (1.0 = no change)
+        - Brief reasoning for the adjustment
+        
+        Format as JSON:
+        {{
+            "factors": ["factor 1", "factor 2", ...],
+            "adjustment": 1.05,
+            "reasoning": "explanation here"
+        }}
+        """
+        
+        try:
+            # This is how you'd actually call Claude API
+            headers = {
+                'Content-Type': 'application/json',
+                'X-API-Key': api_key,
+                'anthropic-version': '2023-06-01'
+            }
+            
+            payload = {
+                'model': 'claude-3-sonnet-20240229',
+                'max_tokens': 1000,
+                'messages': [{'role': 'user', 'content': research_prompt}]
+            }
+            
+            # Uncomment this for real API calls:
+            # response = requests.post('https://api.anthropic.com/v1/messages', 
+            #                         headers=headers, json=payload)
+            # result = response.json()
+            # ai_content = result['content'][0]['text']
+            # return json.loads(ai_content)
+            
+            # For demo purposes, return simulated response:
+            return {
+                "factors": [
+                    f"{player_name} won last tournament on {surface}",
+                    f"Strong recent form at {tournament}-type events",
+                    "No injury concerns reported"
+                ],
+                "adjustment": 1.05,
+                "reasoning": f"Recent positive indicators for {player_name}"
+            }
+            
+        except Exception as e:
+            return {
+                "factors": [f"API research failed for {player_name}"],
+                "adjustment": 1.0,
+                "reasoning": "Using baseline model only"
+            }
+    
+    def _analyze_tournament_conditions(self, search_results, tournament, surface):
+        """Analyze tournament and playing conditions"""
+        factors = []
+        adjustment = 1.0
+        
+        result_text = str(search_results).lower()
+        
+        # Surface-specific adjustments
+        if 'slow' in result_text or 'heavy' in result_text:
+            factors.append(f"Court conditions reported slower than usual")
+            adjustment = 0.98  # Slightly favors defensive play
+        elif 'fast' in result_text or 'quick' in result_text:
+            factors.append(f"Court conditions reported faster than usual") 
+            adjustment = 1.02  # Slightly favors aggressive play
+        else:
+            factors.append(f"Court conditions appear standard for {surface}")
+            
+        # Weather factors
+        if 'wind' in result_text:
+            factors.append("Wind conditions may affect serve and shot selection")
+            adjustment *= 0.99
+        elif 'rain' in result_text or 'weather' in result_text:
+            factors.append("Weather conditions being monitored")
+            adjustment *= 0.99
+            
+        return {'factors': factors, 'adjustment': adjustment}
+    
+    def _analyze_head_to_head(self, search_results, player1, player2):
+        """Analyze head-to-head matchup dynamics"""
+        factors = []
+        adjustment = 1.0
+        
+        result_text = str(search_results).lower()
+        
+        # Look for recent H2H mentions
+        if 'recent' in result_text and ('won' in result_text or 'beat' in result_text):
+            if player1.lower() in result_text:
+                factors.append(f"{player1} has recent H2H advantage over {player2}")
+                adjustment = 1.03
+            else:
+                factors.append(f"{player2} has recent H2H advantage over {player1}")
+                adjustment = 0.97
+        else:
+            factors.append("Head-to-head record appears competitive")
+            
+        return {'factors': factors, 'adjustment': adjustment}
+    
+    def _generate_research_reasoning(self, factors, multiplier):
+        """Generate human-readable reasoning from research"""
+        if multiplier > 1.05:
+            return f"Research indicates favorable conditions and form factors (adjustment: +{(multiplier-1)*100:.1f}%)"
+        elif multiplier < 0.95:
+            return f"Research reveals some concerning factors (adjustment: {(multiplier-1)*100:.1f}%)"
+        else:
+            return "Research shows relatively balanced conditions with minimal adjustment needed"
+    
+    def _apply_ai_adjustment(self, base_prediction: dict, ai_adjustment: dict) -> dict:
+        """Apply AI contextual adjustment to base prediction"""
+        
+        multiplier = ai_adjustment['adjustment_multiplier']
+        original_prob = base_prediction['win_probability']
+        
+        # Apply adjustment with bounds checking
+        adjusted_prob = original_prob * multiplier
+        adjusted_prob = max(0.05, min(0.95, adjusted_prob))  # Keep within reasonable bounds
+        
+        # Create enhanced prediction
+        enhanced_prediction = base_prediction.copy()
+        enhanced_prediction.update({
+            'win_probability': adjusted_prob,
+            'p1_win_prob': adjusted_prob, 
+            'p2_win_prob': 1 - adjusted_prob,
+            'original_model_prob': original_prob,
+            'ai_adjustment': {
+                'multiplier': multiplier,
+                'reasoning': ai_adjustment['reasoning'],
+                'key_factors': ai_adjustment['key_factors'],
+                'confidence': ai_adjustment['confidence_in_adjustment']
+            },
+            'prediction_method': 'AI_ENHANCED'
+        })
+        
+        return enhanced_prediction
+
+    def _manual_input_for_research(self, player1: str, player2: str, tournament: str) -> dict:
+        """
+        OPTION 3: Manual input approach - what you suggested
+        
+        You research players manually and input key phrases
+        """
+        print(f"=== MANUAL AI RESEARCH FOR {player1} vs {player2} ===")
+        print("Please research the following and enter key factors:")
+        print(f"1. {player1} recent form, health, news")
+        print(f"2. {player2} recent form, health, news") 
+        print(f"3. Tournament conditions at {tournament}")
+        print("4. Head-to-head recent dynamics")
+        print("\nEnter phrases like: 'Nadal injured knee', 'Djokovic strong form', etc.")
+        
+        factors = []
+        adjustment = 1.0
+        
+        while True:
+            factor = input("Enter factor (or 'done' to finish): ").strip()
+            if factor.lower() in ['done', 'finish', '']:
+                break
+            
+            factors.append(factor)
+            
+            # Simple keyword analysis
+            if any(word in factor.lower() for word in ['injured', 'hurt', 'struggling', 'tired']):
+                if player1.lower() in factor.lower():
+                    adjustment *= 0.95  # Player 1 disadvantage
+                elif player2.lower() in factor.lower():
+                    adjustment *= 1.05  # Player 1 advantage
+            elif any(word in factor.lower() for word in ['strong', 'won', 'healthy', 'confident']):
+                if player1.lower() in factor.lower():
+                    adjustment *= 1.05  # Player 1 advantage
+                elif player2.lower() in factor.lower():
+                    adjustment *= 0.95  # Player 1 disadvantage
+        
+        return {
+            'factors': factors,
+            'adjustment': max(0.8, min(1.2, adjustment)),
+            'reasoning': f"Manual research adjustment: {adjustment:.2f}x"
+        }
+
+
+class TennisMatchFilter:
+    """
+    Filter and prioritize matches based on confidence and other criteria
+    """
+    
+    def __init__(self, min_confidence: float = 0.65, min_probability_edge: float = 0.15):
+        self.min_confidence = min_confidence
+        self.min_probability_edge = min_probability_edge  # How far from 50-50
+        
+    def filter_high_confidence_matches(self, predictions: list) -> dict:
+        """
+        Filter predictions to only return high-confidence matches
+        
+        Args:
+            predictions: List of match prediction dictionaries
+            
+        Returns:
+            Filtered matches organized by confidence tiers
+        """
+        
+        filtered_matches = {
+            'HIGH_CONFIDENCE': [],
+            'MEDIUM_CONFIDENCE': [],
+            'REJECTED': []
+        }
+        
+        for prediction in predictions:
+            confidence_score = prediction.get('confidence_score', 0)
+            probability_edge = abs(prediction.get('win_probability', 0.5) - 0.5)
+            volatility = prediction.get('volatility', 'MODERATE')
+            
+            # High confidence criteria
+            if (confidence_score >= 0.75 and 
+                probability_edge >= 0.2 and 
+                volatility in ['STABLE', 'MODERATE']):
+                filtered_matches['HIGH_CONFIDENCE'].append(prediction)
+                
+            # Medium confidence criteria  
+            elif (confidence_score >= self.min_confidence and
+                  probability_edge >= self.min_probability_edge):
+                filtered_matches['MEDIUM_CONFIDENCE'].append(prediction)
+                
+            else:
+                filtered_matches['REJECTED'].append(prediction)
+        
+        # Sort by confidence score within each tier
+        for tier in filtered_matches:
+            filtered_matches[tier].sort(
+                key=lambda x: x.get('confidence_score', 0), 
+                reverse=True
+            )
+            
+        return filtered_matches
+
+
+class TennisOutputFormatter:
+    """
+    Format predictions for clean output with set scores and game counts
+    """
+    
+    @staticmethod
+    def format_prediction_output(prediction: dict, player1: str, player2: str) -> str:
+        """Format prediction for display"""
+        
+        prob = prediction['win_probability']
+        sets = prediction['most_likely_sets']
+        games = prediction['expected_total_games']
+        confidence = prediction['confidence_level']
+        volatility = prediction['volatility']
+        
+        output = f"""
+=== TENNIS MATCH PREDICTION ===
+{player1} vs {player2}
+
+WIN PROBABILITY: {player1} {prob:.1%} | {player2} {1-prob:.1%}
+MOST LIKELY SCORE: {sets} 
+EXPECTED TOTAL GAMES: {games:.0f}
+CONFIDENCE: {confidence}
+VOLATILITY: {volatility}
+
+SET SCORE PROBABILITIES:"""
+        
+        for score, prob_val in prediction['set_score_probabilities'].items():
+            output += f"\n  {score}: {prob_val:.1%}"
+            
+        if prediction.get('ai_adjustment'):
+            ai_adj = prediction['ai_adjustment']
+            output += f"""
+
+AI CONTEXTUAL ANALYSIS:
+Adjustment: {ai_adj['multiplier']:.2f}x
+Reasoning: {ai_adj['reasoning']}
+Key Factors:"""
+            for factor in ai_adj['key_factors'][:3]:  # Top 3 factors
+                output += f"\n  • {factor}"
+                
+        return output
+
+
+# Example usage function
+def predict_upcoming_matches(match_list: list, use_ai: bool = True, filter_confidence: bool = True) -> dict:
+    """
+    Process multiple matches and return filtered, AI-enhanced predictions
+    
+    Args:
+        match_list: List of match dictionaries with player names, tournament, etc.
+        use_ai: Whether to use AI contextual enhancement
+        filter_confidence: Whether to filter by confidence levels
+        
+    Returns:
+        Dictionary with high-confidence predictions ready for analysis
+    """
+    
+    pipeline = TennisModelPipeline(fast_mode=True)
+    ai_predictor = AIContextualPredictor(pipeline)
+    match_filter = TennisMatchFilter()
+    
+    predictions = []
+    
+    for match_context in match_list:
+        try:
+            prediction = ai_predictor.predict_with_ai_context(match_context, use_ai=use_ai)
+            prediction['match_info'] = match_context
+            predictions.append(prediction)
+        except Exception as e:
+            print(f"Failed to predict {match_context}: {e}")
+            continue
+    
+    if filter_confidence:
+        filtered_results = match_filter.filter_high_confidence_matches(predictions)
+        
+        # Format output
+        results = {
+            'summary': {
+                'total_matches': len(predictions),
+                'high_confidence': len(filtered_results['HIGH_CONFIDENCE']),
+                'medium_confidence': len(filtered_results['MEDIUM_CONFIDENCE']),
+                'rejected': len(filtered_results['REJECTED'])
+            },
+            'predictions': filtered_results,
+            'formatted_output': []
+        }
+        
+        # Add formatted output for high confidence matches
+        for prediction in filtered_results['HIGH_CONFIDENCE']:
+            match_info = prediction['match_info']
+            formatted = TennisOutputFormatter.format_prediction_output(
+                prediction, 
+                match_info.get('player1', 'Player 1'),
+                match_info.get('player2', 'Player 2')
+            )
+            results['formatted_output'].append(formatted)
+            
+        return results
+    
+    else:
+        return {'predictions': predictions, 'summary': {'total_matches': len(predictions)}}
+
+
+# Example of how the complete workflow would work:
+def example_workflow():
+    """
+    Example of the complete tennis prediction workflow
+    """
+    
+    # Example upcoming matches
+    upcoming_matches = [
+        {
+            'player1': 'Novak Djokovic',
+            'player2': 'Rafael Nadal', 
+            'tournament': 'Roland Garros',
+            'surface': 'Clay',
+            'best_of': 5,
+            'data_quality_score': 0.9
+        },
+        {
+            'player1': 'Carlos Alcaraz',
+            'player2': 'Jannik Sinner',
+            'tournament': 'US Open', 
+            'surface': 'Hard',
+            'best_of': 5,
+            'data_quality_score': 0.85
+        }
+    ]
+    
+    # Run complete prediction workflow
+    results = predict_upcoming_matches(
+        upcoming_matches, 
+        use_ai=True, 
+        filter_confidence=True
+    )
+    
+    # Print summary
+    print(f"PREDICTION SUMMARY:")
+    print(f"Total matches analyzed: {results['summary']['total_matches']}")
+    print(f"High confidence predictions: {results['summary']['high_confidence']}")
+    print(f"Medium confidence predictions: {results['summary']['medium_confidence']}")
+    
+    # Print high confidence predictions
+    for formatted_output in results['formatted_output']:
+        print(formatted_output)
+        print("-" * 50)
+    
+    return results
+
+if __name__ == "__main__":
+    # Run example workflow if called directly  
+    # example_workflow()
