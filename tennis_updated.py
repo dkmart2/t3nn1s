@@ -4125,17 +4125,29 @@ class JeffNotationParser:
 
 
 def extract_jeff_notation_features(player_canonical: str, gender: str, jeff_data: dict) -> dict:
-    """Extract features from Jeff's point-by-point notation for a specific player"""
+    """OPTIMIZED: Extract features from Jeff's point-by-point notation for a specific player"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'points_2020s' not in jeff_data[gender_key]:
         return {}
 
     points_df = jeff_data[gender_key]['points_2020s']
+    
+    # OPTIMIZATION: Pre-filter matches containing this player
+    # Use vectorized string operations to filter relevant matches
+    player_surname = player_canonical.split('_')[0]
+    
+    # Filter match_ids that likely contain this player
+    mask = points_df['match_id'].str.contains(player_surname, case=False, na=False)
+    relevant_points = points_df[mask]
+    
+    if relevant_points.empty:
+        return {}
+    
     parser = JeffNotationParser()
     player_points = []
 
-    for _, row in points_df.iterrows():
+    for _, row in relevant_points.iterrows():
         match_id = row.get('match_id', '')
         if not match_id:
             continue
@@ -4307,11 +4319,52 @@ def extract_jeff_notation_features(player_canonical: str, gender: str, jeff_data
 # DATA INTEGRATION
 # ============================================================================
 
-def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
-    """Add Jeff notation features to the historical dataset"""
-    print("Integrating Jeff notation features...")
+def integrate_jeff_notation_into_pipeline_batched(historical_data, jeff_data):
+    """OPTIMIZED: Add Jeff notation features using batch processing like Step 5"""
+    print("=== BATCHED JEFF NOTATION FEATURE EXTRACTION ===")
     
-    # Add Jeff notation feature columns
+    # Get all unique players
+    all_players = set()
+    all_players.update(historical_data['winner_canonical'].dropna().unique())
+    all_players.update(historical_data['loser_canonical'].dropna().unique())
+    all_players = sorted(list(all_players))
+    
+    print(f"Found {len(all_players)} unique players for notation extraction")
+    
+    # Pre-compute notation features for each unique player ONCE
+    player_notation_cache = {}
+    
+    for i, player_canonical in enumerate(all_players):
+        if i % 50 == 0:
+            print(f"Pre-computing notation features for player {i + 1}/{len(all_players)}: {player_canonical}")
+        
+        try:
+            # Infer gender from dataset
+            player_matches = historical_data[
+                (historical_data['winner_canonical'] == player_canonical) |
+                (historical_data['loser_canonical'] == player_canonical)
+            ]
+            
+            if not player_matches.empty:
+                gender = player_matches['gender'].mode().iloc[0] if not player_matches['gender'].mode().empty else 'M'
+            else:
+                gender = 'M'
+            
+            # Extract notation features ONCE for this player
+            features = extract_jeff_notation_features(player_canonical, gender, jeff_data)
+            player_notation_cache[player_canonical] = features
+            
+        except Exception as e:
+            if i < 5:
+                print(f"Warning: Error extracting notation for {player_canonical}: {e}")
+            player_notation_cache[player_canonical] = {}
+    
+    print(f"✓ Pre-computed notation features for {len(player_notation_cache)} players")
+    
+    # Now map features to matches (fast dictionary lookup)
+    print("Mapping notation features to matches...")
+    
+    # Get feature names
     jeff_features = [
         'jeff_ace_rate', 'jeff_service_winner_rate', 'jeff_serve_rally_length',
         'jeff_serve_wide_pct', 'jeff_serve_body_pct', 'jeff_serve_center_pct',
@@ -4322,62 +4375,56 @@ def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
     ]
     
     # Add columns for winner and loser
+    new_columns = {}
     for feature in jeff_features:
         for prefix in ['winner', 'loser']:
             col_name = f"{prefix}_{feature}"
             if col_name not in historical_data.columns:
-                historical_data[col_name] = np.nan
+                new_columns[col_name] = np.nan
     
+    if new_columns:
+        new_df = pd.DataFrame(new_columns, index=historical_data.index)
+        historical_data = pd.concat([historical_data, new_df], axis=1)
+    
+    # Batch update using vectorized operations
     matches_updated = 0
-    total_matches = len(historical_data)
     
     for idx, row in historical_data.iterrows():
-        if idx % 100 == 0:
-            print(f"Processing Jeff notation for match {idx}/{total_matches}")
-            
+        if idx % 1000 == 0:
+            print(f"Mapping notation features: {idx}/{len(historical_data)}")
+        
         # Skip if already has Jeff notation features
         if pd.notna(row.get('winner_jeff_ace_rate')):
             continue
-            
-        try:
-            winner_canonical = row.get('winner_canonical', '')
-            loser_canonical = row.get('loser_canonical', '')
-            gender = row.get('gender', 'M')
-            
-            if not winner_canonical or not loser_canonical:
-                continue
-                
-            # Extract features for winner
-            winner_jeff_features = extract_jeff_notation_features(
-                winner_canonical, gender, jeff_data
-            )
-            
-            # Extract features for loser  
-            loser_jeff_features = extract_jeff_notation_features(
-                loser_canonical, gender, jeff_data
-            )
-            
-            # Update dataframe
-            for feature_name, feature_value in winner_jeff_features.items():
-                col_name = f'winner_{feature_name}'
-                if col_name in historical_data.columns:
-                    historical_data.at[idx, col_name] = feature_value
-                    
-            for feature_name, feature_value in loser_jeff_features.items():
-                col_name = f'loser_{feature_name}'
-                if col_name in historical_data.columns:
-                    historical_data.at[idx, col_name] = feature_value
-            
-            if winner_jeff_features or loser_jeff_features:
-                matches_updated += 1
-                
-        except Exception as e:
-            if idx < 10:  # Only log first few errors
-                print(f"Error processing Jeff notation for match {idx}: {e}")
-            continue
+        
+        winner_canonical = row.get('winner_canonical', '')
+        loser_canonical = row.get('loser_canonical', '')
+        
+        # Fast lookup from cache
+        winner_features = player_notation_cache.get(winner_canonical, {})
+        loser_features = player_notation_cache.get(loser_canonical, {})
+        
+        # Update dataframe
+        for feature_name, feature_value in winner_features.items():
+            col_name = f'winner_{feature_name}'
+            if col_name in historical_data.columns:
+                historical_data.at[idx, col_name] = feature_value
+        
+        for feature_name, feature_value in loser_features.items():
+            col_name = f'loser_{feature_name}'
+            if col_name in historical_data.columns:
+                historical_data.at[idx, col_name] = feature_value
+        
+        if winner_features or loser_features:
+            matches_updated += 1
     
-    print(f"Updated {matches_updated} matches with Jeff notation features")
+    print(f"✓ Updated {matches_updated} matches with Jeff notation features")
     return historical_data
+
+
+def integrate_jeff_notation_into_pipeline(historical_data, jeff_data):
+    """Wrapper that calls the optimized batched version"""
+    return integrate_jeff_notation_into_pipeline_batched(historical_data, jeff_data)
 
 
 # ============================================================================

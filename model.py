@@ -8,13 +8,21 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import brier_score_loss, log_loss
 from sklearn.calibration import CalibratedClassifierCV
 import lightgbm as lgb
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 import joblib
 import os
 import warnings
 import logging
 import argparse
 from dataclasses import dataclass
+
+# Import live odds engine
+try:
+    from live_odds_engine import LiveOddsEngine, EdgeOpportunity, MatchState, MarketOdds
+    LIVE_ODDS_AVAILABLE = True
+except ImportError:
+    LIVE_ODDS_AVAILABLE = False
+    print("Live odds engine not available - install dependencies or check live_odds_engine.py")
 
 # Suppress sklearn warnings globally
 warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
@@ -698,15 +706,207 @@ class PointLevelModel:
             return np.array([0.65] * len(point_features))  # Fallback
 
 
+class MomentumHMM:
+    """
+    Hidden Markov Model for momentum tracking
+    
+    States: [COLD, NEUTRAL, HOT] for each player
+    Observations: Point win/loss outcomes
+    """
+    
+    def __init__(self):
+        # HMM states: 0=COLD, 1=NEUTRAL, 2=HOT (for server)
+        self.n_states = 3
+        self.states = ['COLD', 'NEUTRAL', 'HOT']
+        
+        # Initial state probabilities (start neutral)
+        self.initial_probs = np.array([0.2, 0.6, 0.2])
+        
+        # Transition matrix: tendency to stay in same state
+        self.transition_matrix = np.array([
+            [0.6, 0.3, 0.1],  # From COLD
+            [0.2, 0.6, 0.2],  # From NEUTRAL
+            [0.1, 0.3, 0.6]   # From HOT
+        ])
+        
+        # Emission probabilities: P(win point | momentum state)
+        self.emission_probs = np.array([
+            [0.7, 0.3],  # COLD: P(lose), P(win)
+            [0.5, 0.5],  # NEUTRAL: P(lose), P(win)
+            [0.3, 0.7]   # HOT: P(lose), P(win)
+        ])
+        
+        self.momentum_window = 10  # Track last N points
+        self.game_importance_weights = {
+            'break_point': 2.0,
+            'game_point': 1.5,
+            'set_point': 1.8,
+            'match_point': 2.5,
+            'deuce': 1.2,
+            'other': 1.0
+        }
+    
+    def viterbi_decode(self, observations, importance_weights=None):
+        """
+        Use Viterbi algorithm to find most likely momentum state sequence
+        
+        Args:
+            observations: List of 0s (point lost) and 1s (point won)
+            importance_weights: Optional weights for each point
+        
+        Returns:
+            Most likely final momentum state and probability
+        """
+        if not observations:
+            return 1, 0.5  # NEUTRAL state, 50% confidence
+        
+        T = len(observations)
+        
+        # Initialize Viterbi tables
+        viterbi = np.zeros((self.n_states, T))
+        path = np.zeros((self.n_states, T), dtype=int)
+        
+        # Apply importance weights to emission probabilities if provided
+        if importance_weights is not None:
+            emission_probs = self.emission_probs.copy()
+            for t, weight in enumerate(importance_weights):
+                if weight > 1.0:  # Important point
+                    # Amplify the emission probability differences
+                    for state in range(self.n_states):
+                        obs = observations[t]
+                        emission_probs[state, obs] = min(0.95, emission_probs[state, obs] * weight)
+                        emission_probs[state, 1-obs] = max(0.05, emission_probs[state, 1-obs] / weight)
+        else:
+            emission_probs = self.emission_probs
+        
+        # Initialize first observation
+        for state in range(self.n_states):
+            viterbi[state, 0] = self.initial_probs[state] * emission_probs[state, observations[0]]
+        
+        # Forward pass
+        for t in range(1, T):
+            for state in range(self.n_states):
+                # Find most likely previous state
+                transition_scores = viterbi[:, t-1] * self.transition_matrix[:, state]
+                path[state, t] = np.argmax(transition_scores)
+                viterbi[state, t] = np.max(transition_scores) * emission_probs[state, observations[t]]
+        
+        # Backward pass - find best path
+        states = np.zeros(T, dtype=int)
+        states[T-1] = np.argmax(viterbi[:, T-1])
+        final_prob = np.max(viterbi[:, T-1])
+        
+        for t in range(T-2, -1, -1):
+            states[t] = path[states[t+1], t+1]
+        
+        return states[-1], final_prob
+    
+    def calculate_momentum_score(self, recent_points, point_contexts=None):
+        """
+        Calculate momentum score from recent point sequence
+        
+        Args:
+            recent_points: List of point outcomes (1=server wins, 0=server loses)
+            point_contexts: Optional list of point importance contexts
+        
+        Returns:
+            Momentum score between -1 (very cold) and 1 (very hot)
+        """
+        if len(recent_points) < 2:
+            return 0.0
+        
+        # Limit to momentum window
+        points = recent_points[-self.momentum_window:]
+        contexts = point_contexts[-self.momentum_window:] if point_contexts else None
+        
+        # Calculate importance weights
+        importance_weights = None
+        if contexts:
+            importance_weights = [
+                self.game_importance_weights.get(ctx, 1.0) for ctx in contexts
+            ]
+        
+        # Get most likely momentum state
+        final_state, confidence = self.viterbi_decode(points, importance_weights)
+        
+        # Convert state to momentum score
+        momentum_mapping = {0: -0.7, 1: 0.0, 2: 0.7}  # COLD, NEUTRAL, HOT
+        base_momentum = momentum_mapping[final_state]
+        
+        # Adjust by confidence
+        momentum_score = base_momentum * confidence
+        
+        # Additional recent trend analysis
+        if len(points) >= 4:
+            recent_trend = np.mean(points[-4:]) - np.mean(points[:-4]) if len(points) > 4 else 0
+            momentum_score += recent_trend * 0.3  # Small trend bonus
+        
+        return np.clip(momentum_score, -1.0, 1.0)
+    
+    def get_momentum_adjustment(self, momentum_score):
+        """
+        Convert momentum score to probability adjustment
+        
+        Args:
+            momentum_score: Score between -1 and 1
+        
+        Returns:
+            Probability adjustment (typically ±0.02 to ±0.05)
+        """
+        # Research suggests momentum effects are real but small (2-5%)
+        max_adjustment = 0.05
+        return momentum_score * max_adjustment
+    
+    def predict_next_point_adjustment(self, recent_points, point_contexts=None):
+        """
+        Predict adjustment for next point based on momentum
+        
+        Returns:
+            Dictionary with momentum analysis and adjustment
+        """
+        momentum_score = self.calculate_momentum_score(recent_points, point_contexts)
+        adjustment = self.get_momentum_adjustment(momentum_score)
+        
+        # Determine momentum state for interpretation
+        if momentum_score > 0.3:
+            state_desc = "HOT"
+        elif momentum_score < -0.3:
+            state_desc = "COLD"
+        else:
+            state_desc = "NEUTRAL"
+        
+        return {
+            'momentum_score': momentum_score,
+            'state': state_desc,
+            'probability_adjustment': adjustment,
+            'points_analyzed': len(recent_points),
+            'confidence': abs(momentum_score)
+        }
+
+
 class StateDependentModifiers:
-    """Momentum and pressure adjustments"""
+    """Momentum and pressure adjustments with HMM integration"""
 
     def __init__(self):
         self.momentum_decay = 0.85
         self.pressure_multipliers = DEFAULT_PRESSURE_MULTIPLIERS.copy()
+        self.momentum_hmm = MomentumHMM()
 
     def calculate_momentum(self, recent_points: list, player: int) -> float:
-        """Calculate momentum based on recent point outcomes"""
+        """Calculate momentum using HMM model"""
+        if not recent_points:
+            return 0.0
+
+        # Convert point outcomes to binary for player perspective
+        player_outcomes = [1 if p == player else 0 for p in recent_points]
+        
+        # Use HMM to calculate momentum score
+        momentum_result = self.momentum_hmm.predict_next_point_adjustment(player_outcomes)
+        
+        return momentum_result['probability_adjustment']
+
+    def calculate_momentum_legacy(self, recent_points: list, player: int) -> float:
+        """Legacy momentum calculation for comparison"""
         if not recent_points:
             return 0.0
 
@@ -1318,8 +1518,13 @@ class MatchLevelEnsemble:
         }
 
     def engineer_match_features(self, match_data: pd.DataFrame) -> pd.DataFrame:
-        """Create match-level features - FIXED VERSION"""
+        """Create match-level features - FIXED VERSION WITH REAL ELO"""
         features = pd.DataFrame(index=match_data.index)
+
+        # Initialize ELO system if not loaded
+        if not hasattr(self, 'elo_system'):
+            self.elo_system = EloIntegration()
+            self.elo_system.load_real_elo_data()
 
         # Helper function to safely extract numeric features
         def safe_numeric_series(data, col_name, default_val):
@@ -1332,12 +1537,32 @@ class MatchLevelEnsemble:
         features['rank_diff'] = (safe_numeric_series(match_data, 'WRank', 100) -
                                  safe_numeric_series(match_data, 'LRank', 100))
 
-        # Add some realistic variation to ELO if not present
-        if 'winner_elo' not in match_data.columns:
-            features['elo_diff'] = np.random.normal(0, 100, len(match_data))
-        else:
+        # FIXED: Use actual ELO from your data or compute from real ELO system
+        if 'winner_elo' in match_data.columns and 'loser_elo' in match_data.columns:
+            # Use pre-computed ELO if available
             features['elo_diff'] = (safe_numeric_series(match_data, 'winner_elo', 1500) -
                                     safe_numeric_series(match_data, 'loser_elo', 1500))
+        else:
+            # Compute ELO on-the-fly from player names and surface
+            winner_elos = []
+            loser_elos = []
+            surfaces = match_data.get('surface', 'Hard')
+            
+            for idx, row in match_data.iterrows():
+                surface = surfaces if isinstance(surfaces, str) else row.get('surface', 'Hard')
+                winner = row.get('winner', row.get('winner_canonical', ''))
+                loser = row.get('loser', row.get('loser_canonical', ''))
+                
+                winner_elo = self.elo_system.get_player_elo(winner, surface)
+                loser_elo = self.elo_system.get_player_elo(loser, surface)
+                
+                winner_elos.append(winner_elo)
+                loser_elos.append(loser_elo)
+            
+            features['elo_diff'] = pd.Series(winner_elos, index=match_data.index) - pd.Series(loser_elos, index=match_data.index)
+        
+        # Add ELO probability using standard formula
+        features['elo_prob'] = 1 / (1 + 10**(-features['elo_diff']/400))
 
         features['h2h_balance'] = safe_numeric_series(match_data, 'p1_h2h_win_pct', 0.5) - 0.5
 
@@ -1476,9 +1701,10 @@ class MatchLevelEnsemble:
 class TennisModelPipeline:
     """Complete pipeline orchestrator"""
 
-    def __init__(self, config: ModelConfig = None, fast_mode=False):
+    def __init__(self, config: ModelConfig = None, fast_mode=False, enable_live_odds=False):
         self.config = config or ModelConfig()
         self.fast_mode = fast_mode
+        self.enable_live_odds = enable_live_odds and LIVE_ODDS_AVAILABLE
 
         # Override config for fast mode
         if fast_mode and not config:
@@ -1491,6 +1717,16 @@ class TennisModelPipeline:
         self.match_ensemble = MatchLevelEnsemble(fast_mode=fast_mode, config=self.config)
         self.simulation_model = None
         self.n_simulations = self.config.n_simulations
+        
+        # Initialize live odds engine if enabled
+        self.live_odds_engine = None
+        if self.enable_live_odds:
+            self.live_odds_engine = LiveOddsEngine(
+                model=self,
+                update_frequency=30,  # 30-second updates
+                max_concurrent_matches=20
+            )
+            print("✅ Live odds engine initialized")
 
     def train(self, point_data: pd.DataFrame, match_data: pd.DataFrame):
         """Train all components"""
@@ -1528,7 +1764,7 @@ class TennisModelPipeline:
             warnings.warn(f"Momentum learning failed: {e}")
 
         # Use default ensemble weights
-        print("Using default ensemble weights: simulation=0.6, direct=0.4")
+        print("Using dynamic ensemble weights based on data quality")
 
     def predict(self, match_context: dict, best_of: Optional[int] = None, fast_mode: bool = False) -> dict:
         """Make comprehensive prediction with set scores, game scores, and confidence"""
@@ -1557,9 +1793,16 @@ class TennisModelPipeline:
         except Exception as e:
             direct_prob = 0.5
 
-        # Calculate ensemble probability
+        # Calculate dynamic ensemble weights based on data quality and context
+        ensemble_weights = self._calculate_dynamic_weights(match_context, detailed_results)
+        
+        # Calculate ensemble probability with dynamic weights
         sim_prob = detailed_results['win_probability']
-        ensemble_prob = 0.6 * sim_prob + 0.4 * direct_prob
+        ensemble_prob = (
+            ensemble_weights['simulation'] * sim_prob + 
+            ensemble_weights['direct'] * direct_prob +
+            ensemble_weights['elo'] * match_context.get('elo_prob', 0.5)
+        )
         
         # Calculate confidence and volatility
         confidence_score = self._calculate_confidence_score(ensemble_prob, match_context, detailed_results)
@@ -1594,8 +1837,63 @@ class TennisModelPipeline:
             'data_quality': match_context.get('data_quality_score', 0.5),
             
             # AI context preparation
-            'ai_context': self._prepare_ai_context(match_context, ensemble_prob, confidence_score)
+            'ai_context': self._prepare_ai_context(match_context, ensemble_prob, confidence_score),
+            
+            # Dynamic ensemble information
+            'ensemble_weights': ensemble_weights,
+            'elo_component': match_context.get('elo_prob', 0.5)
         }
+    
+    def _calculate_dynamic_weights(self, match_context: dict, detailed_results: dict) -> dict:
+        """Calculate dynamic ensemble weights based on data quality and context"""
+        
+        # Base weights
+        weights = {
+            'simulation': 0.4,
+            'direct': 0.3, 
+            'elo': 0.3
+        }
+        
+        # Adjust based on data quality
+        data_quality = match_context.get('data_quality_score', 0.5)
+        
+        if data_quality > 0.8:  # High quality data - trust ML more
+            weights['direct'] += 0.1
+            weights['elo'] -= 0.05
+            weights['simulation'] -= 0.05
+        elif data_quality < 0.3:  # Poor data quality - rely more on ELO
+            weights['elo'] += 0.15
+            weights['direct'] -= 0.1
+            weights['simulation'] -= 0.05
+        
+        # Adjust based on match importance (more simulation for important matches)
+        tournament = match_context.get('tournament', '').lower()
+        if any(slam in tournament for slam in ['wimbledon', 'us open', 'french open', 'australian open']):
+            weights['simulation'] += 0.1
+            weights['direct'] -= 0.05
+            weights['elo'] -= 0.05
+        
+        # Adjust based on volatility (less simulation for volatile matches)
+        volatility = detailed_results.get('prob_std', 0.1)
+        if volatility > 0.2:  # High volatility
+            weights['elo'] += 0.1
+            weights['simulation'] -= 0.1
+        
+        # Adjust based on player rankings (ELO more reliable for top players)
+        p1_rank = match_context.get('p1_ranking', 100)
+        p2_rank = match_context.get('p2_ranking', 100)
+        avg_rank = (p1_rank + p2_rank) / 2 if p1_rank and p2_rank else 100
+        
+        if avg_rank < 20:  # Top players - ELO more reliable
+            weights['elo'] += 0.05
+            weights['direct'] -= 0.025
+            weights['simulation'] -= 0.025
+        
+        # Normalize weights to sum to 1
+        total_weight = sum(weights.values())
+        normalized_weights = {k: v/total_weight for k, v in weights.items()}
+        
+        return normalized_weights
         
     def _run_detailed_simulation(self, match_context: dict, best_of: int = 3, n_sims: int = 100) -> dict:
         """Run detailed simulation to get set scores and game counts"""
@@ -1772,7 +2070,8 @@ class TennisModelPipeline:
                 'simulation_model': self.simulation_model,
                 'config': self.config,
                 'fast_mode': self.fast_mode,
-                'n_simulations': self.n_simulations
+                'n_simulations': self.n_simulations,
+                'enable_live_odds': self.enable_live_odds
             }
             joblib.dump(model_data, path)
             print(f"Model saved to {path}")
@@ -1789,9 +2088,208 @@ class TennisModelPipeline:
             self.config = model_data.get('config', ModelConfig())
             self.fast_mode = model_data.get('fast_mode', False)
             self.n_simulations = model_data.get('n_simulations', 1000)
+            self.enable_live_odds = model_data.get('enable_live_odds', False)
+            
+            # Reinitialize live odds engine if it was enabled
+            if self.enable_live_odds and LIVE_ODDS_AVAILABLE:
+                self.live_odds_engine = LiveOddsEngine(
+                    model=self,
+                    update_frequency=30,
+                    max_concurrent_matches=20
+                )
             print(f"Model loaded from {path}")
         except Exception as e:
             print(f"Failed to load model: {e}")
+    
+    def batch_predict(self, match_contexts: list, fast_mode: bool = True) -> dict:
+        """
+        Efficiently process multiple matches for daily predictions
+        
+        Args:
+            match_contexts: List of match context dictionaries
+            fast_mode: Use faster processing for large batches
+        
+        Returns:
+            Dictionary with predictions organized by importance tiers
+        """
+        print(f"Processing {len(match_contexts)} matches in batch mode...")
+        
+        # Tier matches by importance
+        tiers = self._tier_matches_by_importance(match_contexts)
+        
+        results = {
+            'tier_A': [],  # Most important - full analysis
+            'tier_B': [],  # Important - enhanced analysis  
+            'tier_C': [],  # Standard - base model only
+            'summary': {
+                'total_matches': len(match_contexts),
+                'tier_A_count': len(tiers['A']),
+                'tier_B_count': len(tiers['B']),
+                'tier_C_count': len(tiers['C'])
+            }
+        }
+        
+        # Process Tier A (5-10 matches) - Full treatment
+        for match in tiers['A']:
+            try:
+                prediction = self.predict(match, fast_mode=False)
+                prediction['tier'] = 'A'
+                prediction['match_info'] = match
+                results['tier_A'].append(prediction)
+            except Exception as e:
+                print(f"Failed to process Tier A match: {e}")
+                continue
+        
+        # Process Tier B (20-30 matches) - Enhanced but faster
+        for match in tiers['B']:
+            try:
+                prediction = self.predict(match, fast_mode=True)
+                prediction['tier'] = 'B' 
+                prediction['match_info'] = match
+                results['tier_B'].append(prediction)
+            except Exception as e:
+                print(f"Failed to process Tier B match: {e}")
+                continue
+        
+        # Process Tier C (50+ matches) - Base model only  
+        tier_c_batch = self._batch_predict_base_model(tiers['C'])
+        results['tier_C'] = tier_c_batch
+        
+        print(f"Batch processing complete: {results['summary']}")
+        return results
+    
+    def _tier_matches_by_importance(self, matches: list) -> dict:
+        """
+        Tier matches by importance for efficient resource allocation
+        
+        Returns:
+            Dictionary with matches organized by tiers A, B, C
+        """
+        tiers = {'A': [], 'B': [], 'C': []}
+        
+        for match in matches:
+            score = 0
+            
+            # Tournament importance
+            tournament = match.get('tournament', '').lower()
+            if any(slam in tournament for slam in ['wimbledon', 'us open', 'french open', 'australian open']):
+                score += 10
+            elif 'masters' in tournament or 'atp 1000' in tournament:
+                score += 7
+            elif 'atp 500' in tournament or '500' in tournament:
+                score += 4
+            elif 'atp 250' in tournament or '250' in tournament:
+                score += 2
+            
+            # Round importance
+            round_name = match.get('round', '').lower()
+            if 'final' in round_name or round_name == 'f':
+                score += 8
+            elif 'semifinal' in round_name or round_name == 'sf':
+                score += 6
+            elif 'quarterfinal' in round_name or round_name == 'qf':
+                score += 4
+            elif 'r16' in round_name:
+                score += 2
+            
+            # Player ranking importance
+            p1_rank = match.get('p1_ranking', 100)
+            p2_rank = match.get('p2_ranking', 100) 
+            if p1_rank and p2_rank:
+                avg_rank = (p1_rank + p2_rank) / 2
+                if avg_rank <= 10:
+                    score += 6
+                elif avg_rank <= 25:
+                    score += 4  
+                elif avg_rank <= 50:
+                    score += 2
+            
+            # Data quality
+            data_quality = match.get('data_quality_score', 0.5)
+            if data_quality > 0.8:
+                score += 2
+            elif data_quality < 0.3:
+                score -= 1
+            
+            # Assign tier based on total score
+            if score >= 15:
+                tiers['A'].append(match)
+            elif score >= 8:
+                tiers['B'].append(match)
+            else:
+                tiers['C'].append(match)
+        
+        return tiers
+    
+    def _batch_predict_base_model(self, matches: list) -> list:
+        """
+        Efficient batch processing for Tier C matches using base model only
+        """
+        predictions = []
+        
+        if not matches:
+            return predictions
+        
+        print(f"Processing {len(matches)} Tier C matches with base model...")
+        
+        # Convert to DataFrame for efficient processing
+        match_df = pd.DataFrame(matches)
+        
+        try:
+            # Use match ensemble for batch prediction
+            match_features = self.match_ensemble.engineer_match_features(match_df)
+            
+            for i, (_, match) in enumerate(match_df.iterrows()):
+                try:
+                    # Get base probability from match ensemble
+                    features_row = match_features.iloc[i:i+1]
+                    base_prob = self.match_ensemble.predict(features_row)
+                    
+                    # Simple prediction result
+                    prediction = {
+                        'win_probability': float(base_prob),
+                        'p1_win_prob': float(base_prob),
+                        'p2_win_prob': float(1 - base_prob),
+                        'confidence_level': 'MEDIUM' if abs(base_prob - 0.5) > 0.1 else 'LOW',
+                        'tier': 'C',
+                        'prediction_method': 'BASE_MODEL_ONLY',
+                        'match_info': match.to_dict()
+                    }
+                    
+                    predictions.append(prediction)
+                    
+                except Exception as e:
+                    # Fallback prediction
+                    prediction = {
+                        'win_probability': 0.5,
+                        'p1_win_prob': 0.5,
+                        'p2_win_prob': 0.5,
+                        'confidence_level': 'LOW',
+                        'tier': 'C',
+                        'prediction_method': 'FALLBACK',
+                        'error': str(e),
+                        'match_info': match.to_dict()
+                    }
+                    predictions.append(prediction)
+                    continue
+                    
+        except Exception as e:
+            print(f"Batch processing failed: {e}")
+            # Create fallback predictions
+            for match in matches:
+                prediction = {
+                    'win_probability': 0.5,
+                    'p1_win_prob': 0.5,
+                    'p2_win_prob': 0.5,
+                    'confidence_level': 'LOW',
+                    'tier': 'C',
+                    'prediction_method': 'FALLBACK',
+                    'error': str(e),
+                    'match_info': match
+                }
+                predictions.append(prediction)
+        
+        return predictions
 
 
 
@@ -2642,6 +3140,54 @@ class TennisMatchFilter:
             )
             
         return filtered_matches
+    
+    # ============ LIVE ODDS ENGINE METHODS ============
+    
+    async def start_live_tracking(self, match_ids: List[str]):
+        """Start live odds tracking for specified matches"""
+        if not self.live_odds_engine:
+            raise ValueError("Live odds engine not enabled. Initialize with enable_live_odds=True")
+        
+        await self.live_odds_engine.start_live_tracking(match_ids)
+        print(f"🚀 Started live tracking for {len(match_ids)} matches")
+    
+    def update_live_match_state(self, match_id: str, score_update: Dict):
+        """Update live match state with current score"""
+        if not self.live_odds_engine:
+            return
+        
+        self.live_odds_engine.update_match_state(match_id, score_update)
+    
+    def get_live_odds(self, match_id: str = None) -> Dict:
+        """Get current live odds"""
+        if not self.live_odds_engine:
+            return {}
+        
+        return self.live_odds_engine.get_current_odds(match_id)
+    
+    def get_betting_edges(self, match_id: str = None, min_edge: float = 5.0) -> List[EdgeOpportunity]:
+        """Get identified betting edges above threshold"""
+        if not self.live_odds_engine:
+            return []
+        
+        return self.live_odds_engine.get_identified_edges(match_id, min_edge)
+    
+    def get_live_dashboard(self) -> Dict:
+        """Get live odds dashboard data"""
+        if not self.live_odds_engine:
+            return {
+                'status': 'Live odds engine not enabled',
+                'active_matches': 0,
+                'edges_found': 0
+            }
+        
+        return self.live_odds_engine.get_dashboard_data()
+    
+    def stop_live_tracking(self):
+        """Stop live odds tracking"""
+        if self.live_odds_engine:
+            self.live_odds_engine.stop_tracking()
+            print("⏹️  Live tracking stopped")
 
 
 class TennisOutputFormatter:
@@ -2797,3 +3343,4 @@ def example_workflow():
 if __name__ == "__main__":
     # Run example workflow if called directly  
     # example_workflow()
+    pass
