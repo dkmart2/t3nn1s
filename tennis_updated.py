@@ -60,8 +60,7 @@ logger = logging.getLogger(__name__)
 SESSION = requests.Session()
 
 # API Configuration
-API_KEY = os.getenv("API_TENNIS_KEY") or API_TENNIS_KEY
-BASE = BASE_API_URL
+# Remove redundant variable assignments - use imported variables directly
 CACHE_API = Path.home() / ".api_tennis_cache"
 CACHE_API.mkdir(exist_ok=True)
 
@@ -90,9 +89,9 @@ def flatten_fixtures(fixtures: list[dict]) -> pd.DataFrame:
 
 def api_call(method: str, **params):
     """Wrapper for API-Tennis endpoints. Uses query param "method" rather than path."""
-    url = BASE
+    url = BASE_API_URL
     params["method"] = method
-    params["APIkey"] = API_KEY
+    params["APIkey"] = API_TENNIS_KEY
     logging.info(f"API request URL: {url} with params: {params}")
     try:
         response = SESSION.get(url, params=params)
@@ -574,11 +573,92 @@ def load_jeff_comprehensive_data():
     return data
 
 
+def load_jeff_match_records():
+    """Load Jeff's match records from charting-m-matches.csv and charting-w-matches.csv"""
+    jeff_matches = []
+    # Files are in the working directory
+    working_dir = Path.cwd()
+    
+    print("=== LOADING JEFF'S MATCH RECORDS ===")
+    
+    # Load men's matches
+    men_match_file = working_dir / "charting-m-matches.csv"
+    if men_match_file.exists():
+        try:
+            df_men = pd.read_csv(men_match_file)
+            print(f"Loaded men's Jeff matches: {len(df_men)} records")
+            df_men['gender'] = 'M'
+            jeff_matches.append(df_men)
+        except Exception as e:
+            print(f"Error loading men's Jeff matches: {e}")
+    else:
+        print(f"Men's Jeff matches file not found: {men_match_file}")
+    
+    # Load women's matches  
+    women_match_file = working_dir / "charting-w-matches.csv"
+    if women_match_file.exists():
+        try:
+            df_women = pd.read_csv(women_match_file)
+            print(f"Loaded women's Jeff matches: {len(df_women)} records") 
+            df_women['gender'] = 'W'
+            jeff_matches.append(df_women)
+        except Exception as e:
+            print(f"Error loading women's Jeff matches: {e}")
+    else:
+        print(f"Women's Jeff matches file not found: {women_match_file}")
+    
+    if not jeff_matches:
+        print("No Jeff match records loaded")
+        return pd.DataFrame()
+    
+    # Combine and standardize format
+    combined_jeff = pd.concat(jeff_matches, ignore_index=True)
+    print(f"Total Jeff match records: {len(combined_jeff)}")
+    
+    # Standardize column names to match tennis data format
+    column_mapping = {
+        'Player 1': 'Winner',
+        'Player 2': 'Loser', 
+        'Date': 'date',
+        'Tournament': 'Tournament',
+        'Surface': 'Surface',
+        'Round': 'Round'
+    }
+    
+    # Apply column mapping
+    for old_col, new_col in column_mapping.items():
+        if old_col in combined_jeff.columns:
+            combined_jeff[new_col] = combined_jeff[old_col]
+    
+    # Convert date format
+    if 'date' in combined_jeff.columns:
+        combined_jeff['date'] = pd.to_datetime(combined_jeff['date'], errors='coerce')
+    
+    # Add source rank (Tennis Abstract = 1, highest priority)
+    combined_jeff['source_rank'] = 1
+    
+    # Add year for consistency
+    if 'date' in combined_jeff.columns:
+        combined_jeff['year'] = combined_jeff['date'].dt.year
+    
+    # Generate composite_id to prevent dropna filtering
+    if 'Winner' in combined_jeff.columns and 'Loser' in combined_jeff.columns and 'date' in combined_jeff.columns:
+        combined_jeff['composite_id'] = (
+            combined_jeff['Winner'].astype(str) + "_" + 
+            combined_jeff['Loser'].astype(str) + "_" + 
+            combined_jeff['date'].dt.strftime('%Y%m%d')
+        )
+    
+    print(f"✓ Jeff match records processed with source_rank=1")
+    return combined_jeff
+
+
 def load_all_tennis_data():
-    """Load tennis data from all years"""
+    """Load tennis data from all years including Jeff's match records"""
     base_path = os.path.expanduser("~/Desktop/data")
     all_data = []
 
+    # Load Excel data (source_rank=3)
     for gender_name, gender_code in [("tennisdata_men", "M"), ("tennisdata_women", "W")]:
         gender_path = os.path.join(base_path, gender_name)
         if os.path.exists(gender_path):
@@ -588,12 +668,30 @@ def load_all_tennis_data():
                     df = load_excel_data(file_path)
                     if not df.empty and 'Date' in df.columns:
                         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+                        df['date'] = df['Date']  # Standardize column name
                         df['gender'] = gender_code
                         df['year'] = df['Date'].dt.year
+                        df['source_rank'] = 3  # Excel files have lowest priority
                         all_data.append(df)
 
+    # Load Jeff's match records (source_rank=1)  
+    jeff_data = load_jeff_match_records()
+    if not jeff_data.empty:
+        all_data.append(jeff_data)
+
     if all_data:
-        return pd.concat(all_data, ignore_index=True)
+        combined_data = pd.concat(all_data, ignore_index=True)
+        print(f"✓ Combined tennis data: {len(combined_data)} total matches")
+        
+        # Show source breakdown
+        if 'source_rank' in combined_data.columns:
+            source_counts = combined_data['source_rank'].value_counts().sort_index()
+            print("Data source breakdown:")
+            for rank, count in source_counts.items():
+                source_name = {1: "Tennis Abstract/Jeff", 2: "API-Tennis", 3: "Excel files"}
+                print(f"  - {source_name.get(rank, f'Unknown ({rank})')}: {count} matches")
+        
+        return combined_data
     else:
         return pd.DataFrame()
 
@@ -2638,7 +2736,7 @@ def extract_sv_break_total_features(player_canonical, gender, jeff_data):
 
 
 def extract_matches_features(player_canonical, gender, jeff_data):
-    """EXPANDED: Extract 45+ features from Matches metadata (was 1 placeholder)"""
+    """EXPANDED: Extract 45+ features from matches metadata (was 1 placeholder)"""
     gender_key = 'men' if gender == 'M' else 'women'
 
     if gender_key not in jeff_data or 'matches' not in jeff_data[gender_key]:
@@ -6599,6 +6697,7 @@ def integrate_api_tennis_data_incremental(historical_data):
     if "source_rank" not in df.columns:
         df["source_rank"] = 3
     else:
+        # Only fill NaN values, preserve existing source_rank values
         df["source_rank"] = df["source_rank"].fillna(3)
 
     if 'date' in df.columns:
@@ -7011,6 +7110,7 @@ def extract_all_player_features_batched(tennis_data, jeff_data, weighted_default
     """Pre-compute features for all unique players, then map to matches"""
 
     print("=== BATCHED PLAYER FEATURE EXTRACTION ===")
+    import sys  # For flush
 
     # Get all unique players
     all_players = set()
@@ -7019,13 +7119,15 @@ def extract_all_player_features_batched(tennis_data, jeff_data, weighted_default
     all_players = sorted(list(all_players))
 
     print(f"Found {len(all_players)} unique players across all matches")
+    sys.stdout.flush()  # Force output
 
     # Pre-compute features for each unique player
     player_features_cache = {}
 
     for i, player_canonical in enumerate(all_players):
-        if i % 50 == 0:
+        if i % 10 == 0:  # More frequent updates
             print(f"Pre-computing features for player {i + 1}/{len(all_players)}: {player_canonical}")
+            sys.stdout.flush()  # Force output
 
         try:
             # Infer gender from dataset (most common gender for this player)
