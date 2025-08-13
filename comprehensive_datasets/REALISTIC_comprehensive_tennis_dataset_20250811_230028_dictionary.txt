@@ -1,0 +1,81 @@
+REALISTIC COMPREHENSIVE TENNIS DATASET - DATA DICTIONARY
+==========================================================
+
+Created: 2025-08-11 23:00:28.384002
+Total unique matches: 10,181
+
+DATA SOURCES (actual contribution):
+- Main Dataset: 10,108 matches contributed
+- Tennis Abstract: 73 matches contributed
+
+FINAL SOURCE DISTRIBUTION (after deduplication):
+- tennis_abstract: 73 matches
+
+COLUMNS:
+- ATP
+- AvgL
+- AvgW
+- B365L
+- B365W
+- Best of
+- Charted by
+- Comment
+- Court
+- Date
+- Final TB?
+- L1
+- L2
+- L3
+- L4
+- L5
+- LPts
+- LRank
+- Location
+- Loser
+- Lsets
+- MaxL
+- MaxW
+- PSL
+- PSW
+- Pl 1 hand
+- Pl 2 hand
+- Player 1
+- Player 2
+- Player_1
+- Player_2
+- Round
+- Series
+- Surface
+- Tier
+- Time
+- Tournament
+- Umpire
+- W1
+- W2
+- W3
+- W4
+- W5
+- WPts
+- WRank
+- WTA
+- Winner
+- Wsets
+- composite_id
+- comprehensive_records
+- date
+- gender
+- has_detailed_stats
+- has_point_data
+- match_id
+- round
+- source
+- source_rank
+- tournament
+- url
+- year
+
+HONEST ASSESSMENT:
+- Tennis Abstract: Only 73 matches scraped (not all 196 cached URLs)
+- API-Tennis: Limited by API rate limits and key availability
+- Main Dataset: Existing comprehensive data, source composition unclear
+- This represents what was actually achievable, not theoretical integration

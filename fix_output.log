@@ -1,0 +1,38 @@
+2025-08-12 05:35:00,198 - INFO - Building fixed master database...
+2025-08-12 05:35:00,199 - INFO - Loading Jeff comprehensive data from CSV files...
+2025-08-12 05:35:01,337 - INFO - Loaded points_2020s: 461897 records
+2025-08-12 05:35:02,659 - INFO - Loaded points_2010s: 339718 records
+2025-08-12 05:35:04,282 - INFO - Loaded points_to_2009: 325126 records
+2025-08-12 05:35:04,943 - INFO - Loaded return_outcomes: 271988 records
+2025-08-12 05:35:05,227 - INFO - Loaded shot_types: 308946 records
+2025-08-12 05:35:06,183 - INFO - Loaded points: 263897 records
+2025-08-12 05:35:09,835 - INFO - Loaded existing master with 6604 matches
+2025-08-12 05:35:09,838 - INFO - Loading Jeff matches with metadata...
+2025-08-12 05:35:09,889 - INFO - Loaded 6639 men matches with Surface/Score data
+2025-08-12 05:35:09,908 - INFO - Loaded 3491 women matches with Surface/Score data
+2025-08-12 05:35:09,910 - INFO - Loading Tennis Abstract data...
+2025-08-12 05:35:10,003 - INFO - Loaded 131799 Tennis Abstract records
+2025-08-12 05:35:18,002 - INFO - Processed 73 Tennis Abstract matches
+2025-08-12 05:35:18,874 - INFO - Built reconciler with 6621 Jeff IDs and 0 TA mappings
+2025-08-12 05:37:03,401 - INFO - Created master database with 6604 matches and 881 columns
+Traceback (most recent call last):
+  File "/Users/danielkim/Desktop/t3nn1s/fix_master_database.py", line 538, in <module>
+    master_df = build_fixed_master_database()
+  File "/Users/danielkim/Desktop/t3nn1s/fix_master_database.py", line 503, in build_fixed_master_database
+    json.dump(metadata, f, indent=2)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/anaconda3/lib/python3.13/json/__init__.py", line 179, in dump
+    for chunk in iterable:
+                 ^^^^^^^^
+  File "/opt/anaconda3/lib/python3.13/json/encoder.py", line 433, in _iterencode
+    yield from _iterencode_dict(o, _current_indent_level)
+  File "/opt/anaconda3/lib/python3.13/json/encoder.py", line 407, in _iterencode_dict
+    yield from chunks
+  File "/opt/anaconda3/lib/python3.13/json/encoder.py", line 407, in _iterencode_dict
+    yield from chunks
+  File "/opt/anaconda3/lib/python3.13/json/encoder.py", line 440, in _iterencode
+    o = _default(o)
+  File "/opt/anaconda3/lib/python3.13/json/encoder.py", line 180, in default
+    raise TypeError(f'Object of type {o.__class__.__name__} '
+                    f'is not JSON serializable')
+TypeError: Object of type int64 is not JSON serializable

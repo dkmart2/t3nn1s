@@ -1,0 +1,84 @@
+FINAL COMPREHENSIVE TENNIS DATASET - DATA DICTIONARY
+=======================================================
+
+Created: 2025-08-11 22:46:11.639996
+Total unique matches: 10,181
+
+DATA SOURCES (in order of integration):
+- Main Dataset: 10,108 matches
+- Tennis Abstract: 73 matches
+
+FINAL SOURCE DISTRIBUTION:
+- tennis_abstract: 73 matches
+
+COLUMNS:
+- ATP
+- AvgL
+- AvgW
+- B365L
+- B365W
+- Best of
+- Charted by
+- Comment
+- Court
+- Date
+- Final TB?
+- L1
+- L2
+- L3
+- L4
+- L5
+- LPts
+- LRank
+- Location
+- Loser
+- Lsets
+- MaxL
+- MaxW
+- PSL
+- PSW
+- Pl 1 hand
+- Pl 2 hand
+- Player 1
+- Player 2
+- Player_1
+- Player_2
+- Round
+- Series
+- Surface
+- Tier
+- Time
+- Tournament
+- Umpire
+- W1
+- W2
+- W3
+- W4
+- W5
+- WPts
+- WRank
+- WTA
+- Winner
+- Wsets
+- composite_id
+- comprehensive_records
+- date
+- gender
+- has_detailed_stats
+- has_point_data
+- match_id
+- round
+- source
+- source_rank
+- tournament
+- url
+- year
+
+SOURCE RANKING (1 = highest quality, deduplication preference):
+1. Tennis Abstract: Point-by-point volunteer-charted data
+2. Jeff Sackmann: Historical matches with point sequences
+3. Excel files: Basic match results
+
+DATA QUALITY FEATURES:
+- has_detailed_stats: 73 matches
+- has_point_data: 73 matches

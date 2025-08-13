@@ -1,0 +1,10 @@
+2025-08-12 23:36:09,327 - INFO - Building complete master database with all enhancements...
+2025-08-12 23:36:17,565 - INFO - Loaded fixed database: 6604 matches
+2025-08-12 23:36:17,779 - INFO - Processing match 0/6604
+Traceback (most recent call last):
+  File "/Users/danielkim/Desktop/t3nn1s/complete_master_database.py", line 411, in <module>
+    enhanced_df = build_complete_master_database()
+  File "/Users/danielkim/Desktop/t3nn1s/complete_master_database.py", line 276, in build_complete_master_database
+    if jeff_points is not None and not pd.isna(jeff_points):
+                                       ~~~~~~~^^^^^^^^^^^^^
+ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()

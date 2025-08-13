@@ -1,0 +1,268 @@
+2025-08-10 00:25:48,236 INFO:root:load_jeff_comprehensive_data:570: Stored original match_ids for men matches
+2025-08-10 00:25:48,236 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-matches.csv: 6639 records
+2025-08-10 00:25:48,929 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-points-2020s.csv: 461897 records
+2025-08-10 00:25:49,071 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-Overview.csv: 49928 records
+2025-08-10 00:25:49,162 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ServeBasics.csv: 39779 records
+2025-08-10 00:25:49,784 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ReturnOutcomes.csv: 271988 records
+2025-08-10 00:25:50,448 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ReturnDepth.csv: 236950 records
+2025-08-10 00:25:50,584 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-KeyPointsServe.csv: 53048 records
+2025-08-10 00:25:50,705 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-KeyPointsReturn.csv: 53048 records
+2025-08-10 00:25:50,886 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-NetPoints.csv: 52101 records
+2025-08-10 00:25:50,982 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-Rally.csv: 84877 records
+2025-08-10 00:25:51,088 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ServeDirection.csv: 39779 records
+2025-08-10 00:25:51,199 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ServeInfluence.csv: 26527 records
+2025-08-10 00:25:51,326 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ShotDirection.csv: 52639 records
+2025-08-10 00:25:51,653 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ShotDirOutcomes.csv: 153266 records
+2025-08-10 00:25:52,345 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ShotTypes.csv: 308946 records
+2025-08-10 00:25:52,487 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-SnV.csv: 44578 records
+2025-08-10 00:25:52,912 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-SvBreakSplit.csv: 144684 records
+2025-08-10 00:25:53,264 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-SvBreakTotal.csv: 144684 records
+2025-08-10 00:25:53,280 INFO:root:load_jeff_comprehensive_data:570: Stored original match_ids for women matches
+2025-08-10 00:25:53,280 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-matches.csv: 3491 records
+2025-08-10 00:25:53,605 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-points-2020s.csv: 263897 records
+2025-08-10 00:25:53,666 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-Overview.csv: 22998 records
+2025-08-10 00:25:53,716 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ServeBasics.csv: 20898 records
+2025-08-10 00:25:54,007 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ReturnOutcomes.csv: 144687 records
+2025-08-10 00:25:54,261 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ReturnDepth.csv: 124187 records
+2025-08-10 00:25:54,327 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-KeyPointsServe.csv: 27856 records
+2025-08-10 00:25:54,389 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-KeyPointsReturn.csv: 27854 records
+2025-08-10 00:25:54,449 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-NetPoints.csv: 26628 records
+2025-08-10 00:25:54,501 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-Rally.csv: 44755 records
+2025-08-10 00:25:54,556 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ServeDirection.csv: 20898 records
+2025-08-10 00:25:54,600 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ServeInfluence.csv: 13932 records
+2025-08-10 00:25:54,661 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ShotDirection.csv: 27408 records
+2025-08-10 00:25:54,829 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ShotDirOutcomes.csv: 76060 records
+2025-08-10 00:25:55,258 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ShotTypes.csv: 152698 records
+2025-08-10 00:25:55,272 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-SnV.csv: 5104 records
+2025-08-10 00:25:55,438 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-SvBreakSplit.csv: 76301 records
+2025-08-10 00:25:55,599 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-SvBreakTotal.csv: 76301 records
+2025-08-10 00:25:55,672 INFO:__main__:load_checkpoint:167: ✓ Loaded checkpoint from 2025-08-10T00:25:29.307651
+2025-08-10 00:25:55,672 INFO:__main__:load_checkpoint:168:   Stage: processing
+2025-08-10 00:25:55,672 INFO:__main__:load_checkpoint:169:   Processed: 0 matches
+2025-08-10 00:25:55,673 INFO:__main__:run_with_monitoring:223: 
+============================================================
+2025-08-10 00:25:55,673 INFO:__main__:run_with_monitoring:224: RESUMING TENNIS DATA PIPELINE
+2025-08-10 00:25:55,673 INFO:__main__:run_with_monitoring:225: ============================================================
+2025-08-10 00:25:55,673 INFO:__main__:run_with_monitoring:238: 
+⚙️ Stage 2: Processing historical data...
+2025-08-10 00:25:55,673 INFO:__main__:run_with_monitoring:239: NOTE: This is the long-running step (120+ hours)
+2025-08-10 00:25:55,673 INFO:root:generate_comprehensive_historical_data_optimized:7048: === STARTING OPTIMIZED DATA GENERATION ===
+2025-08-10 00:25:55,673 INFO:root:generate_comprehensive_historical_data_optimized:7087: === REAL DATA MODE ===
+2025-08-10 00:25:55,673 INFO:root:generate_comprehensive_historical_data_optimized:7089: Step 1: Loading Jeff's comprehensive data...
+2025-08-10 00:25:55,688 INFO:root:load_jeff_comprehensive_data:570: Stored original match_ids for men matches
+2025-08-10 00:25:55,688 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-matches.csv: 6639 records
+2025-08-10 00:25:56,311 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-points-2020s.csv: 461897 records
+2025-08-10 00:25:56,456 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-Overview.csv: 49928 records
+2025-08-10 00:25:56,549 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ServeBasics.csv: 39779 records
+2025-08-10 00:25:57,124 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ReturnOutcomes.csv: 271988 records
+2025-08-10 00:25:57,623 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ReturnDepth.csv: 236950 records
+2025-08-10 00:25:57,739 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-KeyPointsServe.csv: 53048 records
+2025-08-10 00:25:57,847 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-KeyPointsReturn.csv: 53048 records
+2025-08-10 00:25:57,967 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-NetPoints.csv: 52101 records
+2025-08-10 00:25:58,100 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-Rally.csv: 84877 records
+2025-08-10 00:25:58,326 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ServeDirection.csv: 39779 records
+2025-08-10 00:25:58,426 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ServeInfluence.csv: 26527 records
+2025-08-10 00:25:58,538 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ShotDirection.csv: 52639 records
+2025-08-10 00:25:58,862 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ShotDirOutcomes.csv: 153266 records
+2025-08-10 00:25:59,518 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-ShotTypes.csv: 308946 records
+2025-08-10 00:25:59,629 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-SnV.csv: 44578 records
+2025-08-10 00:25:59,937 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-SvBreakSplit.csv: 144684 records
+2025-08-10 00:26:00,426 INFO:root:load_jeff_comprehensive_data:573: Loaded men/charting-m-stats-SvBreakTotal.csv: 144684 records
+2025-08-10 00:26:00,444 INFO:root:load_jeff_comprehensive_data:570: Stored original match_ids for women matches
+2025-08-10 00:26:00,444 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-matches.csv: 3491 records
+2025-08-10 00:26:00,852 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-points-2020s.csv: 263897 records
+2025-08-10 00:26:00,920 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-Overview.csv: 22998 records
+2025-08-10 00:26:00,973 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ServeBasics.csv: 20898 records
+2025-08-10 00:26:01,442 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ReturnOutcomes.csv: 144687 records
+2025-08-10 00:26:01,762 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ReturnDepth.csv: 124187 records
+2025-08-10 00:26:01,859 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-KeyPointsServe.csv: 27856 records
+2025-08-10 00:26:01,938 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-KeyPointsReturn.csv: 27854 records
+2025-08-10 00:26:02,002 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-NetPoints.csv: 26628 records
+2025-08-10 00:26:02,060 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-Rally.csv: 44755 records
+2025-08-10 00:26:02,115 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ServeDirection.csv: 20898 records
+2025-08-10 00:26:02,156 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ServeInfluence.csv: 13932 records
+2025-08-10 00:26:02,217 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ShotDirection.csv: 27408 records
+2025-08-10 00:26:02,381 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ShotDirOutcomes.csv: 76060 records
+2025-08-10 00:26:02,687 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-ShotTypes.csv: 152698 records
+2025-08-10 00:26:02,705 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-SnV.csv: 5104 records
+2025-08-10 00:26:02,874 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-SvBreakSplit.csv: 76301 records
+2025-08-10 00:26:03,029 INFO:root:load_jeff_comprehensive_data:573: Loaded women/charting-w-stats-SvBreakTotal.csv: 76301 records
+2025-08-10 00:26:03,029 INFO:root:generate_comprehensive_historical_data_optimized:7095: ✓ Jeff data loaded successfully
+2025-08-10 00:26:03,029 INFO:root:generate_comprehensive_historical_data_optimized:7096:   - Men's datasets: 18
+2025-08-10 00:26:03,029 INFO:root:generate_comprehensive_historical_data_optimized:7097:   - Women's datasets: 18
+2025-08-10 00:26:03,029 INFO:root:generate_comprehensive_historical_data_optimized:7102: Step 2: Calculating weighted defaults...
+2025-08-10 00:26:03,133 INFO:root:generate_comprehensive_historical_data_optimized:7108: ✓ Weighted defaults calculated
+2025-08-10 00:26:03,133 INFO:root:generate_comprehensive_historical_data_optimized:7109:   - Men's features: 87
+2025-08-10 00:26:03,133 INFO:root:generate_comprehensive_historical_data_optimized:7110:   - Women's features: 87
+2025-08-10 00:26:03,133 INFO:root:generate_comprehensive_historical_data_optimized:7115: Step 3: Loading tennis match data...
+2025-08-10 00:26:03,559 INFO:root:load_excel_data:520: Loaded 1267 matches from /Users/danielkim/Desktop/data/tennisdata_men/2020_m.xlsx
+2025-08-10 00:26:03,943 INFO:root:load_excel_data:520: Loaded 2489 matches from /Users/danielkim/Desktop/data/tennisdata_men/2021_m.xlsx
+2025-08-10 00:26:04,369 INFO:root:load_excel_data:520: Loaded 2632 matches from /Users/danielkim/Desktop/data/tennisdata_men/2022_m.xlsx
+2025-08-10 00:26:04,895 INFO:root:load_excel_data:520: Loaded 2703 matches from /Users/danielkim/Desktop/data/tennisdata_men/2023_m.xlsx
+2025-08-10 00:26:05,483 INFO:root:load_excel_data:520: Loaded 2703 matches from /Users/danielkim/Desktop/data/tennisdata_men/2024_m.xlsx
+2025-08-10 00:26:05,754 INFO:root:load_excel_data:520: Loaded 1439 matches from /Users/danielkim/Desktop/data/tennisdata_men/2025_m.xlsx
+2025-08-10 00:26:05,926 INFO:root:load_excel_data:520: Loaded 1055 matches from /Users/danielkim/Desktop/data/tennisdata_women/2020_w.xlsx
+2025-08-10 00:26:06,303 INFO:root:load_excel_data:520: Loaded 2447 matches from /Users/danielkim/Desktop/data/tennisdata_women/2021_w.xlsx
+2025-08-10 00:26:06,675 INFO:root:load_excel_data:520: Loaded 2369 matches from /Users/danielkim/Desktop/data/tennisdata_women/2022_w.xlsx
+2025-08-10 00:26:07,071 INFO:root:load_excel_data:520: Loaded 2491 matches from /Users/danielkim/Desktop/data/tennisdata_women/2023_w.xlsx
+2025-08-10 00:26:07,456 INFO:root:load_excel_data:520: Loaded 2490 matches from /Users/danielkim/Desktop/data/tennisdata_women/2024_w.xlsx
+2025-08-10 00:26:07,669 INFO:root:load_excel_data:520: Loaded 1366 matches from /Users/danielkim/Desktop/data/tennisdata_women/2025_w.xlsx
+2025-08-10 00:26:07,680 INFO:root:generate_comprehensive_historical_data_optimized:7121: ✓ Tennis data loaded: 25451 matches
+2025-08-10 00:26:07,680 INFO:root:generate_comprehensive_historical_data_optimized:7132: Step 4: Processing tennis data...
+2025-08-10 00:26:08,654 INFO:root:generate_comprehensive_historical_data_optimized:7154: ✓ Tennis data processed
+2025-08-10 00:26:08,654 INFO:root:generate_comprehensive_historical_data_optimized:7160: Step 5: Extracting Jeff features (OPTIMIZED BATCHED)...
+2025-08-10 01:12:54,927 INFO:root:generate_comprehensive_historical_data_optimized:7163: ✓ Jeff features extracted via batched approach
+2025-08-10 01:12:54,932 INFO:root:generate_comprehensive_historical_data_optimized:7169: Step 6: Adding Jeff notation features...
+Warning: Could not import functions from tennis_updated: cannot import name 'load_from_cache_with_scraping' from 'tennis_updated' (consider renaming '/Users/danielkim/Desktop/t3nn1s/tennis_updated.py' if it has the same name as a library you intended to import)
+--- Djokovic Overview ---
+Features extracted: 34
+Total points: 85977
+Ace rate: 7.0%
+First serve %: 65.3%
+Return win %: 40.5%
+Winner/Error ratio: 1.00
+Break point save %: 63.8%
+Point win %: 53.4%
+All features: ['ov_ace_rate', 'ov_aces', 'ov_bh_effectiveness', 'ov_bh_error_pct', 'ov_bh_winner_pct', 'ov_bp_faced', 'ov_bp_save_pct', 'ov_bp_saved', 'ov_df_rate', 'ov_double_faults', 'ov_fh_effectiveness', 'ov_fh_error_pct', 'ov_fh_winner_pct', 'ov_first_in', 'ov_first_serve_pct', 'ov_first_serve_win_pct', 'ov_first_won', 'ov_point_win_pct', 'ov_return_pts', 'ov_return_pts_won', 'ov_return_win_pct', 'ov_second_serve_win_pct', 'ov_second_won', 'ov_serve_dominance', 'ov_serve_pts', 'ov_total_points', 'ov_total_points_won', 'ov_unforced_bh', 'ov_unforced_fh', 'ov_unforced_total', 'ov_winner_error_ratio', 'ov_winners_bh', 'ov_winners_fh', 'ov_winners_total']
+
+--- Sinner Overview ---
+Features extracted: 34
+Total points: 34725
+Ace rate: 7.8%
+First serve %: 60.0%
+Return win %: 40.2%
+Winner/Error ratio: 0.95
+Break point save %: 65.7%
+Point win %: 53.4%
+All features: ['ov_ace_rate', 'ov_aces', 'ov_bh_effectiveness', 'ov_bh_error_pct', 'ov_bh_winner_pct', 'ov_bp_faced', 'ov_bp_save_pct', 'ov_bp_saved', 'ov_df_rate', 'ov_double_faults', 'ov_fh_effectiveness', 'ov_fh_error_pct', 'ov_fh_winner_pct', 'ov_first_in', 'ov_first_serve_pct', 'ov_first_serve_win_pct', 'ov_first_won', 'ov_point_win_pct', 'ov_return_pts', 'ov_return_pts_won', 'ov_return_win_pct', 'ov_second_serve_win_pct', 'ov_second_won', 'ov_serve_dominance', 'ov_serve_pts', 'ov_total_points', 'ov_total_points_won', 'ov_unforced_bh', 'ov_unforced_fh', 'ov_unforced_total', 'ov_winner_error_ratio', 'ov_winners_bh', 'ov_winners_fh', 'ov_winners_total']
+
+--- Alcaraz Overview ---
+Features extracted: 34
+Total points: 29165
+Ace rate: 4.9%
+First serve %: 65.5%
+Return win %: 41.4%
+Winner/Error ratio: 1.06
+Break point save %: 62.2%
+Point win %: 53.1%
+All features: ['ov_ace_rate', 'ov_aces', 'ov_bh_effectiveness', 'ov_bh_error_pct', 'ov_bh_winner_pct', 'ov_bp_faced', 'ov_bp_save_pct', 'ov_bp_saved', 'ov_df_rate', 'ov_double_faults', 'ov_fh_effectiveness', 'ov_fh_error_pct', 'ov_fh_winner_pct', 'ov_first_in', 'ov_first_serve_pct', 'ov_first_serve_win_pct', 'ov_first_won', 'ov_point_win_pct', 'ov_return_pts', 'ov_return_pts_won', 'ov_return_win_pct', 'ov_second_serve_win_pct', 'ov_second_won', 'ov_serve_dominance', 'ov_serve_pts', 'ov_total_points', 'ov_total_points_won', 'ov_unforced_bh', 'ov_unforced_fh', 'ov_unforced_total', 'ov_winner_error_ratio', 'ov_winners_bh', 'ov_winners_fh', 'ov_winners_total']
+
+=== BATCHED PLAYER FEATURE EXTRACTION ===
+Found 418 unique players across all matches
+Pre-computing features for player 1/418: a_a
+Pre-computing features for player 51/418: c_j
+Pre-computing features for player 101/418: e_s
+Pre-computing features for player 151/418: i_h
+Pre-computing features for player 201/418: ka_p
+Pre-computing features for player 251/418: n_f
+Pre-computing features for player 301/418: r_j
+Pre-computing features for player 351/418: t_z
+Pre-computing features for player 401/418: y_p
+✓ Pre-computed features for 418 players
+Mapping features to matches...
+Found 330 features per player
+✓ Mapped features to 25451 matches
+Final shape: (25451, 708)
+Integrating Jeff notation features...
+Processing Jeff notation for match 0/25451
+Processing Jeff notation for match 100/25451
+Processing Jeff notation for match 200/25451
+Processing Jeff notation for match 300/25451
+Processing Jeff notation for match 400/25451
+Processing Jeff notation for match 500/25451
+Processing Jeff notation for match 600/25451
+Processing Jeff notation for match 700/25451
+Processing Jeff notation for match 800/25451
+Processing Jeff notation for match 900/25451
+Processing Jeff notation for match 1000/25451
+Processing Jeff notation for match 1100/25451
+Processing Jeff notation for match 1200/25451
+Processing Jeff notation for match 1300/25451
+Processing Jeff notation for match 1400/25451
+Processing Jeff notation for match 1500/25451
+Processing Jeff notation for match 1600/25451
+Processing Jeff notation for match 1700/25451
+Processing Jeff notation for match 1800/25451
+Processing Jeff notation for match 1900/25451
+Processing Jeff notation for match 2000/25451
+Processing Jeff notation for match 2100/25451
+Processing Jeff notation for match 2200/25451
+Processing Jeff notation for match 2300/25451
+Processing Jeff notation for match 2400/25451
+Processing Jeff notation for match 2500/25451
+Processing Jeff notation for match 2600/25451
+Processing Jeff notation for match 2700/25451
+Processing Jeff notation for match 2800/25451
+Processing Jeff notation for match 2900/25451
+Processing Jeff notation for match 3000/25451
+Processing Jeff notation for match 3100/25451
+Processing Jeff notation for match 3200/25451
+Processing Jeff notation for match 3300/25451
+Processing Jeff notation for match 3400/25451
+Processing Jeff notation for match 3500/25451
+Processing Jeff notation for match 3600/25451
+Processing Jeff notation for match 3700/25451
+Processing Jeff notation for match 3800/25451
+Processing Jeff notation for match 3900/25451
+Processing Jeff notation for match 4000/25451
+Processing Jeff notation for match 4100/25451
+Processing Jeff notation for match 4200/25451
+Processing Jeff notation for match 4300/25451
+Processing Jeff notation for match 4400/25451
+Processing Jeff notation for match 4500/25451
+Processing Jeff notation for match 4600/25451
+Processing Jeff notation for match 4700/25451
+Processing Jeff notation for match 4800/25451
+Processing Jeff notation for match 4900/25451
+Processing Jeff notation for match 5000/25451
+Processing Jeff notation for match 5100/25451
+Processing Jeff notation for match 5200/25451
+Processing Jeff notation for match 5300/25451
+Processing Jeff notation for match 5400/25451
+Processing Jeff notation for match 5500/25451
+Processing Jeff notation for match 5600/25451
+Processing Jeff notation for match 5700/25451
+Processing Jeff notation for match 5800/25451
+Processing Jeff notation for match 5900/25451
+Processing Jeff notation for match 6000/25451
+Processing Jeff notation for match 6100/25451
+Processing Jeff notation for match 6200/25451
+Processing Jeff notation for match 6300/25451
+Processing Jeff notation for match 6400/25451
+Processing Jeff notation for match 6500/25451
+Processing Jeff notation for match 6600/25451
+Processing Jeff notation for match 6700/25451
+Processing Jeff notation for match 6800/25451
+Processing Jeff notation for match 6900/25451
+Processing Jeff notation for match 7000/25451
+Processing Jeff notation for match 7100/25451
+Processing Jeff notation for match 7200/25451
+Processing Jeff notation for match 7300/25451
+Processing Jeff notation for match 7400/25451
+Processing Jeff notation for match 7500/25451
+Processing Jeff notation for match 7600/25451
+Processing Jeff notation for match 7700/25451
+Processing Jeff notation for match 7800/25451
+Processing Jeff notation for match 7900/25451
+Processing Jeff notation for match 8000/25451
+Processing Jeff notation for match 8100/25451
+Processing Jeff notation for match 8200/25451
+Processing Jeff notation for match 8300/25451
+Processing Jeff notation for match 8400/25451
+Processing Jeff notation for match 8500/25451
+Processing Jeff notation for match 8600/25451
+Processing Jeff notation for match 8700/25451
+Processing Jeff notation for match 8800/25451
+Processing Jeff notation for match 8900/25451
+Processing Jeff notation for match 9000/25451
+Processing Jeff notation for match 9100/25451
+Processing Jeff notation for match 9200/25451
+Processing Jeff notation for match 9300/25451
+Processing Jeff notation for match 9400/25451
+Processing Jeff notation for match 9500/25451
+Processing Jeff notation for match 9600/25451
+Processing Jeff notation for match 9700/25451
+Processing Jeff notation for match 9800/25451
+Processing Jeff notation for match 9900/25451
+Processing Jeff notation for match 10000/25451
+Processing Jeff notation for match 10100/25451
